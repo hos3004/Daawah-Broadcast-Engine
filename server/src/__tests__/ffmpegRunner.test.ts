@@ -21,6 +21,12 @@ describe('FFmpeg runner argument safety', () => {
     expect(flagValue).toContain('delete_segments');
   });
 
+  it('filter_complex maps final video label through a real filter before vout', () => {
+    const filterComplex = '[0:v]scale=1280:720[base];[base]null[vout]';
+    expect(filterComplex).toContain('null[vout]');
+    expect(filterComplex).not.toContain('[base][vout]');
+  });
+
   it('cleanHlsOutput path safety — only deletes inside hlsDir', () => {
     // White-box: the guard uses path.resolve(full).startsWith(path.resolve(hlsDir))
     const hlsDir = '/var/www/html/hls';

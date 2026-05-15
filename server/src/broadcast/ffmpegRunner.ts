@@ -386,7 +386,7 @@ function buildBroadcastCommand(date: string, current: PlaylistItem | null): { ar
     inputIdx++;
   }
 
-  filterComplex += `;${lastLabel}[vout]`;
+  filterComplex += `;${lastLabel}null[vout]`;
 
   const args: string[] = [
     '-y',
