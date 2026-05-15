@@ -218,3 +218,114 @@ npm run build (web)    → vite build ✓
 | WebSocket auth hardening | Not blocking for smoke test |
 | RTMP output testing | Secondary output — HLS is primary |
 | Transcode worker VPS test | Depends on having non-ready media files |
+
+---
+
+## Round D - Playlist Builder SQL Literal Fix
+
+**Branch:** `fix/pre-smoke-critical-blockers`
+**Date:** 2026-05-15
+
+### Problem
+
+Local smoke testing found that after schedule import/validate/publish, building today's playlist failed with:
+
+```text
+SqliteError: no such column: emergency
+```
+
+Root cause: `server/src/playlist/builder.ts` used double-quoted SQL literals such as `type="emergency"` and `status="ready"`. In this SQLite/runtime combination, those were interpreted as identifiers, not string values.
+
+### Fix
+
+- Converted playlist media resolution queries to parameterized SQL.
+- Covered direct media lookup, episode media lookup, program media lookup, emergency fallback lookup, and gap filler lookup.
+
+**File modified:**
+- `server/src/playlist/builder.ts`
+
+### Test Added
+
+Added `server/src/__tests__/playlistBuilder.test.ts`.
+
+The test creates a temporary SQLite DB, imports a schedule, validates it, publishes it, and builds the daily playlist. It verifies:
+
+- no `SqliteError` occurs
+- a scheduled program resolves to a real ready program media file
+- a filler slot with no direct media uses emergency fallback
+- the daily playlist JSON file is written
+
+### Verification Results
+
+```text
+npm test --workspace=server -- --runInBand
+Test Suites: 5 passed, 5 total
+Tests: 19 passed, 19 total
+
+npm exec --workspace=server -- tsc --noEmit
+0 errors
+
+npm exec --workspace=web -- tsc --noEmit
+0 errors
+
+npm run build
+server tsc: ok
+web tsc && vite build: ok on local Node v24.13.0
+```
+
+Note: the same full build under the local portable Node v20.11.1 fails in the web Vite/PostCSS step because `web/postcss.config.js` uses ESM syntax without `"type": "module"` in `web/package.json`. That is outside this one-blocker playlist fix and was not changed here.
+
+### Short Smoke Result
+
+Ran a local API smoke on port 3001 with a fresh test DB:
+
+1. `POST /api/media/scan`
+2. `POST /api/media/programs`
+3. Linked `program-1.mp4` test media to the created program in the smoke DB
+4. `POST /api/schedules/import`
+5. `POST /api/schedules/validate/:id`
+6. `POST /api/schedules/publish/:id`
+7. `POST /api/schedules/playlist/build/2026-05-15`
+8. `GET /api/schedules/playlist/2026-05-15`
+
+Result:
+
+```text
+IMPORT itemCount=2
+VALIDATE isValid=true errors=0 warnings=0
+PUBLISH ok=true
+BUILD ok=true itemCount=51
+ASSERT_REAL_PROGRAM_COUNT=1
+ASSERT_EMERGENCY_BACKFILL_COUNT=1
+```
+
+Conclusion: playlist build now succeeds from the published schedule and includes a real scheduled program item, not emergency-only output.
+
+---
+
+## Round E - Node 20 Web Build Compatibility
+
+**Branch:** `fix/pre-smoke-critical-blockers`
+**Date:** 2026-05-15
+
+### Problem
+
+`npm run build` passed on the local Node v24 runtime, but failed on Node v20.11.1 during the web build because `web/postcss.config.js` used ESM syntax without `"type": "module"` in `web/package.json`.
+
+### Fix
+
+Converted `web/postcss.config.js` to CommonJS `module.exports`, keeping the existing Tailwind/PostCSS behavior unchanged.
+
+**File modified:**
+- `web/postcss.config.js`
+
+### Verification Results on Node v20.11.1
+
+```text
+npm test --workspace=server -- --runInBand
+npm exec --workspace=server -- tsc --noEmit
+npm exec --workspace=web -- tsc --noEmit
+npm run build
+```
+
+Result: all commands pass on Node v20.11.1.
