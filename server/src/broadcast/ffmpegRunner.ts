@@ -55,10 +55,15 @@ export async function startBroadcast(emergency = false): Promise<void> {
     throw new Error('Broadcast already running');
   }
 
-  // Preflight: refuse to start if emergency fallback has no ready media
+  // Preflight: refuse to start if emergency fallback has no files present on disk
   const emergencyCheck = checkEmergencyReadiness();
   if (!emergencyCheck.ok) {
-    const msg = 'Preflight failed: no emergency media ready. Scan /media/emergency first.';
+    let msg: string;
+    if (emergencyCheck.dbCount === 0) {
+      msg = 'Preflight failed: no emergency media in DB (run a media scan first)';
+    } else {
+      msg = `Preflight failed: ${emergencyCheck.missingPaths.length} emergency file(s) in DB are missing from disk — rescan needed`;
+    }
     logger.error(msg);
     state.status = 'error';
     state.lastError = msg;
@@ -126,20 +131,42 @@ export async function switchToEmergency(): Promise<void> {
   await startBroadcast(true);
 }
 
+const MIN_SAFE_HLS_PATH_LENGTH = 10; // e.g. "/var/x/hls" — refuse to clean suspiciously short paths
+
+function isHlsDirSafe(hlsDir: string): boolean {
+  if (!hlsDir || hlsDir.trim() === '') return false;
+  const resolved = path.resolve(hlsDir);
+  if (resolved === '/' || resolved === path.sep) return false;
+  if (resolved.length < MIN_SAFE_HLS_PATH_LENGTH) return false;
+  // Must not be a filesystem root or common sensitive directory
+  const dangerousPaths = ['/', '/etc', '/usr', '/bin', '/sbin', '/lib', '/home', '/root', '/tmp'];
+  if (dangerousPaths.includes(resolved)) return false;
+  return true;
+}
+
 function cleanHlsOutput(): void {
   const hlsDir = config.paths.hlsOutput;
+
+  if (!isHlsDirSafe(hlsDir)) {
+    logger.error(`HLS cleanup refused: unsafe or too-short path "${hlsDir}" — skipping cleanup`);
+    return;
+  }
+
   if (!fs.existsSync(hlsDir)) return;
+
   try {
+    let cleaned = 0;
     for (const f of fs.readdirSync(hlsDir)) {
       if (f === 'stream.m3u8' || (f.startsWith('seg') && f.endsWith('.ts'))) {
         const full = path.join(hlsDir, f);
-        // Safety guard: never delete outside the configured HLS directory
+        // Double-check: resolved path must remain inside hlsDir
         if (path.resolve(full).startsWith(path.resolve(hlsDir))) {
           fs.unlinkSync(full);
+          cleaned++;
         }
       }
     }
-    logger.info('HLS output cleaned before start');
+    logger.info(`HLS output cleaned: ${cleaned} file(s) removed before start`);
   } catch (err) {
     logger.warn(`HLS cleanup error: ${err}`);
   }
@@ -225,8 +252,9 @@ function handleFfmpegExit(code: number): void {
     logger.info('FFmpeg exited cleanly (playlist complete) — rolling over to next day playlist');
 
     if (state.runId) {
+      // 'complete' is not in the DB CHECK constraint — use 'idle' with stop_reason to record clean end
       getDb().prepare('UPDATE broadcast_runs SET status=?, stopped_at=datetime(\'now\'), stop_reason=? WHERE id=?')
-        .run('complete', 'playlist_complete', state.runId);
+        .run('idle', 'playlist_complete', state.runId);
     }
 
     state.restartCount = 0;
@@ -469,19 +497,39 @@ export function checkHlsHealth(): { ok: boolean; lastModified: number | null; ag
   return { ok, lastModified: stat.mtimeMs, ageSeconds };
 }
 
+const HLS_STALE_REACTION_COOLDOWN_MS = 120_000; // 2 minutes between reactions
+let hlsStaleReactionActiveAt: number | null = null;
+
 /**
  * Called by monitoring when HLS is stale while broadcast is running.
+ * Enforces a 2-minute cooldown to prevent restart loops.
  * Tries one restart; if that also fails, switches to emergency.
  */
 export async function reactToHlsStale(): Promise<void> {
   if (state.status !== 'running' && state.status !== 'emergency') return;
 
-  logger.warn('HLS stale reaction: attempting restart');
+  const now = Date.now();
+
+  if (hlsStaleReactionActiveAt !== null) {
+    const elapsed = now - hlsStaleReactionActiveAt;
+    if (elapsed < HLS_STALE_REACTION_COOLDOWN_MS) {
+      logger.info(`HLS stale reaction skipped — cooldown active (${Math.round(elapsed / 1000)}s / ${HLS_STALE_REACTION_COOLDOWN_MS / 1000}s)`);
+      return;
+    }
+  }
+
+  hlsStaleReactionActiveAt = now;
+  logger.warn('HLS stale reaction started — attempting restart');
+
   try {
     await restartBroadcast();
-    logger.info('HLS stale: restart succeeded');
+    logger.info('HLS stale reaction: restart succeeded');
   } catch (err) {
-    logger.error('HLS stale: restart failed — switching to emergency', err);
-    await switchToEmergency();
+    logger.error('HLS stale reaction: restart failed — switching to emergency', err);
+    try {
+      await switchToEmergency();
+    } catch (emergErr) {
+      logger.error('HLS stale reaction: emergency switch also failed', emergErr);
+    }
   }
 }

@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 User=daawah
 Group=daawah
-WorkingDirectory=/opt/daawah-broadcast
+# npm workspaces layout: server source is in server/, compiled output is server/dist/
+WorkingDirectory=/opt/daawah-broadcast/server
 EnvironmentFile=/etc/daawah-broadcast/.env
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
@@ -20,6 +21,7 @@ SyslogIdentifier=daawah-api
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
+# data/, assets/, logs/, playlists/ all live under /opt/daawah-broadcast (project root)
 ReadWritePaths=/opt/daawah-broadcast /media /var/www/html/hls /var/log/daawah-broadcast
 
 # Resource limits

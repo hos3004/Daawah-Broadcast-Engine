@@ -30,13 +30,21 @@ async function checkHlsStatus(): Promise<void> {
   const broadcast = getBroadcastState();
 
   if (broadcast.status === 'running' && !hls.ok) {
-    logger.warn(`HLS stale: ${Math.round(hls.ageSeconds)}s — triggering restart`);
-    await sendTelegramAlert({
-      level: 'error',
-      title: 'HLS Stream Stale',
-      message: `Stream not updated for ${Math.round(hls.ageSeconds)} seconds. Attempting restart.`,
-    });
-    await reactToHlsStale();
+    logger.warn(`HLS stale: ${Math.round(hls.ageSeconds)}s — triggering reaction`);
+    try {
+      await sendTelegramAlert({
+        level: 'error',
+        title: 'HLS Stream Stale',
+        message: `Stream not updated for ${Math.round(hls.ageSeconds)} seconds. Attempting restart.`,
+      });
+    } catch (alertErr) {
+      logger.warn('Telegram alert failed during HLS stale check', alertErr);
+    }
+    try {
+      await reactToHlsStale();
+    } catch (err) {
+      logger.error('reactToHlsStale threw unexpectedly', err);
+    }
   }
 }
 

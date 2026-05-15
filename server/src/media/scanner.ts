@@ -196,11 +196,42 @@ export async function scanMediaLibrary(
   return { scanned: totalScanned, updated: totalUpdated, errors: totalErrors, deleted, duration_ms };
 }
 
-/** Returns true if at least one emergency media file is ready for broadcast. */
-export function checkEmergencyReadiness(): { ok: boolean; count: number } {
+export interface EmergencyReadiness {
+  ok: boolean;
+  /** DB rows with status='ready' */
+  dbCount: number;
+  /** Files confirmed present on disk */
+  diskCount: number;
+  /** Paths that are 'ready' in DB but missing from disk */
+  missingPaths: string[];
+}
+
+/**
+ * Checks both DB records AND actual file existence on disk.
+ * A file that is 'ready' in DB but deleted from disk is treated as not ready.
+ */
+export function checkEmergencyReadiness(): EmergencyReadiness {
   const db = getDb();
-  const row = db.prepare(`SELECT COUNT(*) as cnt FROM media_files WHERE type='emergency' AND status='ready'`).get() as { cnt: number };
-  return { ok: row.cnt > 0, count: row.cnt };
+  const rows = db.prepare(`SELECT path FROM media_files WHERE type='emergency' AND status='ready'`)
+    .all() as { path: string }[];
+
+  const missingPaths: string[] = [];
+  let diskCount = 0;
+
+  for (const row of rows) {
+    if (fs.existsSync(row.path)) {
+      diskCount++;
+    } else {
+      missingPaths.push(row.path);
+    }
+  }
+
+  return {
+    ok: diskCount > 0,
+    dbCount: rows.length,
+    diskCount,
+    missingPaths,
+  };
 }
 
 export function getMediaStats() {
