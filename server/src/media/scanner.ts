@@ -59,27 +59,18 @@ function assignStatus(probe: Awaited<ReturnType<typeof probeFile>>): MediaStatus
   return 'needs_transcode';
 }
 
-export async function scanMediaLibrary(
+async function scanDirectory(
+  baseDir: string,
+  forceType: MediaType | null,
+  scannedPaths: Set<string>,
   onProgress?: (p: ScanProgress) => void
-): Promise<ScanResult> {
+): Promise<{ scanned: number; updated: number; errors: number }> {
   const db = getDb();
-  const baseDir = config.paths.mediaLibrary;
-  const startTime = Date.now();
-
-  logger.info(`Starting media scan of: ${baseDir}`);
-
-  if (!fs.existsSync(baseDir)) {
-    logger.warn(`Media library path does not exist: ${baseDir}`);
-    return { scanned: 0, updated: 0, errors: 0, deleted: 0, duration_ms: Date.now() - startTime };
-  }
-
   const allFiles = walkDir(baseDir, isVideoFile);
   const total = allFiles.length;
   let scanned = 0;
   let updated = 0;
   let errors = 0;
-
-  const scannedPaths = new Set<string>();
 
   for (const filePath of allFiles) {
     scanned++;
@@ -101,7 +92,7 @@ export async function scanMediaLibrary(
 
       const probe = await probeFile(filePath);
       const status = assignStatus(probe);
-      const mediaType = getMediaTypeFromPath(filePath, baseDir);
+      const mediaType = forceType ?? getMediaTypeFromPath(filePath, baseDir);
       const filename = path.basename(filePath);
       const relPath = path.relative(baseDir, filePath);
 
@@ -140,33 +131,107 @@ export async function scanMediaLibrary(
       errors++;
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error(`Scan error for ${filePath}: ${errMsg}`);
-
-      db.prepare(`
-        UPDATE media_files SET status='invalid', probe_error=?, scanned_at=? WHERE path=?
-      `).run(errMsg, new Date().toISOString(), filePath);
-
+      db.prepare(`UPDATE media_files SET status='invalid', probe_error=?, scanned_at=? WHERE path=?`)
+        .run(errMsg, new Date().toISOString(), filePath);
       db.prepare(`INSERT INTO scan_errors (id, file_path, error_msg) VALUES (?,?,?)`)
         .run(uuidv4(), filePath, errMsg);
     }
   }
 
-  // Mark missing files
-  onProgress?.({ total, scanned, errors, currentFile: '', phase: 'marking_missing' });
+  return { scanned, updated, errors };
+}
+
+export async function scanMediaLibrary(
+  onProgress?: (p: ScanProgress) => void
+): Promise<ScanResult> {
+  const db = getDb();
+  const startTime = Date.now();
+  const scannedPaths = new Set<string>();
+  let totalScanned = 0;
+  let totalUpdated = 0;
+  let totalErrors = 0;
+
+  // Scan main media library
+  const mainDir = config.paths.mediaLibrary;
+  if (fs.existsSync(mainDir)) {
+    logger.info(`Scanning media library: ${mainDir}`);
+    const r = await scanDirectory(mainDir, null, scannedPaths, onProgress);
+    totalScanned += r.scanned;
+    totalUpdated += r.updated;
+    totalErrors += r.errors;
+  } else {
+    logger.warn(`Media library path does not exist: ${mainDir}`);
+  }
+
+  // Scan emergency media directory — always tagged as type='emergency'
+  const emergencyDir = config.paths.mediaEmergency;
+  if (fs.existsSync(emergencyDir)) {
+    logger.info(`Scanning emergency media: ${emergencyDir}`);
+    const r = await scanDirectory(emergencyDir, 'emergency', scannedPaths, onProgress);
+    totalScanned += r.scanned;
+    totalUpdated += r.updated;
+    totalErrors += r.errors;
+  } else {
+    logger.warn(`Emergency media path does not exist: ${emergencyDir}`);
+  }
+
+  // Mark files not seen in this scan as missing (only for known root paths)
+  onProgress?.({ total: totalScanned, scanned: totalScanned, errors: totalErrors, currentFile: '', phase: 'marking_missing' });
+  const knownRoots = [mainDir, emergencyDir];
   const allDbPaths = (db.prepare('SELECT path FROM media_files WHERE status != ?').all('missing') as { path: string }[]).map(r => r.path);
   let deleted = 0;
   for (const dbPath of allDbPaths) {
-    if (!scannedPaths.has(dbPath) && dbPath.startsWith(baseDir)) {
+    const underKnownRoot = knownRoots.some(root => dbPath.startsWith(root));
+    if (underKnownRoot && !scannedPaths.has(dbPath)) {
       db.prepare('UPDATE media_files SET status=? WHERE path=?').run('missing', dbPath);
       deleted++;
     }
   }
 
   const duration_ms = Date.now() - startTime;
-  onProgress?.({ total, scanned, errors, currentFile: '', phase: 'done' });
-  broadcastWs({ type: 'scan_progress', data: { total, scanned, errors, currentFile: '', phase: 'done' } });
+  onProgress?.({ total: totalScanned, scanned: totalScanned, errors: totalErrors, currentFile: '', phase: 'done' });
+  broadcastWs({ type: 'scan_progress', data: { total: totalScanned, scanned: totalScanned, errors: totalErrors, currentFile: '', phase: 'done' } });
 
-  logger.info(`Scan complete: ${scanned} scanned, ${updated} updated, ${errors} errors, ${deleted} missing. ${duration_ms}ms`);
-  return { scanned, updated, errors, deleted, duration_ms };
+  logger.info(`Scan complete: ${totalScanned} scanned, ${totalUpdated} updated, ${totalErrors} errors, ${deleted} missing. ${duration_ms}ms`);
+  return { scanned: totalScanned, updated: totalUpdated, errors: totalErrors, deleted, duration_ms };
+}
+
+export interface EmergencyReadiness {
+  ok: boolean;
+  /** DB rows with status='ready' */
+  dbCount: number;
+  /** Files confirmed present on disk */
+  diskCount: number;
+  /** Paths that are 'ready' in DB but missing from disk */
+  missingPaths: string[];
+}
+
+/**
+ * Checks both DB records AND actual file existence on disk.
+ * A file that is 'ready' in DB but deleted from disk is treated as not ready.
+ */
+export function checkEmergencyReadiness(): EmergencyReadiness {
+  const db = getDb();
+  const rows = db.prepare(`SELECT path FROM media_files WHERE type='emergency' AND status='ready'`)
+    .all() as { path: string }[];
+
+  const missingPaths: string[] = [];
+  let diskCount = 0;
+
+  for (const row of rows) {
+    if (fs.existsSync(row.path)) {
+      diskCount++;
+    } else {
+      missingPaths.push(row.path);
+    }
+  }
+
+  return {
+    ok: diskCount > 0,
+    dbCount: rows.length,
+    diskCount,
+    missingPaths,
+  };
 }
 
 export function getMediaStats() {

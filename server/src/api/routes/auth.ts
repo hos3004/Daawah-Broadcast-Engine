@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { getDb } from '../../db/schema';
-import { verifyPassword, signToken, auditLog, type AuthUser } from '../../auth';
+import { verifyPassword, signToken, verifyToken, requireAuth, auditLog, type AuthUser } from '../../auth';
 import { config } from '../../config';
 import { logger } from '../../utils/logger';
 
@@ -48,18 +48,20 @@ authRouter.post('/login', loginLimiter, (req: Request, res: Response): void => {
   res.json({ user: { id: user.id, email: user.email, role: user.role } });
 });
 
+// Always clears the cookie; audits if token was valid
 authRouter.post('/logout', (req: Request, res: Response): void => {
-  if (req.user) {
-    auditLog(req.user.id, req.user.email, 'LOGOUT', 'user', req.user.id, undefined, req.ip);
+  const token = req.cookies?.['auth_token'] as string | undefined;
+  if (token) {
+    const payload = verifyToken(token);
+    if (payload) {
+      auditLog(payload.sub, payload.email, 'LOGOUT', 'user', payload.sub, undefined, req.ip);
+    }
   }
   res.clearCookie('auth_token');
   res.json({ ok: true });
 });
 
-authRouter.get('/me', (req: Request, res: Response): void => {
-  if (!req.user) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return;
-  }
+// Requires valid session — returns current user identity
+authRouter.get('/me', requireAuth, (req: Request, res: Response): void => {
   res.json({ user: req.user });
 });

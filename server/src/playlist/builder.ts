@@ -140,22 +140,26 @@ export async function buildDailyPlaylist(date: string): Promise<DailyPlaylist> {
 
 function resolveMediaFile(si: ScheduleItem, db: ReturnType<typeof getDb>): MediaFile | null {
   if (si.media_file_id) {
-    return db.prepare('SELECT * FROM media_files WHERE id=? AND status="ready"').get(si.media_file_id) as MediaFile | null;
+    return db.prepare('SELECT * FROM media_files WHERE id=? AND status=?')
+      .get(si.media_file_id, 'ready') as MediaFile | null;
   }
   if (si.episode_id) {
     const ep = db.prepare('SELECT media_file_id FROM episodes WHERE id=?').get(si.episode_id) as { media_file_id: string | null } | null;
     if (ep?.media_file_id) {
-      return db.prepare('SELECT * FROM media_files WHERE id=? AND status="ready"').get(ep.media_file_id) as MediaFile | null;
+      return db.prepare('SELECT * FROM media_files WHERE id=? AND status=?')
+        .get(ep.media_file_id, 'ready') as MediaFile | null;
     }
   }
   if (si.program_id) {
-    return db.prepare('SELECT * FROM media_files WHERE program_id=? AND status="ready" ORDER BY filename LIMIT 1').get(si.program_id) as MediaFile | null;
+    return db.prepare('SELECT * FROM media_files WHERE program_id=? AND status=? ORDER BY filename LIMIT 1')
+      .get(si.program_id, 'ready') as MediaFile | null;
   }
   return null;
 }
 
 function getEmergencyFile(db: ReturnType<typeof getDb>): MediaFile | null {
-  return db.prepare('SELECT * FROM media_files WHERE type="emergency" AND status="ready" ORDER BY RANDOM() LIMIT 1').get() as MediaFile | null;
+  return db.prepare('SELECT * FROM media_files WHERE type=? AND status=? ORDER BY RANDOM() LIMIT 1')
+    .get('emergency', 'ready') as MediaFile | null;
 }
 
 function makeItem(
@@ -243,8 +247,8 @@ function fillRange(
   let pos = startPos;
 
   const fillers = db.prepare(`
-    SELECT * FROM media_files WHERE type IN ('filler','emergency') AND status='ready' ORDER BY RANDOM()
-  `).all() as MediaFile[];
+    SELECT * FROM media_files WHERE type IN (?, ?) AND status=? ORDER BY RANDOM()
+  `).all('filler', 'emergency', 'ready') as MediaFile[];
 
   if (fillers.length === 0) return [];
 

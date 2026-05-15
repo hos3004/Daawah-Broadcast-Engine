@@ -2,51 +2,30 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { requireAuth, requireRole } from '../../auth';
+import { requireRole } from '../../auth';
 import { getDb } from '../../db/schema';
-import { checkFfmpeg, checkFfprobe } from '../../media/ffprobe';
-import { checkHlsHealth, getBroadcastState } from '../../broadcast/ffmpegRunner';
 import { config } from '../../config';
 import { diskUsage, formatBytes } from '../../utils/fileUtils';
 import { getWsClientCount } from '../../ws';
 
 export const systemRouter = Router();
 
-// Public health endpoint
-systemRouter.get('/health', async (_req: Request, res: Response): Promise<void> => {
-  const [ffmpegOk, ffprobeOk] = await Promise.all([checkFfmpeg(), checkFfprobe()]);
-  const hls = checkHlsHealth();
-  const broadcast = getBroadcastState();
-
-  const ok = ffmpegOk && ffprobeOk;
-
-  res.status(ok ? 200 : 503).json({
-    ok,
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    broadcast: broadcast.status,
-    hls: hls.ok ? 'ok' : `stale (${Math.round(hls.ageSeconds)}s)`,
-    ffmpeg: ffmpegOk ? 'ok' : 'missing',
-    ffprobe: ffprobeOk ? 'ok' : 'missing',
-    ws_clients: getWsClientCount(),
-  });
-});
-
-systemRouter.use(requireAuth);
+// All routes in this router require auth (applied at app level in index.ts)
 
 systemRouter.get('/disk', (_req: Request, res: Response): void => {
   const mediaDisk = diskUsage(config.paths.mediaLibrary);
-  const hlsDisk = diskUsage(config.paths.hlsOutput);
+  const hlsDisk   = diskUsage(config.paths.hlsOutput);
 
   res.json({
     media: { ...mediaDisk, usedStr: formatBytes(mediaDisk.used), totalStr: formatBytes(mediaDisk.total) },
     hls:   { ...hlsDisk,   usedStr: formatBytes(hlsDisk.used),   totalStr: formatBytes(hlsDisk.total) },
     mem: {
       total: os.totalmem(),
-      free: os.freemem(),
+      free:  os.freemem(),
       percent: Math.round((1 - os.freemem() / os.totalmem()) * 100),
     },
     cpu: os.loadavg(),
+    wsClients: getWsClientCount(),
   });
 });
 
@@ -54,22 +33,23 @@ systemRouter.get('/logs', requireRole('admin', 'operator'), (req: Request, res: 
   const { type = 'app', lines = '100' } = req.query as Record<string, string>;
   const logDir = config.paths.logs;
 
-  const files: Record<string, string> = {
-    app: 'app.log',
+  const fileMap: Record<string, string> = {
+    app:    'app.log',
     ffmpeg: `ffmpeg-${new Date().toISOString().slice(0, 10)}.log`,
   };
 
-  const filename = files[type] ?? 'app.log';
-  const logPath = path.join(logDir, filename);
+  const filename = fileMap[type] ?? 'app.log';
+  const logPath  = path.join(logDir, filename);
 
   if (!fs.existsSync(logPath)) {
-    res.json({ lines: [], file: filename });
+    res.json({ lines: [], file: filename, total: 0 });
     return;
   }
 
-  const content = fs.readFileSync(logPath, 'utf-8');
+  const content  = fs.readFileSync(logPath, 'utf-8');
   const allLines = content.split('\n').filter(Boolean);
-  const n = Math.min(parseInt(lines, 10) || 100, 1000);
+  const n        = Math.min(parseInt(lines, 10) || 100, 1000);
+
   res.json({ lines: allLines.slice(-n), file: filename, total: allLines.length });
 });
 
@@ -90,12 +70,11 @@ systemRouter.get('/settings', requireRole('admin'), (_req: Request, res: Respons
 });
 
 systemRouter.put('/settings/:key', requireRole('admin'), (req: Request, res: Response): void => {
-  const db = getDb();
-  const { key } = req.params;
+  const db  = getDb();
+  const key = req.params['key'];
   const { value } = req.body as { value?: string };
-  if (!value) { res.status(400).json({ error: 'value required' }); return; }
-
+  if (!value || !key) { res.status(400).json({ error: 'key and value required' }); return; }
   db.prepare('INSERT OR REPLACE INTO settings (key, value, updated_by) VALUES (?,?,?)')
-    .run(key!, value, req.user!.id);
+    .run(key, value, req.user!.id);
   res.json({ ok: true });
 });

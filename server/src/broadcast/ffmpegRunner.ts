@@ -8,6 +8,7 @@ import { logger } from '../utils/logger';
 import { ensureDir } from '../utils/fileUtils';
 import { getDb } from '../db/schema';
 import { getPlaylistForDate, getCurrentAndNext, type PlaylistItem } from '../playlist/builder';
+import { checkEmergencyReadiness } from '../media/scanner';
 import { broadcastWs } from '../ws';
 
 export type BroadcastStatus = 'idle' | 'starting' | 'running' | 'stopping' | 'error' | 'emergency';
@@ -52,6 +53,22 @@ export function getBroadcastState(): BroadcastState {
 export async function startBroadcast(emergency = false): Promise<void> {
   if (state.status === 'running' || state.status === 'starting') {
     throw new Error('Broadcast already running');
+  }
+
+  // Preflight: refuse to start if emergency fallback has no files present on disk
+  const emergencyCheck = checkEmergencyReadiness();
+  if (!emergencyCheck.ok) {
+    let msg: string;
+    if (emergencyCheck.dbCount === 0) {
+      msg = 'Preflight failed: no emergency media in DB (run a media scan first)';
+    } else {
+      msg = `Preflight failed: ${emergencyCheck.missingPaths.length} emergency file(s) in DB are missing from disk — rescan needed`;
+    }
+    logger.error(msg);
+    state.status = 'error';
+    state.lastError = msg;
+    emitStatus();
+    throw new Error(msg);
   }
 
   state.isEmergency = emergency;
@@ -114,6 +131,47 @@ export async function switchToEmergency(): Promise<void> {
   await startBroadcast(true);
 }
 
+const MIN_SAFE_HLS_PATH_LENGTH = 10; // e.g. "/var/x/hls" — refuse to clean suspiciously short paths
+
+function isHlsDirSafe(hlsDir: string): boolean {
+  if (!hlsDir || hlsDir.trim() === '') return false;
+  const resolved = path.resolve(hlsDir);
+  if (resolved === '/' || resolved === path.sep) return false;
+  if (resolved.length < MIN_SAFE_HLS_PATH_LENGTH) return false;
+  // Must not be a filesystem root or common sensitive directory
+  const dangerousPaths = ['/', '/etc', '/usr', '/bin', '/sbin', '/lib', '/home', '/root', '/tmp'];
+  if (dangerousPaths.includes(resolved)) return false;
+  return true;
+}
+
+function cleanHlsOutput(): void {
+  const hlsDir = config.paths.hlsOutput;
+
+  if (!isHlsDirSafe(hlsDir)) {
+    logger.error(`HLS cleanup refused: unsafe or too-short path "${hlsDir}" — skipping cleanup`);
+    return;
+  }
+
+  if (!fs.existsSync(hlsDir)) return;
+
+  try {
+    let cleaned = 0;
+    for (const f of fs.readdirSync(hlsDir)) {
+      if (f === 'stream.m3u8' || (f.startsWith('seg') && f.endsWith('.ts'))) {
+        const full = path.join(hlsDir, f);
+        // Double-check: resolved path must remain inside hlsDir
+        if (path.resolve(full).startsWith(path.resolve(hlsDir))) {
+          fs.unlinkSync(full);
+          cleaned++;
+        }
+      }
+    }
+    logger.info(`HLS output cleaned: ${cleaned} file(s) removed before start`);
+  } catch (err) {
+    logger.warn(`HLS cleanup error: ${err}`);
+  }
+}
+
 async function launchFfmpeg(emergency: boolean): Promise<void> {
   const date = dayjs().format('YYYY-MM-DD');
   const { current, next } = getCurrentAndNext(date);
@@ -132,6 +190,9 @@ async function launchFfmpeg(emergency: boolean): Promise<void> {
 
   ensureDir(config.paths.hlsOutput);
   ensureDir(config.paths.logs);
+
+  // Clean stale HLS files so viewers get a fresh stream, not leftovers
+  cleanHlsOutput();
 
   const logFile = path.join(config.paths.logs, `ffmpeg-${dayjs().format('YYYY-MM-DD')}.log`);
   logStream = fs.createWriteStream(logFile, { flags: 'a' });
@@ -186,6 +247,28 @@ function handleFfmpegExit(code: number): void {
 
   if (state.status === 'stopping' || state.status === 'idle') return;
 
+  // Exit 0 = playlist exhausted naturally (day rollover or end of concat list)
+  if (code === 0) {
+    logger.info('FFmpeg exited cleanly (playlist complete) — rolling over to next day playlist');
+
+    if (state.runId) {
+      // 'complete' is not in the DB CHECK constraint — use 'idle' with stop_reason to record clean end
+      getDb().prepare('UPDATE broadcast_runs SET status=?, stopped_at=datetime(\'now\'), stop_reason=? WHERE id=?')
+        .run('idle', 'playlist_complete', state.runId);
+    }
+
+    state.restartCount = 0;
+    state.status = 'starting';
+    emitStatus();
+
+    // Short delay so the new day's playlist file is ready (built at 23:00)
+    restartTimeout = setTimeout(() => {
+      logger.info('Day rollover restart');
+      launchFfmpeg(false).catch(e => logger.error('Rollover restart failed', e));
+    }, 2000);
+    return;
+  }
+
   logger.error(`FFmpeg exited with code ${code}. Restarts: ${state.restartCount}/${MAX_RESTART_ATTEMPTS}`);
 
   if (state.runId) {
@@ -215,7 +298,7 @@ function handleFfmpegExit(code: number): void {
   }, delay);
 }
 
-function buildBroadcastCommand(date: string, _current: PlaylistItem | null): { args: string[] } | null {
+function buildBroadcastCommand(date: string, current: PlaylistItem | null): { args: string[] } | null {
   const playlist = getPlaylistForDate(date);
 
   if (!playlist || playlist.items.length === 0) {
@@ -230,9 +313,27 @@ function buildBroadcastCommand(date: string, _current: PlaylistItem | null): { a
     return buildEmergencyCommand();
   }
 
-  // Build FFmpeg concat input
+  // Preflight: drop items whose files don't exist on disk
+  const available = remaining.filter(i => {
+    if (!fs.existsSync(i.media_path)) {
+      logger.warn(`Preflight: missing file skipped — ${i.media_path}`);
+      return false;
+    }
+    return true;
+  });
+
+  if (available.length === 0) {
+    logger.error('Preflight: all playlist files missing — using emergency');
+    return buildEmergencyCommand();
+  }
+
+  if (available.length < remaining.length) {
+    logger.warn(`Preflight: ${remaining.length - available.length} of ${remaining.length} playlist items missing`);
+  }
+
+  // Build FFmpeg concat input — -re for real-time pacing
   const concatListPath = path.join(config.paths.data, 'current-concat.txt');
-  const lines = remaining.map(i => `file '${i.media_path.replace(/'/g, "'\\''")}'`);
+  const lines = available.map(i => `file '${i.media_path.replace(/'/g, "'\\''")}'`);
   fs.writeFileSync(concatListPath, lines.join('\n'), 'utf-8');
 
   const broadcastRes = config.broadcast.resolution.split('x');
@@ -248,14 +349,27 @@ function buildBroadcastCommand(date: string, _current: PlaylistItem | null): { a
   const tickerPath = path.join(config.paths.assets, 'overlays', 'tickers', `${date}.webm`);
   const hasTicker = fs.existsSync(tickerPath);
 
+  // Now-playing PNG (lower third): shown for first N seconds of the session
+  const nowPlayingPath = current?.lower_third_path ?? null;
+  const hasNowPlaying = nowPlayingPath !== null && fs.existsSync(nowPlayingPath);
+
   // Build filter_complex
+  // -re before -i for real-time pacing
   const inputs: string[] = [
-    '-f', 'concat', '-safe', '0', '-i', concatListPath,
+    '-re', '-f', 'concat', '-safe', '0', '-i', concatListPath,
   ];
 
   let filterComplex = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps}[base]`;
   let lastLabel = '[base]';
   let inputIdx = 1;
+
+  if (hasNowPlaying) {
+    inputs.push('-loop', '1', '-i', nowPlayingPath!);
+    const duration = config.overlay.nowPlayingDuration;
+    filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=10:H-h-80:enable='between(t,0,${duration})'[np]`;
+    lastLabel = '[np]';
+    inputIdx++;
+  }
 
   if (hasLogo) {
     inputs.push('-stream_loop', '-1', '-i', logoPath);
@@ -272,7 +386,7 @@ function buildBroadcastCommand(date: string, _current: PlaylistItem | null): { a
     inputIdx++;
   }
 
-  filterComplex += `;${lastLabel}[vout]`;
+  filterComplex += `;${lastLabel}null[vout]`;
 
   const args: string[] = [
     '-y',
@@ -296,7 +410,7 @@ function buildBroadcastCommand(date: string, _current: PlaylistItem | null): { a
     '-f', 'hls',
     '-hls_time', String(config.broadcast.hlsSegmentDuration),
     '-hls_list_size', String(config.broadcast.hlsListSize),
-    '-hls_flags', 'delete_segments+append_list',
+    '-hls_flags', 'delete_segments',
     '-hls_segment_filename', segPattern,
     hlsPath,
   ];
@@ -333,7 +447,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
     args: [
       '-y',
       '-stream_loop', '-1',
-      '-f', 'concat', '-safe', '0', '-i', concatPath,
+      '-re', '-f', 'concat', '-safe', '0', '-i', concatPath,
       '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps}`,
       '-c:v', 'libx264', '-preset', 'veryfast',
       '-b:v', config.broadcast.videoBitrate,
@@ -343,7 +457,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
       '-f', 'hls',
       '-hls_time', String(config.broadcast.hlsSegmentDuration),
       '-hls_list_size', String(config.broadcast.hlsListSize),
-      '-hls_flags', 'delete_segments+append_list',
+      '-hls_flags', 'delete_segments',
       '-hls_segment_filename', segPattern,
       hlsPath,
     ],
@@ -381,4 +495,41 @@ export function checkHlsHealth(): { ok: boolean; lastModified: number | null; ag
   }
 
   return { ok, lastModified: stat.mtimeMs, ageSeconds };
+}
+
+const HLS_STALE_REACTION_COOLDOWN_MS = 120_000; // 2 minutes between reactions
+let hlsStaleReactionActiveAt: number | null = null;
+
+/**
+ * Called by monitoring when HLS is stale while broadcast is running.
+ * Enforces a 2-minute cooldown to prevent restart loops.
+ * Tries one restart; if that also fails, switches to emergency.
+ */
+export async function reactToHlsStale(): Promise<void> {
+  if (state.status !== 'running' && state.status !== 'emergency') return;
+
+  const now = Date.now();
+
+  if (hlsStaleReactionActiveAt !== null) {
+    const elapsed = now - hlsStaleReactionActiveAt;
+    if (elapsed < HLS_STALE_REACTION_COOLDOWN_MS) {
+      logger.info(`HLS stale reaction skipped — cooldown active (${Math.round(elapsed / 1000)}s / ${HLS_STALE_REACTION_COOLDOWN_MS / 1000}s)`);
+      return;
+    }
+  }
+
+  hlsStaleReactionActiveAt = now;
+  logger.warn('HLS stale reaction started — attempting restart');
+
+  try {
+    await restartBroadcast();
+    logger.info('HLS stale reaction: restart succeeded');
+  } catch (err) {
+    logger.error('HLS stale reaction: restart failed — switching to emergency', err);
+    try {
+      await switchToEmergency();
+    } catch (emergErr) {
+      logger.error('HLS stale reaction: emergency switch also failed', emergErr);
+    }
+  }
 }

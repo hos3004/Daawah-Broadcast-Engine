@@ -92,7 +92,7 @@ export default function LogsPage() {
               </span>
               <span className="badge badge-info">{String(entry['action'] ?? '')}</span>
               <span style={{ color: 'var(--text-muted)' }}>{String(entry['user_email'] ?? '—')}</span>
-              {entry['detail'] && <span className="truncate">{String(entry['detail'])}</span>}
+              {Boolean(entry['detail']) && <span className="truncate">{String(entry['detail'])}</span>}
             </div>
           ))}
           {(auditData?.entries ?? []).length === 0 && (

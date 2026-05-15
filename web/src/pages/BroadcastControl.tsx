@@ -45,7 +45,7 @@ export default function BroadcastPage() {
         <div className="flex items-center gap-3 mb-4">
           <span className="status-dot" style={{ background: statusColor, width: 10, height: 10 }} />
           <span className="font-bold text-lg" style={{ color: statusColor }}>{status}</span>
-          {statusData?.['isEmergency'] && (
+          {Boolean(statusData?.['isEmergency']) && (
             <span className="badge badge-warning flex items-center gap-1">
               <AlertTriangle size={10} /> طارئ
             </span>
@@ -119,12 +119,12 @@ export default function BroadcastPage() {
         ) : (
           <p style={{ color: 'var(--text-muted)' }} className="text-sm">لا يوجد بث نشط</p>
         )}
-        {nowData?.['next'] && (
+        {nowData != null && nowData['next'] != null && (
           <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--bg-border)' }}>
             <p className="text-xs mb-1" style={{ color: 'var(--text-muted)' }}>التالي:</p>
-            <p className="font-medium">{String((nowData['next'] as Record<string, unknown>)?.['title_ar'] ?? (nowData['next'] as Record<string, unknown>)?.['title'] ?? '')}</p>
+            <p className="font-medium">{String((nowData['next'] as Record<string, unknown>)['title_ar'] ?? (nowData['next'] as Record<string, unknown>)['title'] ?? '')}</p>
             <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              {dayjs(Number((nowData['next'] as Record<string, unknown>)?.['start_time_ms'])).format('HH:mm')}
+              {dayjs(Number((nowData['next'] as Record<string, unknown>)['start_time_ms'])).format('HH:mm')}
             </p>
           </div>
         )}

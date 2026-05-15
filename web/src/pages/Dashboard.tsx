@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { broadcastApi, systemApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { Radio, HardDrive, Cpu, Users, AlertTriangle, Play, Clock } from 'lucide-react';
+import { Radio, HardDrive, Cpu, AlertTriangle, Play, Clock } from 'lucide-react';
 import dayjs from 'dayjs';
 
 interface PlaylistItem {
