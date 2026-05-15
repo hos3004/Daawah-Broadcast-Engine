@@ -12,7 +12,6 @@ import { ensureDir, sanitizeFilename } from '../../utils/fileUtils';
 import type { PlaylistItem } from '../../playlist/builder';
 
 export const overlaysRouter = Router();
-overlaysRouter.use(requireAuth);
 
 const logoUploadDir = path.join(config.paths.assets, 'logo-source');
 ensureDir(logoUploadDir);

@@ -12,7 +12,6 @@ import { config } from '../../config';
 import dayjs from 'dayjs';
 
 export const scheduleRouter = Router();
-scheduleRouter.use(requireAuth);
 
 const uploadDir = path.join(config.paths.data, 'uploads');
 ensureDir(uploadDir);

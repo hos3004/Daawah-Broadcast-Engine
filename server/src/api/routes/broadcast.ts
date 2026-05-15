@@ -5,7 +5,6 @@ import { startBroadcast, stopBroadcast, restartBroadcast, switchToEmergency, get
 import { getCurrentAndNext } from '../../playlist/builder';
 
 export const broadcastRouter = Router();
-broadcastRouter.use(requireAuth);
 
 broadcastRouter.post('/start', requireRole('admin', 'operator'), async (req: Request, res: Response): Promise<void> => {
   try {

@@ -1,12 +1,11 @@
 import { Router, Request, Response } from 'express';
-import { requireAuth, requireRole, auditLog } from '../../auth';
+import { requireRole, auditLog } from '../../auth';
 import { getDb } from '../../db/schema';
 import { scanMediaLibrary } from '../../media/scanner';
 import { broadcastWs } from '../../ws';
+import { getTranscodeQueue, cancelTranscodeJob } from '../../workers/transcodeWorker';
 
 export const mediaRouter = Router();
-
-mediaRouter.use(requireAuth);
 
 let scanInProgress = false;
 
@@ -123,5 +122,14 @@ mediaRouter.post('/transcode', requireRole('admin', 'editor'), (req: Request, re
     .run(jobId, media_file_id, req.user!.id);
 
   auditLog(req.user!.id, req.user!.email, 'TRANSCODE_JOB_CREATE', 'transcode_job', jobId, media_file_id, req.ip);
-  res.status(201).json({ jobId, message: 'Transcode job queued. Start it from the Broadcast Control panel.' });
+  res.status(201).json({ jobId, message: 'Transcode job queued.' });
+});
+
+mediaRouter.get('/transcode/queue', requireRole('admin', 'editor', 'operator'), (_req: Request, res: Response): void => {
+  res.json({ jobs: getTranscodeQueue() });
+});
+
+mediaRouter.delete('/transcode/:jobId', requireRole('admin', 'editor'), async (req: Request, res: Response): Promise<void> => {
+  await cancelTranscodeJob(req.params['jobId']!);
+  res.json({ ok: true });
 });

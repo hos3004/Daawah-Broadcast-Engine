@@ -14,7 +14,11 @@ import { ensureAdminUser, requireAuth } from './auth';
 import { initWs } from './ws';
 import { logger } from './utils/logger';
 import { ensureDir } from './utils/fileUtils';
-import { buildDailyPlaylist } from './playlist/builder';
+import { buildDailyPlaylist, getCurrentAndNext } from './playlist/builder';
+import { checkHlsHealth, getBroadcastState } from './broadcast/ffmpegRunner';
+import { checkFfmpeg, checkFfprobe } from './media/ffprobe';
+import { startMonitoring } from './monitoring';
+import { startTranscodeWorker } from './workers/transcodeWorker';
 
 import { authRouter } from './api/routes/auth';
 import { mediaRouter } from './api/routes/media';
@@ -48,7 +52,7 @@ async function main(): Promise<void> {
 
   // Security middlewares
   app.use(helmet({
-    contentSecurityPolicy: false, // Handled by Nginx in production
+    contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
   }));
 
@@ -61,39 +65,63 @@ async function main(): Promise<void> {
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   app.use(cookieParser(config.security.cookieSecret));
 
-  // Trust proxy (for rate limiting behind Nginx)
   if (config.env === 'production') {
     app.set('trust proxy', 1);
   }
 
-  // Public health
-  app.get('/health', systemRouter.stack.find(r => r.route?.path === '/health')?.handle ?? ((_req, res) => res.json({ ok: true })));
+  // ── Public routes ──────────────────────────────────────────────
+  app.get('/health', async (_req, res): Promise<void> => {
+    const [ffmpegOk, ffprobeOk] = await Promise.all([checkFfmpeg(), checkFfprobe()]);
+    const hls = checkHlsHealth();
+    const broadcast = getBroadcastState();
+    const ok = ffmpegOk && ffprobeOk;
+    res.status(ok ? 200 : 503).json({
+      ok,
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      broadcast: broadcast.status,
+      hls: hls.ok ? 'ok' : `stale (${Math.round(hls.ageSeconds)}s)`,
+      ffmpeg: ffmpegOk ? 'ok' : 'missing',
+      ffprobe: ffprobeOk ? 'ok' : 'missing',
+    });
+  });
 
-  // Public HLS stream access (in dev; production uses Nginx directly)
+  // Public now/next (for display boards, widgets, etc.)
+  app.get('/api/now', (_req, res): void => {
+    const date = dayjs().format('YYYY-MM-DD');
+    const { current, next, lookahead } = getCurrentAndNext(date);
+    res.json({ current, next, lookahead, timestamp: Date.now() });
+  });
+
+  app.get('/api/next', (_req, res): void => {
+    const date = dayjs().format('YYYY-MM-DD');
+    const { next } = getCurrentAndNext(date);
+    res.json({ next });
+  });
+
+  // HLS stream (dev only; production uses Nginx direct)
   if (config.env !== 'production') {
     app.use('/hls', express.static(config.paths.hlsOutput));
   }
 
-  // API routes
+  // ── Auth routes (public) ───────────────────────────────────────
   app.use('/api/auth', authRouter);
-  app.use('/api/media', requireAuth, mediaRouter);
+
+  // ── Protected API routes ───────────────────────────────────────
+  app.use('/api/media',     requireAuth, mediaRouter);
   app.use('/api/schedules', requireAuth, scheduleRouter);
   app.use('/api/broadcast', requireAuth, broadcastRouter);
-  app.use('/api/overlays', requireAuth, overlaysRouter);
-  app.use('/api/system', systemRouter);
+  app.use('/api/overlays',  requireAuth, overlaysRouter);
+  app.use('/api/system',    requireAuth, systemRouter);
 
-  // Broadcast convenience routes
-  app.get('/api/now', broadcastRouter.stack.find(r => r.route?.path === '/now')?.handle ?? ((_req, res) => res.status(404).json({})));
-  app.get('/api/next', broadcastRouter.stack.find(r => r.route?.path === '/next')?.handle ?? ((_req, res) => res.status(404).json({})));
-
-  // Serve admin dashboard (production: Nginx handles this; dev: Vite proxy)
+  // Admin dashboard SPA (production; dev uses Vite proxy)
   if (config.env === 'production') {
     const adminBuildPath = path.resolve(__dirname, '../../web/dist');
     app.use('/admin', express.static(adminBuildPath));
     app.get('/admin/*', (_req, res) => res.sendFile(path.join(adminBuildPath, 'index.html')));
   }
 
-  // 404 handler
+  // 404
   app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
   // Error handler
@@ -105,7 +133,8 @@ async function main(): Promise<void> {
   // WebSocket
   initWs(server);
 
-  // Cron: build next-day playlist at configured hour
+  // ── Cron jobs ──────────────────────────────────────────────────
+  // Build next-day playlist at configured hour
   cron.schedule(`0 ${config.playlist.buildHour} * * *`, async () => {
     const tomorrow = dayjs().add(1, 'day').format('YYYY-MM-DD');
     logger.info(`Cron: building playlist for ${tomorrow}`);
@@ -115,6 +144,10 @@ async function main(): Promise<void> {
       logger.error(`Cron playlist build failed for ${tomorrow}`, err);
     }
   });
+
+  // Start background workers
+  startMonitoring();
+  startTranscodeWorker();
 
   // Start server
   server.listen(config.port, config.host, () => {
