@@ -3,7 +3,7 @@ import os from 'os';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { sendTelegramAlert } from './telegram';
-import { checkHlsHealth, getBroadcastState } from '../broadcast/ffmpegRunner';
+import { checkHlsHealth, getBroadcastState, reactToHlsStale } from '../broadcast/ffmpegRunner';
 import { diskUsage } from '../utils/fileUtils';
 
 let monitoringStarted = false;
@@ -30,12 +30,13 @@ async function checkHlsStatus(): Promise<void> {
   const broadcast = getBroadcastState();
 
   if (broadcast.status === 'running' && !hls.ok) {
-    logger.warn(`HLS stale: ${Math.round(hls.ageSeconds)}s since last update`);
+    logger.warn(`HLS stale: ${Math.round(hls.ageSeconds)}s — triggering restart`);
     await sendTelegramAlert({
       level: 'error',
       title: 'HLS Stream Stale',
-      message: `Stream not updated for ${Math.round(hls.ageSeconds)} seconds. Broadcast status: ${broadcast.status}`,
+      message: `Stream not updated for ${Math.round(hls.ageSeconds)} seconds. Attempting restart.`,
     });
+    await reactToHlsStale();
   }
 }
 

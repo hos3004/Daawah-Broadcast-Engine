@@ -22,8 +22,7 @@ export default function SchedulePage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [validationResult, setValidationResult] = useState<Record<string, unknown> | null>(null);
+const [validationResult, setValidationResult] = useState<Record<string, unknown> | null>(null);
 
   const { data } = useQuery({
     queryKey: ['schedules'],

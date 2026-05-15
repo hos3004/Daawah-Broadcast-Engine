@@ -40,7 +40,7 @@ export default function LoginPage({ onLogin }: { onLogin: (u: User) => void }) {
               onChange={e => setEmail(e.target.value)}
               required
               className="w-full px-3 py-2 rounded-md text-sm outline-none focus:ring-1"
-              style={{ background: 'var(--bg-primary)', border: '1px solid var(--bg-border)', color: 'var(--text-primary)', ringColor: 'var(--accent)' }}
+              style={{ background: 'var(--bg-primary)', border: '1px solid var(--bg-border)', color: 'var(--text-primary)' }}
               dir="ltr"
             />
           </div>
