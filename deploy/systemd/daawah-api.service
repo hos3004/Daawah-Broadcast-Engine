@@ -1,0 +1,29 @@
+[Unit]
+Description=Daawah Broadcast Engine API
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=daawah
+Group=daawah
+WorkingDirectory=/opt/daawah-broadcast
+EnvironmentFile=/etc/daawah-broadcast/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=daawah-api
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/daawah-broadcast /media /var/www/html/hls /var/log/daawah-broadcast
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

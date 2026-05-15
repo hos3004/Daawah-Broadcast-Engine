@@ -1,0 +1,20 @@
+[Unit]
+Description=Daawah Broadcast Engine — FFmpeg Worker
+After=daawah-api.service
+Requires=daawah-api.service
+
+[Service]
+Type=simple
+User=daawah
+Group=daawah
+WorkingDirectory=/opt/daawah-broadcast
+EnvironmentFile=/etc/daawah-broadcast/.env
+
+# This service signals the API to start FFmpeg on boot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/curl -s -X POST http://127.0.0.1:3000/api/broadcast/start \
+  -H "Cookie: auth_token=$BOOT_AUTH_TOKEN"
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

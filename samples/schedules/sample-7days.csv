@@ -1,0 +1,13 @@
+date,start_time,type,program_id,episode_id,title,expected_duration,duration_policy
+2025-06-01,06:00,program,,,برنامج الفجر,1800,exact
+2025-06-01,07:00,program,,,درس اليوم,3600,fit
+2025-06-01,09:00,quran,,,تلاوة قرآنية,3600,fill_gap
+2025-06-01,12:00,program,,,برنامج الظهر,2700,exact
+2025-06-01,18:00,program,,,برنامج المساء,3600,exact
+2025-06-01,21:00,program,,,برنامج الليل,5400,allow_overrun
+2025-06-02,06:00,program,,,برنامج الفجر,1800,exact
+2025-06-02,07:00,program,,,درس اليوم,3600,fit
+2025-06-02,18:00,program,,,برنامج المساء,3600,exact
+2025-06-03,06:00,program,,,برنامج الفجر,1800,exact
+2025-06-03,12:00,filler,,,فاصل,600,fill_gap
+2025-06-03,18:00,program,,,برنامج المساء,3600,exact

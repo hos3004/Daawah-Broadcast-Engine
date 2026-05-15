@@ -1,0 +1,122 @@
+[
+  {
+    "date": "2025-06-01",
+    "start_time": "06:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج الفجر",
+    "expected_duration": 1800,
+    "duration_policy": "exact"
+  },
+  {
+    "date": "2025-06-01",
+    "start_time": "07:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "درس اليوم",
+    "expected_duration": 3600,
+    "duration_policy": "fit"
+  },
+  {
+    "date": "2025-06-01",
+    "start_time": "09:00",
+    "type": "quran",
+    "program_id": null,
+    "episode_id": null,
+    "title": "تلاوة قرآنية",
+    "expected_duration": 3600,
+    "duration_policy": "fill_gap"
+  },
+  {
+    "date": "2025-06-01",
+    "start_time": "12:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج الظهر",
+    "expected_duration": 2700,
+    "duration_policy": "exact"
+  },
+  {
+    "date": "2025-06-01",
+    "start_time": "18:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج المساء",
+    "expected_duration": 3600,
+    "duration_policy": "exact"
+  },
+  {
+    "date": "2025-06-01",
+    "start_time": "21:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج الليل",
+    "expected_duration": 5400,
+    "duration_policy": "allow_overrun"
+  },
+  {
+    "date": "2025-06-02",
+    "start_time": "06:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج الفجر",
+    "expected_duration": 1800,
+    "duration_policy": "exact"
+  },
+  {
+    "date": "2025-06-02",
+    "start_time": "07:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "درس اليوم",
+    "expected_duration": 3600,
+    "duration_policy": "fit"
+  },
+  {
+    "date": "2025-06-02",
+    "start_time": "18:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج المساء",
+    "expected_duration": 3600,
+    "duration_policy": "exact"
+  },
+  {
+    "date": "2025-06-03",
+    "start_time": "06:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج الفجر",
+    "expected_duration": 1800,
+    "duration_policy": "exact"
+  },
+  {
+    "date": "2025-06-03",
+    "start_time": "12:00",
+    "type": "filler",
+    "program_id": null,
+    "episode_id": null,
+    "title": "فاصل",
+    "expected_duration": 600,
+    "duration_policy": "fill_gap"
+  },
+  {
+    "date": "2025-06-03",
+    "start_time": "18:00",
+    "type": "program",
+    "program_id": null,
+    "episode_id": null,
+    "title": "برنامج المساء",
+    "expected_duration": 3600,
+    "duration_policy": "exact"
+  }
+]
