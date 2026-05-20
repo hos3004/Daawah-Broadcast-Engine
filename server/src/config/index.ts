@@ -97,6 +97,7 @@ export const config = {
     seasonalStingPath: optional('GAP_SEASONAL_STING_PATH', '/srv/daawah/media/bumpers/sting-hag'),
     generalBumpersPath: optional('GAP_GENERAL_BUMPERS_PATH', '/srv/daawah/media/bumpers/general'),
     pattern: optional('GAP_PATTERN', 'main,seasonal,general,general,general'),
+    minFillMs: optionalInt('GAP_MIN_FILL_MS', 1000),
   },
 
   monitoring: {

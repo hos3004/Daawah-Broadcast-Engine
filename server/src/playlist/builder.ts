@@ -92,7 +92,7 @@ export async function buildDailyPlaylist(date: string): Promise<DailyPlaylist> {
     }
   }
 
-  // Fill any gaps with emergency/filler
+  // Fill any gaps with professional bumpers, falling back to emergency/filler.
   items.push(...fillGaps(items, date, db, position));
 
   // Sort final list by start_time_ms
@@ -225,7 +225,7 @@ function fillGaps(
   // Check gap at start of day
   const dayStart = dayjs(date).startOf('day').valueOf();
   const firstStart = items[0]?.start_time_ms ?? dayStart;
-  if (firstStart - dayStart >= 1000) {
+  if (firstStart - dayStart >= config.gapFiller.minFillMs) {
     const gap = fillRange(dayStart, firstStart, date, db, pos);
     fillers.push(...gap);
     pos += fillers.length;
@@ -235,7 +235,7 @@ function fillGaps(
   for (let i = 0; i < items.length - 1; i++) {
     const gapStart = items[i]!.end_time_ms;
     const gapEnd = items[i + 1]!.start_time_ms;
-    if (gapEnd - gapStart >= 1000) {
+    if (gapEnd - gapStart >= config.gapFiller.minFillMs) {
       const gap = fillRange(gapStart, gapEnd, date, db, pos);
       fillers.push(...gap);
       pos += gap.length;
@@ -245,7 +245,7 @@ function fillGaps(
   // Check gap at end of day
   const lastEnd = items[items.length - 1]?.end_time_ms ?? dayStart;
   const dayEnd = dayjs(date).endOf('day').valueOf();
-  if (dayEnd - lastEnd >= 1000) {
+  if (dayEnd - lastEnd >= config.gapFiller.minFillMs) {
     const gap = fillRange(lastEnd, dayEnd, date, db, pos);
     fillers.push(...gap);
   }
@@ -273,18 +273,46 @@ function fillRangeFallbackRandomEmergency(
   db: ReturnType<typeof getDb>,
   startPos: number
 ): PlaylistItem[] {
-  const items: PlaylistItem[] = [];
-  let current = startMs;
-  let pos = startPos;
-
   const fillers = db.prepare(`
     SELECT * FROM media_files WHERE type IN (?, ?) AND status=? ORDER BY RANDOM()
   `).all('filler', 'emergency', 'ready') as MediaFile[];
 
-  if (fillers.length === 0) return [];
+  return fillRangeFromFiles(startMs, endMs, fillers, startPos);
+}
+
+function fillRangeEmergencyFallback(
+  startMs: number,
+  endMs: number,
+  db: ReturnType<typeof getDb>,
+  startPos: number
+): PlaylistItem[] {
+  const emergency = db.prepare(`
+    SELECT * FROM media_files WHERE type=? AND status=? ORDER BY RANDOM()
+  `).all('emergency', 'ready') as MediaFile[];
+
+  if (emergency.length > 0) {
+    return fillRangeFromFiles(startMs, endMs, emergency, startPos);
+  }
+
+  logger.warn('No emergency media available for no-schedule loop; using fallback filler/emergency pool');
+  return fillRangeFallbackRandomEmergency(startMs, endMs, db, startPos);
+}
+
+function fillRangeFromFiles(
+  startMs: number,
+  endMs: number,
+  fillers: MediaFile[],
+  startPos: number
+): PlaylistItem[] {
+  const items: PlaylistItem[] = [];
+  let current = startMs;
+  let pos = startPos;
+
+  if (fillers.length === 0) return items;
 
   let idx = 0;
-  while (current < endMs - 30000) {
+  const maxItems = Math.max(1, Math.ceil((endMs - startMs) / Math.max(config.gapFiller.minFillMs, 1)));
+  while (current < endMs && idx < maxItems) {
     const filler = fillers[idx % fillers.length]!;
     const durMs = filler.duration_sec ? Math.round(filler.duration_sec * 1000) : 60000;
     const itemEnd = Math.min(current + durMs, endMs);
@@ -312,8 +340,10 @@ function fillRangeFallbackRandomEmergency(
 
     current = itemEnd;
     idx++;
+  }
 
-    if (idx > fillers.length * 10) break;
+  if (idx >= maxItems && current < endMs) {
+    logger.warn(`Fallback gap filler reached safety limit after ${idx} item(s)`);
   }
 
   return items;
@@ -327,7 +357,7 @@ function buildEmergencyLoop(
   logger.warn(`No scheduled items for ${date} — building emergency loop`);
   const dayStart = dayjs(date).startOf('day').valueOf();
   const dayEnd = dayjs(date).endOf('day').valueOf();
-  return fillRange(dayStart, dayEnd, date, db, startPos);
+  return fillRangeEmergencyFallback(dayStart, dayEnd, db, startPos);
 }
 
 export function getPlaylistForDate(date: string): DailyPlaylist | null {

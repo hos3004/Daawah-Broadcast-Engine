@@ -30,6 +30,7 @@ GAP_MAIN_STING_PATH=/srv/daawah/media/bumpers/logo-sting
 GAP_SEASONAL_STING_PATH=/srv/daawah/media/bumpers/sting-hag
 GAP_GENERAL_BUMPERS_PATH=/srv/daawah/media/bumpers/general
 GAP_PATTERN=main,seasonal,general,general,general
+GAP_MIN_FILL_MS=1000
 ```
 
 Missing folders do not crash the playlist build. The engine logs a warning,
@@ -64,6 +65,12 @@ other ready files in that role or folder have been traversed.
 
 Cursor state is stored in SQLite table `bumper_cursor_state`.
 
+Cursor updates happen during `buildDailyPlaylist`, because that build is treated
+as final playlist materialization rather than a preview. Future preview flows
+should call `fillGapWithProfessionalBumpers(..., { updateCursors: false })`.
+That dry-run mode still plans sequence order in memory for the current gap but
+does not write cursor rows.
+
 ## General Bumpers
 
 Files directly inside the general folder are grouped into `_root`. Files inside
@@ -92,6 +99,21 @@ If no professional bumpers are available, `builder.ts` falls back to the legacy
 ready `filler`/`emergency` pool. The fallback path is intentionally named
 `fillRangeFallbackRandomEmergency` and is the only gap filler path that uses
 `ORDER BY RANDOM()`.
+
+Gaps shorter than 30 seconds are still filled when they are at least
+`GAP_MIN_FILL_MS`. The fallback item is trimmed with the same playlist trim
+metadata so short gaps do not create avoidable black time.
+
+When there are no scheduled items for a day, the playlist builder does not use
+the professional 1:1:3 bumper sequence. It builds an emergency-only loop first;
+if there is no ready emergency media, it falls back to the existing
+filler/emergency pool.
+
+## FFmpeg Trim Check
+
+The optional script `scripts/test-ffmpeg-trim-concat.sh` creates a 20 second MP4,
+writes an ffconcat file with `outpoint 5.000` and `duration 5.000`, renders the
+concat output through FFmpeg, and verifies the output duration with FFprobe.
 
 ## How To Check
 

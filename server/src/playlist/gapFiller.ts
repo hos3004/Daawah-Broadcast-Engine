@@ -52,6 +52,16 @@ interface BuildProfessionalGapFillItemsArgs {
   endMs: number;
   db: Db;
   startPosition: number;
+  updateCursors?: boolean;
+}
+
+export interface GapFillerOptions {
+  updateCursors?: boolean;
+}
+
+interface CursorSelectionOptions {
+  updateCursors: boolean;
+  plannedCursors: Map<string, CursorState>;
 }
 
 const DEFAULT_DURATION_MS = 60_000;
@@ -84,9 +94,10 @@ export function fillGapWithProfessionalBumpers(
   startMs: number,
   endMs: number,
   db: Db,
-  startPosition: number
+  startPosition: number,
+  options: GapFillerOptions = {}
 ): PlaylistItem[] {
-  return buildProfessionalGapFillItems({ startMs, endMs, db, startPosition });
+  return buildProfessionalGapFillItems({ startMs, endMs, db, startPosition, ...options });
 }
 
 export function buildProfessionalGapFillItems(args: BuildProfessionalGapFillItemsArgs): PlaylistItem[] {
@@ -99,26 +110,35 @@ export function buildProfessionalGapFillItems(args: BuildProfessionalGapFillItem
     return [];
   }
 
+  const availablePatternRoles = gapConfig.pattern.filter(role => roleHasReadyBumpers(role, catalog));
+  if (availablePatternRoles.length === 0) {
+    logger.warn('Professional gap filler pattern has no ready bumpers; using fallback');
+    return [];
+  }
+
   const items: PlaylistItem[] = [];
   let currentMs = startMs;
   let position = startPosition;
   let patternIndex = 0;
-  let skippedSlots = 0;
   const maxItems = Math.max(10, Math.ceil((endMs - startMs) / 1_000));
+  const maxAttempts = Math.max(gapConfig.pattern.length, maxItems * gapConfig.pattern.length * 2);
+  let attempts = 0;
+  const cursorOptions: CursorSelectionOptions = {
+    updateCursors: args.updateCursors ?? true,
+    plannedCursors: new Map(),
+  };
 
-  while (currentMs < endMs && items.length < maxItems) {
+  while (currentMs < endMs && items.length < maxItems && attempts < maxAttempts) {
+    attempts++;
     const role = gapConfig.pattern[patternIndex % gapConfig.pattern.length];
     patternIndex++;
     if (!role) break;
 
-    const selected = selectNextForRole(role, catalog, db);
+    const selected = selectNextForRole(role, catalog, db, cursorOptions);
     if (!selected) {
-      skippedSlots++;
-      if (skippedSlots >= gapConfig.pattern.length && !hasAnyProfessionalBumpers(catalog)) break;
       continue;
     }
 
-    skippedSlots = 0;
     const originalDurationMs = selected.duration_sec && selected.duration_sec > 0
       ? Math.round(selected.duration_sec * 1000)
       : DEFAULT_DURATION_MS;
@@ -155,6 +175,9 @@ export function buildProfessionalGapFillItems(args: BuildProfessionalGapFillItem
 
   if (items.length >= maxItems && currentMs < endMs) {
     logger.warn(`Professional gap filler reached safety limit after ${items.length} item(s)`);
+  }
+  if (attempts >= maxAttempts && currentMs < endMs) {
+    logger.warn(`Professional gap filler reached attempt limit after ${attempts} attempt(s)`);
   }
 
   return items;
@@ -216,11 +239,12 @@ export function getNextByCursor(
   candidates: MediaFile[],
   db: Db,
   role: SourceRole,
-  folderKey: string | null = null
+  folderKey: string | null = null,
+  options?: CursorSelectionOptions
 ): MediaFile | null {
   if (candidates.length === 0) return null;
 
-  const state = getCursor(cursorKey, db);
+  const state = options?.plannedCursors.get(cursorKey) ?? getCursor(cursorKey, db);
   let selectedIndex = 0;
 
   if (state) {
@@ -239,7 +263,19 @@ export function getNextByCursor(
   const selected = candidates[selectedIndex];
   if (!selected) return null;
 
-  updateCursor(cursorKey, selected, db, role, folderKey);
+  const nextState: CursorState = {
+    cursor_key: cursorKey,
+    role,
+    folder_key: folderKey,
+    last_media_file_id: selected.id,
+    last_played_path: selected.path,
+  };
+  options?.plannedCursors.set(cursorKey, nextState);
+
+  if (options?.updateCursors !== false) {
+    updateCursor(cursorKey, selected, db, role, folderKey);
+  }
+
   return selected;
 }
 
@@ -263,22 +299,27 @@ export function updateCursor(
   `).run(uuidv4(), cursorKey, role, folderKey, selectedItem.id, selectedItem.path);
 }
 
-function selectNextForRole(role: GapPatternRole, catalog: ProfessionalCatalog, db: Db): MediaFile | null {
+function selectNextForRole(
+  role: GapPatternRole,
+  catalog: ProfessionalCatalog,
+  db: Db,
+  options: CursorSelectionOptions
+): MediaFile | null {
   if (role === 'main') {
-    return getNextByCursor('gap:main', catalog.main, db, 'main_sting');
+    return getNextByCursor('gap:main', catalog.main, db, 'main_sting', null, options);
   }
 
   if (role === 'seasonal') {
-    return getNextByCursor('gap:seasonal', catalog.seasonal, db, 'seasonal_sting');
+    return getNextByCursor('gap:seasonal', catalog.seasonal, db, 'seasonal_sting', null, options);
   }
 
-  return getNextGeneralBumper(catalog.generalBuckets, db);
+  return getNextGeneralBumper(catalog.generalBuckets, db, options);
 }
 
-function getNextGeneralBumper(buckets: GeneralBucket[], db: Db): MediaFile | null {
+function getNextGeneralBumper(buckets: GeneralBucket[], db: Db, options: CursorSelectionOptions): MediaFile | null {
   if (buckets.length === 0) return null;
 
-  const bucket = getNextGeneralBucket(buckets, db);
+  const bucket = getNextGeneralBucket(buckets, db, options);
   if (!bucket) return null;
 
   const selected = getNextByCursor(
@@ -286,18 +327,19 @@ function getNextGeneralBumper(buckets: GeneralBucket[], db: Db): MediaFile | nul
     bucket.items,
     db,
     'general_bumper',
-    bucket.folderKey
+    bucket.folderKey,
+    options
   );
 
   if (selected) {
-    updateGeneralFolderCursor(bucket, db);
+    updateGeneralFolderCursor(bucket, db, options);
   }
 
   return selected;
 }
 
-function getNextGeneralBucket(buckets: GeneralBucket[], db: Db): GeneralBucket | null {
-  const state = getCursor('gap:general-folder-index', db);
+function getNextGeneralBucket(buckets: GeneralBucket[], db: Db, options: CursorSelectionOptions): GeneralBucket | null {
+  const state = options.plannedCursors.get('gap:general-folder-index') ?? getCursor('gap:general-folder-index', db);
   let selectedIndex = 0;
 
   if (state?.last_played_path) {
@@ -308,7 +350,7 @@ function getNextGeneralBucket(buckets: GeneralBucket[], db: Db): GeneralBucket |
   return buckets[selectedIndex] ?? null;
 }
 
-function updateGeneralFolderCursor(bucket: GeneralBucket, db: Db): void {
+function updateGeneralFolderCursor(bucket: GeneralBucket, db: Db, options: CursorSelectionOptions): void {
   const cursorItem: MediaFile = {
     id: bucket.folderKey,
     path: bucket.folderKey,
@@ -317,7 +359,18 @@ function updateGeneralFolderCursor(bucket: GeneralBucket, db: Db): void {
     duration_sec: null,
     program_id: null,
   };
-  updateCursor('gap:general-folder-index', cursorItem, db, 'general_bumper', bucket.folderKey);
+  const nextState: CursorState = {
+    cursor_key: 'gap:general-folder-index',
+    role: 'general_bumper',
+    folder_key: bucket.folderKey,
+    last_media_file_id: cursorItem.id,
+    last_played_path: cursorItem.path,
+  };
+  options.plannedCursors.set('gap:general-folder-index', nextState);
+
+  if (options.updateCursors) {
+    updateCursor('gap:general-folder-index', cursorItem, db, 'general_bumper', bucket.folderKey);
+  }
 }
 
 function getCursor(cursorKey: string, db: Db): CursorState | null {
@@ -337,6 +390,12 @@ function hasAnyProfessionalBumpers(catalog: ProfessionalCatalog): boolean {
   return catalog.main.length > 0 ||
     catalog.seasonal.length > 0 ||
     catalog.generalBuckets.some(bucket => bucket.items.length > 0);
+}
+
+function roleHasReadyBumpers(role: GapPatternRole, catalog: ProfessionalCatalog): boolean {
+  if (role === 'main') return catalog.main.length > 0;
+  if (role === 'seasonal') return catalog.seasonal.length > 0;
+  return catalog.generalBuckets.some(bucket => bucket.items.length > 0);
 }
 
 function folderExists(folderPath: string, role: string): boolean {

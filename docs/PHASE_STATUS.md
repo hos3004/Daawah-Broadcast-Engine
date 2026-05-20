@@ -31,6 +31,40 @@ Docs:
 - `docs/GAP_FILLER_ENGINE.md`
 - `docs/LEGACY_GAP_FILLER_SPEC.md`
 
+### PR #2 Review Fixes
+
+**Branch:** `fix/professional-gap-filler-review-fixes`
+**Date:** 2026-05-20
+
+Small blockers addressed before merge review:
+
+- Prevented infinite loops when `GAP_PATTERN` contains only roles with no ready
+  bumpers while another unused role has media.
+- Added `updateCursors=false` dry-run support for future preview callers.
+- Documented that `buildDailyPlaylist` is final materialization, so default
+  cursor updates happen during build.
+- Clarified no-schedule behavior: no scheduled items builds an emergency-first
+  loop and does not use the professional 1:1:3 sequence.
+- Added `GAP_MIN_FILL_MS` and changed fallback filling so short gaps at or above
+  that threshold are trimmed instead of being left empty.
+- Added `scripts/test-ffmpeg-trim-concat.sh`.
+
+FFmpeg trim script result:
+
+```text
+bash scripts/test-ffmpeg-trim-concat.sh
+FFmpeg trim concat OK: 5.200s
+```
+
+Verification:
+
+```text
+npm test --workspace=server -- --runInBand  # 9 suites, 34 tests passed
+npm exec --workspace=server -- tsc --noEmit # passed
+npm exec --workspace=web -- tsc --noEmit    # passed
+npm run build                               # passed
+```
+
 ---
 
 ## Round A — Auth + Build Stability

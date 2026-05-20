@@ -152,6 +152,40 @@ describe('professional gap filler', () => {
 
     expect(fillGapWithProfessionalBumpers(0, 60_000, db, 0)).toEqual([]);
   });
+
+  it('does not loop when the pattern only contains an empty role while another role has bumpers', () => {
+    process.env['GAP_PATTERN'] = 'seasonal';
+
+    const { initDb, getDb, closeDb: close } = require('../db/schema') as typeof import('../db/schema');
+    const { fillGapWithProfessionalBumpers } = require('../playlist/gapFiller') as typeof import('../playlist/gapFiller');
+
+    initDb();
+    closeDb = close;
+    const db = getDb();
+    insertMedia(db, 'main-1', path.join(mainDir, '01-main.mp4'), 60);
+
+    expect(fillGapWithProfessionalBumpers(0, 60_000, db, 0)).toEqual([]);
+  });
+
+  it('supports dry-run cursor planning without persisting cursor updates', () => {
+    process.env['GAP_PATTERN'] = 'main,main';
+
+    const { initDb, getDb, closeDb: close } = require('../db/schema') as typeof import('../db/schema');
+    const { fillGapWithProfessionalBumpers } = require('../playlist/gapFiller') as typeof import('../playlist/gapFiller');
+
+    initDb();
+    closeDb = close;
+    const db = getDb();
+    insertMedia(db, 'main-1', path.join(mainDir, '01-main.mp4'), 60);
+    insertMedia(db, 'main-2', path.join(mainDir, '02-main.mp4'), 60);
+
+    const items = fillGapWithProfessionalBumpers(0, 120_000, db, 0, { updateCursors: false });
+    const cursorCount = (db.prepare('SELECT COUNT(*) as cnt FROM bumper_cursor_state')
+      .get() as { cnt: number }).cnt;
+
+    expect(items.map(item => item.media_file_id)).toEqual(['main-1', 'main-2']);
+    expect(cursorCount).toBe(0);
+  });
 });
 
 function seedProfessionalBumpers(
