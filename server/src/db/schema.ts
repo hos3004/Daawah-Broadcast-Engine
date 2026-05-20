@@ -47,20 +47,38 @@ function runMigrations(db: Database.Database): void {
 
   const currentVersion = (db.prepare('SELECT MAX(version) as v FROM schema_migrations').get() as { v: number | null }).v ?? 0;
 
-  const migrations: Array<{ version: number; sql: string }> = [
+  const migrations: Array<{ version: number; sql?: string; apply?: (db: Database.Database) => void }> = [
     { version: 1, sql: migration_001 },
     { version: 2, sql: migration_002 },
+    { version: 3, apply: migration_003 },
   ];
 
   for (const m of migrations) {
     if (m.version > currentVersion) {
       const applyMigration = db.transaction(() => {
-        db.exec(m.sql);
+        if (m.sql) db.exec(m.sql);
+        m.apply?.(db);
         db.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(m.version);
       });
       applyMigration();
       logger.info(`Applied DB migration v${m.version}`);
     }
+  }
+}
+
+function columnExists(db: Database.Database, tableName: string, columnName: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+  return rows.some(row => row.name === columnName);
+}
+
+function addColumnIfMissing(
+  db: Database.Database,
+  tableName: string,
+  columnName: string,
+  columnDefinition: string
+): void {
+  if (!columnExists(db, tableName, columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition}`);
   }
 }
 
@@ -294,3 +312,22 @@ const migration_002 = `
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `;
+
+function migration_003(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS bumper_cursor_state (
+      id TEXT PRIMARY KEY,
+      cursor_key TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL,
+      folder_key TEXT,
+      last_media_file_id TEXT,
+      last_played_path TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  addColumnIfMissing(db, 'playlist_items', 'source_role', 'source_role TEXT');
+  addColumnIfMissing(db, 'playlist_items', 'is_trimmed', 'is_trimmed INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'playlist_items', 'trim_out_ms', 'trim_out_ms INTEGER');
+  addColumnIfMissing(db, 'playlist_items', 'forced_duration_ms', 'forced_duration_ms INTEGER');
+}

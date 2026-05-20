@@ -6,6 +6,7 @@ import { getDb } from '../db/schema';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { ensureDir } from '../utils/fileUtils';
+import { fillGapWithProfessionalBumpers, type SourceRole } from './gapFiller';
 
 export interface PlaylistItem {
   id: string;
@@ -22,6 +23,10 @@ export interface PlaylistItem {
   show_lower_third: boolean;
   lower_third_path: string | null;
   is_emergency: boolean;
+  source_role: SourceRole;
+  is_trimmed: boolean;
+  trim_out_ms: number | null;
+  forced_duration_ms: number | null;
 }
 
 export interface DailyPlaylist {
@@ -87,7 +92,7 @@ export async function buildDailyPlaylist(date: string): Promise<DailyPlaylist> {
     }
   }
 
-  // Fill any gaps with emergency/filler
+  // Fill any gaps with professional bumpers, falling back to emergency/filler.
   items.push(...fillGaps(items, date, db, position));
 
   // Sort final list by start_time_ms
@@ -106,8 +111,9 @@ export async function buildDailyPlaylist(date: string): Promise<DailyPlaylist> {
     const stmt = db.prepare(`
       INSERT INTO playlist_items
         (id, playlist_id, position, start_time_ms, end_time_ms, type, program_id,
-         media_file_id, title, title_ar, duration_ms, show_lower_third, lower_third_path, is_emergency)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         media_file_id, title, title_ar, duration_ms, show_lower_third, lower_third_path,
+         is_emergency, source_role, is_trimmed, trim_out_ms, forced_duration_ms)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
 
     for (const item of items) {
@@ -115,7 +121,8 @@ export async function buildDailyPlaylist(date: string): Promise<DailyPlaylist> {
         item.id, playlistId, item.position, item.start_time_ms, item.end_time_ms,
         item.type, item.program_id, item.media_file_id, item.title, item.title_ar,
         item.duration_ms, item.show_lower_third ? 1 : 0, item.lower_third_path,
-        item.is_emergency ? 1 : 0
+        item.is_emergency ? 1 : 0, item.source_role, item.is_trimmed ? 1 : 0,
+        item.trim_out_ms, item.forced_duration_ms
       );
     }
   });
@@ -189,7 +196,17 @@ function makeItem(
     show_lower_third: si.type === 'program',
     lower_third_path: null,
     is_emergency: isEmergency,
+    source_role: sourceRoleForScheduleItem(si, isEmergency),
+    is_trimmed: false,
+    trim_out_ms: null,
+    forced_duration_ms: null,
   };
+}
+
+function sourceRoleForScheduleItem(si: ScheduleItem, isEmergency: boolean): SourceRole {
+  if (isEmergency) return 'emergency';
+  if (si.type === 'program') return 'program';
+  return 'filler';
 }
 
 function fillGaps(
@@ -208,8 +225,9 @@ function fillGaps(
   // Check gap at start of day
   const dayStart = dayjs(date).startOf('day').valueOf();
   const firstStart = items[0]?.start_time_ms ?? dayStart;
-  if (firstStart > dayStart + 60000) {
-    fillers.push(...fillRange(dayStart, firstStart, date, db, pos));
+  if (firstStart - dayStart >= config.gapFiller.minFillMs) {
+    const gap = fillRange(dayStart, firstStart, date, db, pos);
+    fillers.push(...gap);
     pos += fillers.length;
   }
 
@@ -217,7 +235,7 @@ function fillGaps(
   for (let i = 0; i < items.length - 1; i++) {
     const gapStart = items[i]!.end_time_ms;
     const gapEnd = items[i + 1]!.start_time_ms;
-    if (gapEnd - gapStart > 60000) {
+    if (gapEnd - gapStart >= config.gapFiller.minFillMs) {
       const gap = fillRange(gapStart, gapEnd, date, db, pos);
       fillers.push(...gap);
       pos += gap.length;
@@ -227,7 +245,7 @@ function fillGaps(
   // Check gap at end of day
   const lastEnd = items[items.length - 1]?.end_time_ms ?? dayStart;
   const dayEnd = dayjs(date).endOf('day').valueOf();
-  if (dayEnd - lastEnd > 60000) {
+  if (dayEnd - lastEnd >= config.gapFiller.minFillMs) {
     const gap = fillRange(lastEnd, dayEnd, date, db, pos);
     fillers.push(...gap);
   }
@@ -238,22 +256,63 @@ function fillGaps(
 function fillRange(
   startMs: number,
   endMs: number,
-  _date: string,
+  date: string,
   db: ReturnType<typeof getDb>,
+  startPos: number
+): PlaylistItem[] {
+  const professionalItems = fillGapWithProfessionalBumpers(startMs, endMs, db, startPos);
+  if (professionalItems.length > 0) return professionalItems;
+
+  logger.warn(`Professional gap filler found no ready bumpers for ${date}; using fallback filler/emergency pool`);
+  return fillRangeFallbackRandomEmergency(startMs, endMs, db, startPos);
+}
+
+function fillRangeFallbackRandomEmergency(
+  startMs: number,
+  endMs: number,
+  db: ReturnType<typeof getDb>,
+  startPos: number
+): PlaylistItem[] {
+  const fillers = db.prepare(`
+    SELECT * FROM media_files WHERE type IN (?, ?) AND status=? ORDER BY RANDOM()
+  `).all('filler', 'emergency', 'ready') as MediaFile[];
+
+  return fillRangeFromFiles(startMs, endMs, fillers, startPos);
+}
+
+function fillRangeEmergencyFallback(
+  startMs: number,
+  endMs: number,
+  db: ReturnType<typeof getDb>,
+  startPos: number
+): PlaylistItem[] {
+  const emergency = db.prepare(`
+    SELECT * FROM media_files WHERE type=? AND status=? ORDER BY RANDOM()
+  `).all('emergency', 'ready') as MediaFile[];
+
+  if (emergency.length > 0) {
+    return fillRangeFromFiles(startMs, endMs, emergency, startPos);
+  }
+
+  logger.warn('No emergency media available for no-schedule loop; using fallback filler/emergency pool');
+  return fillRangeFallbackRandomEmergency(startMs, endMs, db, startPos);
+}
+
+function fillRangeFromFiles(
+  startMs: number,
+  endMs: number,
+  fillers: MediaFile[],
   startPos: number
 ): PlaylistItem[] {
   const items: PlaylistItem[] = [];
   let current = startMs;
   let pos = startPos;
 
-  const fillers = db.prepare(`
-    SELECT * FROM media_files WHERE type IN (?, ?) AND status=? ORDER BY RANDOM()
-  `).all('filler', 'emergency', 'ready') as MediaFile[];
-
-  if (fillers.length === 0) return [];
+  if (fillers.length === 0) return items;
 
   let idx = 0;
-  while (current < endMs - 30000) {
+  const maxItems = Math.max(1, Math.ceil((endMs - startMs) / Math.max(config.gapFiller.minFillMs, 1)));
+  while (current < endMs && idx < maxItems) {
     const filler = fillers[idx % fillers.length]!;
     const durMs = filler.duration_sec ? Math.round(filler.duration_sec * 1000) : 60000;
     const itemEnd = Math.min(current + durMs, endMs);
@@ -272,13 +331,19 @@ function fillRange(
       duration_ms: itemEnd - current,
       show_lower_third: false,
       lower_third_path: null,
-      is_emergency: false,
+      is_emergency: filler.type === 'emergency',
+      source_role: filler.type === 'emergency' ? 'emergency' : 'filler',
+      is_trimmed: durMs > endMs - current,
+      trim_out_ms: durMs > endMs - current ? itemEnd - current : null,
+      forced_duration_ms: durMs > endMs - current ? itemEnd - current : null,
     });
 
     current = itemEnd;
     idx++;
+  }
 
-    if (idx > fillers.length * 10) break;
+  if (idx >= maxItems && current < endMs) {
+    logger.warn(`Fallback gap filler reached safety limit after ${idx} item(s)`);
   }
 
   return items;
@@ -292,7 +357,7 @@ function buildEmergencyLoop(
   logger.warn(`No scheduled items for ${date} — building emergency loop`);
   const dayStart = dayjs(date).startOf('day').valueOf();
   const dayEnd = dayjs(date).endOf('day').valueOf();
-  return fillRange(dayStart, dayEnd, date, db, startPos);
+  return fillRangeEmergencyFallback(dayStart, dayEnd, db, startPos);
 }
 
 export function getPlaylistForDate(date: string): DailyPlaylist | null {

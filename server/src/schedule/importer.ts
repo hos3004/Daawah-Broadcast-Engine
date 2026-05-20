@@ -11,6 +11,7 @@ const ItemSchema = z.object({
   type:              z.enum(['program', 'filler', 'quran', 'promo', 'emergency']),
   program_id:        z.string().optional().nullable(),
   episode_id:        z.string().optional().nullable(),
+  media_file_id:     z.string().optional().nullable(),
   title:             z.string().min(1),
   expected_duration: z.number().positive().optional().nullable(),
   duration_policy:   z.enum(['exact', 'fit', 'allow_overrun', 'fill_gap']).default('exact'),
@@ -35,7 +36,11 @@ export function importScheduleFromJson(
 
   const items: ScheduleItemInput[] = [];
   for (let i = 0; i < raw.length; i++) {
-    const result = ItemSchema.safeParse(raw[i]);
+    const row = raw[i] as Record<string, unknown>;
+    const result = ItemSchema.safeParse({
+      ...row,
+      media_file_id: normalizeOptionalString(row['media_file_id']),
+    });
     if (!result.success) {
       errors.push(`Row ${i + 1}: ${result.error.issues.map(e => e.message).join(', ')}`);
     } else {
@@ -69,6 +74,7 @@ export function importScheduleFromCsv(
     const row = rows[i]!;
     const raw = {
       ...row,
+      media_file_id: normalizeOptionalString(row['media_file_id']),
       expected_duration: row['expected_duration'] ? Number(row['expected_duration']) : undefined,
     };
     const result = ItemSchema.safeParse(raw);
@@ -103,6 +109,7 @@ export function importScheduleFromXlsx(
     const row = rows[i]!;
     const raw = {
       ...row,
+      media_file_id: normalizeOptionalString(row['media_file_id']),
       expected_duration: row['expected_duration'] ? Number(row['expected_duration']) : undefined,
     };
     const result = ItemSchema.safeParse(raw);
@@ -141,14 +148,15 @@ function persistSchedule(
 
     const stmt = db.prepare(`
       INSERT INTO schedule_items
-        (id, schedule_id, date, start_time, type, program_id, episode_id, title, expected_duration, duration_policy, sort_order)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        (id, schedule_id, date, start_time, type, program_id, episode_id, media_file_id,
+         title, expected_duration, duration_policy, sort_order)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     `);
 
     items.forEach((item, idx) => {
       stmt.run(
         uuidv4(), scheduleId, item.date, item.start_time, item.type,
-        item.program_id ?? null, item.episode_id ?? null,
+        item.program_id ?? null, item.episode_id ?? null, item.media_file_id ?? null,
         item.title, item.expected_duration ?? null,
         item.duration_policy, idx
       );
@@ -159,4 +167,10 @@ function persistSchedule(
   logger.info(`Imported schedule "${name}" with ${items.length} items (id=${scheduleId})`);
 
   return { scheduleId, itemCount: items.length, errors: parseErrors };
+}
+
+function normalizeOptionalString(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  const str = String(value).trim();
+  return str === '' ? null : str;
 }

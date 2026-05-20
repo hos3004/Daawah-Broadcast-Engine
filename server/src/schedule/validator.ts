@@ -136,6 +136,29 @@ function checkMissingFiles(
   db: ReturnType<typeof getDb>
 ): void {
   for (const item of items) {
+    if (item.media_file_id) {
+      const media = db.prepare('SELECT id, status FROM media_files WHERE id=?')
+        .get(item.media_file_id) as { id: string; status: string } | undefined;
+
+      if (!media) {
+        issues.push({
+          severity: 'error',
+          code: 'MEDIA_FILE_NOT_FOUND',
+          message: `Media file "${item.media_file_id}" for "${item.title}" on ${date} not found in library`,
+          date,
+          itemId: item.id,
+        });
+      } else if (media.status !== 'ready') {
+        issues.push({
+          severity: 'error',
+          code: 'MEDIA_FILE_NOT_READY',
+          message: `Media file "${item.media_file_id}" for "${item.title}" on ${date} status is "${media.status}"`,
+          date,
+          itemId: item.id,
+        });
+      }
+    }
+
     if (item.type !== 'program') continue;
 
     if (!item.program_id && !item.episode_id && !item.media_file_id) {
@@ -175,7 +198,7 @@ function checkMissingFiles(
       }
     }
 
-    if (item.program_id && !item.episode_id) {
+    if (item.program_id && !item.episode_id && !item.media_file_id) {
       const readyCount = (db.prepare(`
         SELECT COUNT(*) as cnt FROM media_files WHERE program_id=? AND status='ready'
       `).get(item.program_id) as { cnt: number }).cnt;
