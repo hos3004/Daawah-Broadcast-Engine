@@ -76,4 +76,9 @@
   .status-dot-yellow { background: var(--warning); }
   .status-dot-red    { background: var(--danger); }
   .status-dot-gray   { background: var(--text-muted); }
+
+  .ltr-text {
+    direction: ltr;
+    unicode-bidi: plaintext;
+  }
 }

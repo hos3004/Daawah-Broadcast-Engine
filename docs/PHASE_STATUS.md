@@ -1,5 +1,54 @@
 # Phase Status — Production Blockers Round 1
 
+## Read-Only Media Browser
+
+**Branch:** `codex/read-only-media-browser`
+**Date:** 2026-05-20
+
+Status: implemented for review.
+
+This phase adds a safe Media Browser page for inspecting real media folders
+before deeper VPS library tests. It is read-only by design: users can browse,
+search, filter MP4 files, copy full paths, and trigger a scan for the selected
+folder, but cannot delete or rename files.
+
+Implemented pieces:
+
+- New `server/src/media/browser.ts` allowlisted browser service.
+- New protected API endpoints:
+  - `GET /api/media/browser/roots`
+  - `GET /api/media/browser/list`
+  - `POST /api/media/browser/scan`
+- Path traversal protection for `../`, absolute paths, null bytes, and symlink
+  escapes.
+- Configurable roots:
+  - `MEDIA_BROWSER_BASE_PATH`
+  - `MEDIA_BROWSER_ALLOWED_ROOTS`
+  - `MEDIA_BROWSER_STATS_FILE_LIMIT`
+- Selected-folder scanning through the existing scanner pipeline.
+- New web page at `/admin/media-browser`.
+- Arabic filename search, MP4-only filter, copy full path, and scan selected
+  folder controls.
+- Tests in `server/src/__tests__/mediaBrowser.test.ts`.
+
+Docs:
+
+- `docs/MEDIA_BROWSER.md`
+
+Verification:
+
+```text
+npm test --workspace=server -- --runInBand  # 10 suites, 39 tests passed
+npm exec --workspace=server -- tsc --noEmit # passed
+npm exec --workspace=web -- tsc --noEmit    # passed
+npm run build                               # passed
+```
+
+Local note: commands were run with Node `v20.18.0` because the local
+`better-sqlite3` native binding was built for Node 20.
+
+---
+
 ## Professional Gap Filler Engine
 
 **Branch:** `feature/professional-gap-filler-engine`

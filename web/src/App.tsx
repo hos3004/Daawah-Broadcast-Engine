@@ -5,6 +5,7 @@ import Layout from './components/Layout';
 import LoginPage from './pages/Login';
 import DashboardPage from './pages/Dashboard';
 import MediaLibraryPage from './pages/MediaLibrary';
+import MediaBrowserPage from './pages/MediaBrowser';
 import SchedulePage from './pages/Schedule';
 import OverlaysPage from './pages/Overlays';
 import BroadcastPage from './pages/BroadcastControl';
@@ -48,6 +49,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/media" element={<MediaLibraryPage />} />
+        <Route path="/media-browser" element={<MediaBrowserPage />} />
         <Route path="/schedule" element={<SchedulePage />} />
         <Route path="/overlays" element={<OverlaysPage />} />
         <Route path="/broadcast" element={<BroadcastPage />} />

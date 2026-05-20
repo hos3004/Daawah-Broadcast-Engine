@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Film, Calendar, Layers, Radio, ScrollText, LogOut, Wifi, WifiOff } from 'lucide-react';
+import { LayoutDashboard, Film, FolderTree, Calendar, Layers, Radio, ScrollText, LogOut, Wifi, WifiOff } from 'lucide-react';
 import { useState, useCallback } from 'react';
 import { authApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -15,6 +15,7 @@ interface Props {
 const navItems = [
   { to: '/',          label: 'لوحة التحكم',   icon: LayoutDashboard },
   { to: '/media',     label: 'مكتبة الوسائط', icon: Film },
+  { to: '/media-browser', label: 'متصفح الوسائط', icon: FolderTree },
   { to: '/schedule',  label: 'الجدول',        icon: Calendar },
   { to: '/overlays',  label: 'الطبقات',       icon: Layers },
   { to: '/broadcast', label: 'التحكم بالبث',  icon: Radio },
