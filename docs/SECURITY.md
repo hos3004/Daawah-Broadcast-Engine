@@ -74,6 +74,22 @@ All file uploads validate:
 
 ---
 
+## Read-Only Media Browser
+
+The Media Browser only exposes configured roots under `MEDIA_BROWSER_BASE_PATH`
+and uses `rootId + relative path` requests instead of trusting raw absolute
+paths from the client.
+
+Guards:
+- Reject absolute paths, null bytes, and `..` traversal segments.
+- Resolve the real filesystem path before serving a listing.
+- Reject symlink escapes outside the selected allowed root.
+- Keep delete, rename, move, and upload out of scope for the read-only page.
+- Scan selected folder is allowed for `admin`, `editor`, and `operator` roles
+  because it updates DB scan state only; it does not mutate files on disk.
+
+---
+
 ## CORS
 
 ```env

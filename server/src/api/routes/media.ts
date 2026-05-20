@@ -1,7 +1,14 @@
 import { Router, Request, Response } from 'express';
+import fs from 'fs';
 import { requireRole, auditLog } from '../../auth';
 import { getDb } from '../../db/schema';
-import { scanMediaLibrary } from '../../media/scanner';
+import { scanMediaFolder, scanMediaLibrary } from '../../media/scanner';
+import {
+  getMediaBrowserRoots,
+  listMediaBrowserDirectory,
+  MediaBrowserError,
+  resolveMediaBrowserPath,
+} from '../../media/browser';
 import { broadcastWs } from '../../ws';
 import { getTranscodeQueue, cancelTranscodeJob } from '../../workers/transcodeWorker';
 
@@ -25,6 +32,90 @@ mediaRouter.post('/scan', requireRole('admin', 'editor', 'operator'), async (req
       broadcastWs({ type: 'scan_progress', data: progress });
     });
     auditLog(req.user!.id, req.user!.email, 'MEDIA_SCAN_DONE', 'media', undefined, JSON.stringify(result), req.ip);
+    broadcastWs({ type: 'scan_complete', data: result });
+  } catch (err) {
+    broadcastWs({ type: 'scan_error', data: { error: String(err) } });
+  } finally {
+    scanInProgress = false;
+  }
+});
+
+mediaRouter.get('/browser/roots', (_req: Request, res: Response): void => {
+  res.json({ roots: getMediaBrowserRoots({ includeStats: true }) });
+});
+
+mediaRouter.get('/browser/list', (req: Request, res: Response): void => {
+  const {
+    rootId,
+    path: relativePath,
+    search,
+    mp4Only,
+    page = '1',
+    limit = '100',
+  } = req.query as Record<string, string | undefined>;
+
+  if (!rootId) {
+    res.status(400).json({ error: 'rootId is required' });
+    return;
+  }
+
+  try {
+    const result = listMediaBrowserDirectory({
+      rootId,
+      relativePath,
+      search,
+      mp4Only: mp4Only === 'true' || mp4Only === '1',
+      page: parseInt(page, 10),
+      limit: parseInt(limit, 10),
+    });
+    res.json(result);
+  } catch (err) {
+    sendMediaBrowserError(res, err);
+  }
+});
+
+mediaRouter.post('/browser/scan', requireRole('admin', 'editor', 'operator'), async (req: Request, res: Response): Promise<void> => {
+  if (scanInProgress) {
+    res.status(409).json({ error: 'Scan already in progress' });
+    return;
+  }
+
+  const { rootId, path: relativePath } = req.body as { rootId?: string; path?: string };
+  if (!rootId) {
+    res.status(400).json({ error: 'rootId is required' });
+    return;
+  }
+
+  let resolved: ReturnType<typeof resolveMediaBrowserPath>;
+  try {
+    resolved = resolveMediaBrowserPath(rootId, relativePath);
+    if (!fs.statSync(resolved.fullPath).isDirectory()) {
+      res.status(400).json({ error: 'Selected path is not a directory' });
+      return;
+    }
+  } catch (err) {
+    sendMediaBrowserError(res, err);
+    return;
+  }
+
+  scanInProgress = true;
+  auditLog(
+    req.user!.id,
+    req.user!.email,
+    'MEDIA_BROWSER_SCAN_START',
+    'media_folder',
+    resolved.root.id,
+    resolved.fullPath,
+    req.ip
+  );
+
+  res.json({ ok: true, message: 'Selected folder scan started', path: resolved.fullPath });
+
+  try {
+    const result = await scanMediaFolder(resolved.fullPath, (progress) => {
+      broadcastWs({ type: 'scan_progress', data: progress });
+    });
+    auditLog(req.user!.id, req.user!.email, 'MEDIA_BROWSER_SCAN_DONE', 'media_folder', resolved.root.id, JSON.stringify(result), req.ip);
     broadcastWs({ type: 'scan_complete', data: result });
   } catch (err) {
     broadcastWs({ type: 'scan_error', data: { error: String(err) } });
@@ -133,3 +224,11 @@ mediaRouter.delete('/transcode/:jobId', requireRole('admin', 'editor'), async (r
   await cancelTranscodeJob(req.params['jobId']!);
   res.json({ ok: true });
 });
+
+function sendMediaBrowserError(res: Response, err: unknown): void {
+  if (err instanceof MediaBrowserError) {
+    res.status(err.statusCode).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: 'Media browser request failed' });
+}

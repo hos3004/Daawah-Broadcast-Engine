@@ -27,6 +27,12 @@ function optionalInt(key: string, fallback: number): number {
   return n;
 }
 
+function optionalList(key: string, fallback: string[]): string[] {
+  const v = process.env[key];
+  if (v === undefined) return fallback;
+  return v.split(',').map(item => item.trim()).filter(Boolean);
+}
+
 const appRoot = path.resolve(__dirname, '../../..');
 
 export const config = {
@@ -98,6 +104,12 @@ export const config = {
     generalBumpersPath: optional('GAP_GENERAL_BUMPERS_PATH', '/srv/daawah/media/bumpers/general'),
     pattern: optional('GAP_PATTERN', 'main,seasonal,general,general,general'),
     minFillMs: optionalInt('GAP_MIN_FILL_MS', 1000),
+  },
+
+  mediaBrowser: {
+    basePath: optional('MEDIA_BROWSER_BASE_PATH', '/srv/daawah/media'),
+    allowedRoots: optionalList('MEDIA_BROWSER_ALLOWED_ROOTS', ['original-ar', 'source', 'bumpers', 'emergency']),
+    statsFileLimit: optionalInt('MEDIA_BROWSER_STATS_FILE_LIMIT', 10000),
   },
 
   monitoring: {

@@ -29,6 +29,10 @@ export const mediaApi = {
   scan:      () => api.post('/media/scan'),
   files:     (params?: Record<string, string>) => api.get('/media/files', { params }),
   stats:     () => api.get('/media/stats'),
+  browserRoots: () => api.get('/media/browser/roots'),
+  browserList: (params: Record<string, string>) => api.get('/media/browser/list', { params }),
+  scanBrowserFolder: (rootId: string, pathValue: string) =>
+    api.post('/media/browser/scan', { rootId, path: pathValue }),
   programs:  () => api.get('/media/programs'),
   episodes:  (programId?: string) => api.get('/media/episodes', { params: programId ? { program_id: programId } : {} }),
   transcode: (mediaFileId: string) => api.post('/media/transcode', { media_file_id: mediaFileId }),

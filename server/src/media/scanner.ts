@@ -89,13 +89,14 @@ function assignStatus(probe: Awaited<ReturnType<typeof probeFile>>): MediaStatus
 }
 
 async function scanDirectory(
+  scanRoot: string,
   baseDir: string,
   forceType: MediaType | null,
   scannedPaths: Set<string>,
   onProgress?: (p: ScanProgress) => void
 ): Promise<{ scanned: number; updated: number; errors: number }> {
   const db = getDb();
-  const allFiles = walkDir(baseDir, isVideoFile);
+  const allFiles = walkDir(scanRoot, isVideoFile);
   const total = allFiles.length;
   let scanned = 0;
   let updated = 0;
@@ -184,7 +185,7 @@ export async function scanMediaLibrary(
   const mainDir = config.paths.mediaLibrary;
   if (fs.existsSync(mainDir)) {
     logger.info(`Scanning media library: ${mainDir}`);
-    const r = await scanDirectory(mainDir, null, scannedPaths, onProgress);
+    const r = await scanDirectory(mainDir, mainDir, null, scannedPaths, onProgress);
     totalScanned += r.scanned;
     totalUpdated += r.updated;
     totalErrors += r.errors;
@@ -196,7 +197,7 @@ export async function scanMediaLibrary(
   const emergencyDir = config.paths.mediaEmergency;
   if (fs.existsSync(emergencyDir)) {
     logger.info(`Scanning emergency media: ${emergencyDir}`);
-    const r = await scanDirectory(emergencyDir, 'emergency', scannedPaths, onProgress);
+    const r = await scanDirectory(emergencyDir, emergencyDir, 'emergency', scannedPaths, onProgress);
     totalScanned += r.scanned;
     totalUpdated += r.updated;
     totalErrors += r.errors;
@@ -208,7 +209,7 @@ export async function scanMediaLibrary(
   for (const bumperDir of extraBumperDirs) {
     if (fs.existsSync(bumperDir)) {
       logger.info(`Scanning professional bumper media: ${bumperDir}`);
-      const r = await scanDirectory(bumperDir, 'filler', scannedPaths, onProgress);
+      const r = await scanDirectory(bumperDir, bumperDir, 'filler', scannedPaths, onProgress);
       totalScanned += r.scanned;
       totalUpdated += r.updated;
       totalErrors += r.errors;
@@ -236,6 +237,62 @@ export async function scanMediaLibrary(
 
   logger.info(`Scan complete: ${totalScanned} scanned, ${totalUpdated} updated, ${totalErrors} errors, ${deleted} missing. ${duration_ms}ms`);
   return { scanned: totalScanned, updated: totalUpdated, errors: totalErrors, deleted, duration_ms };
+}
+
+export async function scanMediaFolder(
+  folderPath: string,
+  onProgress?: (p: ScanProgress) => void
+): Promise<ScanResult> {
+  const db = getDb();
+  const scanRoot = path.resolve(folderPath);
+  const startTime = Date.now();
+  const scannedPaths = new Set<string>();
+
+  if (!fs.existsSync(scanRoot) || !fs.statSync(scanRoot).isDirectory()) {
+    throw new Error(`Scan folder does not exist or is not a directory: ${scanRoot}`);
+  }
+
+  const target = getScanTargetForPath(scanRoot);
+  logger.info(`Scanning selected media folder: ${scanRoot}`);
+  const r = await scanDirectory(scanRoot, target.baseDir, target.forceType, scannedPaths, onProgress);
+
+  onProgress?.({ total: r.scanned, scanned: r.scanned, errors: r.errors, currentFile: '', phase: 'marking_missing' });
+  const knownRows = db.prepare('SELECT path FROM media_files WHERE status != ?').all('missing') as { path: string }[];
+  let deleted = 0;
+  for (const row of knownRows) {
+    if (isPathInside(row.path, scanRoot) && !scannedPaths.has(row.path)) {
+      db.prepare('UPDATE media_files SET status=? WHERE path=?').run('missing', row.path);
+      deleted++;
+    }
+  }
+
+  const duration_ms = Date.now() - startTime;
+  onProgress?.({ total: r.scanned, scanned: r.scanned, errors: r.errors, currentFile: '', phase: 'done' });
+  broadcastWs({ type: 'scan_progress', data: { total: r.scanned, scanned: r.scanned, errors: r.errors, currentFile: '', phase: 'done' } });
+
+  logger.info(`Selected folder scan complete: ${r.scanned} scanned, ${r.updated} updated, ${r.errors} errors, ${deleted} missing. ${duration_ms}ms`);
+  return { scanned: r.scanned, updated: r.updated, errors: r.errors, deleted, duration_ms };
+}
+
+function getScanTargetForPath(scanRoot: string): { baseDir: string; forceType: MediaType | null } {
+  const mainDir = config.paths.mediaLibrary;
+  const emergencyDir = config.paths.mediaEmergency;
+  const bumperDirs = getExtraProfessionalBumperScanRoots([mainDir, emergencyDir]);
+
+  if (isPathInside(scanRoot, emergencyDir)) {
+    return { baseDir: emergencyDir, forceType: 'emergency' };
+  }
+
+  const bumperDir = bumperDirs.find(root => isPathInside(scanRoot, root));
+  if (bumperDir) {
+    return { baseDir: bumperDir, forceType: 'filler' };
+  }
+
+  if (isPathInside(scanRoot, mainDir)) {
+    return { baseDir: mainDir, forceType: null };
+  }
+
+  return { baseDir: scanRoot, forceType: null };
 }
 
 export interface EmergencyReadiness {
