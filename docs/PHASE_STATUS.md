@@ -1,5 +1,38 @@
 # Phase Status — Production Blockers Round 1
 
+## Professional Gap Filler Engine
+
+**Branch:** `feature/professional-gap-filler-engine`
+**Date:** 2026-05-20
+
+Status: implemented for review.
+
+This phase adds a professional gap filler inspired by
+`docs/LEGACY_GAP_FILLER_SPEC.md`. It replaces simple random gap filling with a
+deterministic `main, seasonal, general, general, general` pattern, persistent
+SQLite cursor state, general-bumper folder round-robin, and FFmpeg concat
+trimming for hard starts.
+
+Implemented pieces:
+
+- New SQLite migration v3 with `bumper_cursor_state`.
+- Safe playlist item metadata columns: `source_role`, `is_trimmed`,
+  `trim_out_ms`, and `forced_duration_ms`.
+- New `server/src/playlist/gapFiller.ts` professional sequence builder.
+- `buildDailyPlaylist` now calls the professional filler first and only uses the
+  random emergency/filler fallback when no professional bumpers are available.
+- Scanner classifies configured professional bumper paths as `type='filler'`.
+- FFmpeg concat generation writes `ffconcat version 1.0`, `outpoint`, and
+  `duration` for trimmed items.
+- Schedule importer and validator now support direct `media_file_id` items.
+
+Docs:
+
+- `docs/GAP_FILLER_ENGINE.md`
+- `docs/LEGACY_GAP_FILLER_SPEC.md`
+
+---
+
 ## Round A — Auth + Build Stability
 
 **Branch:** `fix/production-blockers-round-1`

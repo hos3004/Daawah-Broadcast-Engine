@@ -92,6 +92,13 @@ export const config = {
     lookahead: optionalInt('PLAYLIST_LOOKAHEAD', 3),
   },
 
+  gapFiller: {
+    mainStingPath: optional('GAP_MAIN_STING_PATH', '/srv/daawah/media/bumpers/logo-sting'),
+    seasonalStingPath: optional('GAP_SEASONAL_STING_PATH', '/srv/daawah/media/bumpers/sting-hag'),
+    generalBumpersPath: optional('GAP_GENERAL_BUMPERS_PATH', '/srv/daawah/media/bumpers/general'),
+    pattern: optional('GAP_PATTERN', 'main,seasonal,general,general,general'),
+  },
+
   monitoring: {
     healthCheckInterval: optionalInt('HEALTH_CHECK_INTERVAL', 30000),
     hlsStaleThreshold: optionalInt('HLS_STALE_THRESHOLD', 30),

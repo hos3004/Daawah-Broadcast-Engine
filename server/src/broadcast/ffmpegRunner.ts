@@ -333,8 +333,7 @@ function buildBroadcastCommand(date: string, current: PlaylistItem | null): { ar
 
   // Build FFmpeg concat input — -re for real-time pacing
   const concatListPath = path.join(config.paths.data, 'current-concat.txt');
-  const lines = available.map(i => `file '${i.media_path.replace(/'/g, "'\\''")}'`);
-  fs.writeFileSync(concatListPath, lines.join('\n'), 'utf-8');
+  fs.writeFileSync(concatListPath, buildConcatFileContents(available), 'utf-8');
 
   const broadcastRes = config.broadcast.resolution.split('x');
   const w = broadcastRes[0] ?? '1280';
@@ -434,7 +433,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
   }
 
   const concatPath = path.join(config.paths.data, 'emergency-concat.txt');
-  const lines = files.flatMap(f => ['file \'' + f.path.replace(/'/g, "'\\''") + '\'']);
+  const lines = files.flatMap(f => [formatConcatFileLine(f.path)]);
   fs.writeFileSync(concatPath, lines.join('\n'), 'utf-8');
 
   const hlsPath = path.join(config.paths.hlsOutput, 'stream.m3u8');
@@ -462,6 +461,40 @@ function buildEmergencyCommand(): { args: string[] } | null {
       hlsPath,
     ],
   };
+}
+
+export function buildConcatFileContents(items: PlaylistItem[]): string {
+  const hasTrimmedItems = items.some(item => getTrimDurationMs(item) !== null);
+  const lines: string[] = hasTrimmedItems ? ['ffconcat version 1.0'] : [];
+
+  for (const item of items) {
+    lines.push(formatConcatFileLine(item.media_path));
+
+    const trimDurationMs = getTrimDurationMs(item);
+    if (trimDurationMs !== null) {
+      const seconds = formatSeconds(trimDurationMs);
+      lines.push(`outpoint ${seconds}`);
+      lines.push(`duration ${seconds}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function getTrimDurationMs(item: PlaylistItem): number | null {
+  if (item.is_trimmed !== true && item.trim_out_ms == null && item.forced_duration_ms == null) {
+    return null;
+  }
+
+  return item.trim_out_ms ?? item.forced_duration_ms ?? item.duration_ms;
+}
+
+function formatConcatFileLine(filePath: string): string {
+  return `file '${filePath.replace(/'/g, "'\\''")}'`;
+}
+
+function formatSeconds(ms: number): string {
+  return (ms / 1000).toFixed(3);
 }
 
 function updateCurrentItem(): void {

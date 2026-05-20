@@ -36,6 +36,8 @@ const BROADCAST_PROFILE = {
 };
 
 function getMediaTypeFromPath(filePath: string, baseDir: string): MediaType {
+  if (isProfessionalBumperPath(filePath)) return 'filler';
+
   const rel = path.relative(baseDir, filePath).toLowerCase();
   if (rel.startsWith('programs') || rel.startsWith('program')) return 'program';
   if (rel.startsWith('filler') || rel.startsWith('fillers')) return 'filler';
@@ -44,6 +46,33 @@ function getMediaTypeFromPath(filePath: string, baseDir: string): MediaType {
   if (rel.startsWith('quran')) return 'quran';
   if (rel.startsWith('logo')) return 'logo';
   return 'other';
+}
+
+function isProfessionalBumperPath(filePath: string): boolean {
+  return getProfessionalBumperRoots().some(root => isPathInside(filePath, root));
+}
+
+function getProfessionalBumperRoots(): string[] {
+  return [
+    config.gapFiller.mainStingPath,
+    config.gapFiller.seasonalStingPath,
+    config.gapFiller.generalBumpersPath,
+  ];
+}
+
+function getExtraProfessionalBumperScanRoots(existingRoots: string[]): string[] {
+  const roots: string[] = [];
+  for (const root of getProfessionalBumperRoots()) {
+    if (roots.some(existing => path.resolve(existing) === path.resolve(root))) continue;
+    if (existingRoots.some(existing => isPathInside(root, existing))) continue;
+    roots.push(root);
+  }
+  return roots;
+}
+
+function isPathInside(childPath: string, parentPath: string): boolean {
+  const relativePath = path.relative(path.resolve(parentPath), path.resolve(childPath));
+  return relativePath === '' || (!!relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath));
 }
 
 function assignStatus(probe: Awaited<ReturnType<typeof probeFile>>): MediaStatus {
@@ -175,13 +204,26 @@ export async function scanMediaLibrary(
     logger.warn(`Emergency media path does not exist: ${emergencyDir}`);
   }
 
+  const extraBumperDirs = getExtraProfessionalBumperScanRoots([mainDir, emergencyDir]);
+  for (const bumperDir of extraBumperDirs) {
+    if (fs.existsSync(bumperDir)) {
+      logger.info(`Scanning professional bumper media: ${bumperDir}`);
+      const r = await scanDirectory(bumperDir, 'filler', scannedPaths, onProgress);
+      totalScanned += r.scanned;
+      totalUpdated += r.updated;
+      totalErrors += r.errors;
+    } else {
+      logger.warn(`Professional bumper path does not exist: ${bumperDir}`);
+    }
+  }
+
   // Mark files not seen in this scan as missing (only for known root paths)
   onProgress?.({ total: totalScanned, scanned: totalScanned, errors: totalErrors, currentFile: '', phase: 'marking_missing' });
-  const knownRoots = [mainDir, emergencyDir];
+  const knownRoots = [mainDir, emergencyDir, ...extraBumperDirs];
   const allDbPaths = (db.prepare('SELECT path FROM media_files WHERE status != ?').all('missing') as { path: string }[]).map(r => r.path);
   let deleted = 0;
   for (const dbPath of allDbPaths) {
-    const underKnownRoot = knownRoots.some(root => dbPath.startsWith(root));
+    const underKnownRoot = knownRoots.some(root => isPathInside(dbPath, root));
     if (underKnownRoot && !scannedPaths.has(dbPath)) {
       db.prepare('UPDATE media_files SET status=? WHERE path=?').run('missing', dbPath);
       deleted++;
