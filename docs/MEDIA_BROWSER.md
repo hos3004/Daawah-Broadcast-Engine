@@ -36,7 +36,7 @@ and backup/recovery rules.
 
 ```env
 MEDIA_BROWSER_BASE_PATH=/srv/daawah/media
-MEDIA_BROWSER_ALLOWED_ROOTS=original-ar,bumpers,emergency
+MEDIA_BROWSER_ALLOWED_ROOTS=original-ar,source,bumpers,emergency
 MEDIA_BROWSER_STATS_FILE_LIMIT=10000
 ```
 

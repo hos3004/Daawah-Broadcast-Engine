@@ -25,6 +25,8 @@ Implemented pieces:
   - `MEDIA_BROWSER_BASE_PATH`
   - `MEDIA_BROWSER_ALLOWED_ROOTS`
   - `MEDIA_BROWSER_STATS_FILE_LIMIT`
+- Default allowed roots include `original-ar`, `source`, `bumpers`, and
+  `emergency`.
 - Selected-folder scanning through the existing scanner pipeline.
 - New web page at `/admin/media-browser`.
 - Arabic filename search, MP4-only filter, copy full path, and scan selected

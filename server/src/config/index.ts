@@ -108,7 +108,7 @@ export const config = {
 
   mediaBrowser: {
     basePath: optional('MEDIA_BROWSER_BASE_PATH', '/srv/daawah/media'),
-    allowedRoots: optionalList('MEDIA_BROWSER_ALLOWED_ROOTS', ['original-ar', 'bumpers', 'emergency']),
+    allowedRoots: optionalList('MEDIA_BROWSER_ALLOWED_ROOTS', ['original-ar', 'source', 'bumpers', 'emergency']),
     statsFileLimit: optionalInt('MEDIA_BROWSER_STATS_FILE_LIMIT', 10000),
   },
 
