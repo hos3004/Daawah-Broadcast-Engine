@@ -1,10 +1,12 @@
 import { useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
   CalendarDays,
   CheckCircle2,
   Circle,
   Download,
+  Eye,
   FileSpreadsheet,
   FolderSearch,
   ListChecks,
@@ -289,14 +291,16 @@ export default function SchedulerFoundationPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button
-            className="btn-primary flex items-center gap-2 text-sm"
-            disabled={!selectedFile || !preview || preview.summary.errors > 0 || savingDraft}
-            onClick={() => void saveDraft()}
-          >
-            <Save size={14} />
-            {savingDraft ? 'Saving Draft...' : 'Save Draft'}
-          </button>
+          {preview && preview.summary.errors === 0 && (
+            <button
+              className="btn-primary flex items-center gap-2 text-sm"
+              disabled={!selectedFile || savingDraft}
+              onClick={() => void saveDraft()}
+            >
+              <Save size={14} />
+              {savingDraft ? 'Saving Draft...' : 'Save Draft'}
+            </button>
+          )}
           <button
             className="btn-ghost flex items-center gap-2 text-sm"
             disabled={draftsLoading}
@@ -369,7 +373,7 @@ export default function SchedulerFoundationPage() {
           </div>
           <DataTable
             empty={draftsLoading ? 'Loading drafts...' : 'No draft schedules saved yet'}
-            headers={['Name', 'Date range', 'Programs', 'Slots', 'Status', 'Source Excel', 'Created']}
+            headers={['Name', 'Date range', 'Programs', 'Slots', 'Status', 'Source Excel', 'Created', 'Review']}
             rows={drafts.map(draft => [
               draft.name,
               `${draft.scheduleStartDate} to ${draft.scheduleEndDate}`,
@@ -378,6 +382,14 @@ export default function SchedulerFoundationPage() {
               draft.status === 'draft' && !draft.isActive ? 'inactive draft' : draft.status,
               `${draft.sourceExcelFilename} (${draft.sourceExcelSha256.slice(0, 12)}...)`,
               draft.createdAt,
+              <Link
+                key="review"
+                to={`/scheduler-foundation/drafts/${draft.id}`}
+                className="btn-ghost inline-flex items-center gap-2 text-xs"
+              >
+                <Eye size={13} />
+                Review
+              </Link>,
             ])}
           />
         </section>
