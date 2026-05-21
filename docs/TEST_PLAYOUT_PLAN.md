@@ -2,9 +2,10 @@
 
 ## Purpose
 
-This document defines the design for an isolated test playout phase. It is a
-planning document only. It does not implement playout, does not run ffmpeg, does
-not access media, and does not start any process.
+This document defines the design for an isolated test playout phase and tracks
+the Phase 14A prepare-only harness foundation. The foundation does not implement
+playout execution, does not run ffmpeg, does not access media, and does not
+start any process.
 
 The goal is to prove that a future playout runner can consume approved test
 playlist artifacts without touching the live broadcast path, old OBS workflow,
@@ -283,11 +284,50 @@ Any later implementation PR must keep these concerns separate:
 The first implementation should support a dry, local-only test path before any
 real media playout is considered.
 
-## Explicit Non-Actions In This Phase
+## Phase 14A Harness Foundation
 
-This phase is design only:
+Phase 14A implements a plan-only harness foundation. It prepares and stores
+reviewable test playout plans, but it does not execute them.
 
-- No playout implementation.
+Implemented endpoints:
+
+- `POST /api/scheduler-foundation/test-playout/plans`
+- `GET /api/scheduler-foundation/test-playout/plans`
+- `GET /api/scheduler-foundation/test-playout/plans/:id`
+
+The prepare endpoint requires:
+
+- `confirmPrepareOnly=true`
+- `sourcePlaylistPath` under `generated/playlists/<runId>/playlist.json`
+- `outputMode` of `local_file` or `localhost_hls`
+- `durationLimitSeconds` no greater than 1200 seconds
+
+The harness stores planned output targets only under:
+
+- `generated/test-playout/<planId>/output.mp4`
+- `generated/test-playout/<planId>/hls/`
+
+The generated command preview is for review only. The server does not spawn a
+process, does not run FFmpeg, does not start HLS, does not access media files,
+does not push RTMP, does not use stream keys, does not mutate cursors, and does
+not broadcast.
+
+Rejected targets include:
+
+- `rtmp://`
+- `rtmps://`
+- HTTP/HTTPS live URLs
+- Output outside `generated/test-playout`
+- Stream-key fields or stream-key-looking values
+- `/srv/daawah/media` paths
+- Old OBS paths
+- Production paths
+
+## Explicit Non-Actions
+
+These restrictions remain true after Phase 14A:
+
+- No playout execution implementation.
 - No ffmpeg command execution.
 - No ffprobe command execution.
 - No media access.

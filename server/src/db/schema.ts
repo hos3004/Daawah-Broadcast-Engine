@@ -57,6 +57,7 @@ function runMigrations(db: Database.Database): void {
     { version: 7, apply: migration_007 },
     { version: 8, apply: migration_008 },
     { version: 9, apply: migration_009 },
+    { version: 10, apply: migration_010 },
   ];
 
   for (const m of migrations) {
@@ -622,5 +623,29 @@ function migration_009(db: Database.Database): void {
       ON playlist_materialization_runs(published_schedule_id);
     CREATE INDEX IF NOT EXISTS idx_playlist_materialization_runs_status
       ON playlist_materialization_runs(mode, status);
+  `);
+}
+
+function migration_010(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS test_playout_plans (
+      id TEXT PRIMARY KEY,
+      source_playlist_path TEXT NOT NULL,
+      output_mode TEXT NOT NULL CHECK(output_mode IN ('local_file','localhost_hls')),
+      output_path TEXT NOT NULL,
+      duration_limit_seconds INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('planned')),
+      command_preview_json TEXT NOT NULL,
+      warnings_json TEXT NOT NULL DEFAULT '[]',
+      errors_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_test_playout_plans_created
+      ON test_playout_plans(created_at);
+    CREATE INDEX IF NOT EXISTS idx_test_playout_plans_status
+      ON test_playout_plans(status);
+    CREATE INDEX IF NOT EXISTS idx_test_playout_plans_output_mode
+      ON test_playout_plans(output_mode);
   `);
 }

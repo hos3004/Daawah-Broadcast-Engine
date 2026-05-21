@@ -91,6 +91,14 @@ export const schedulerFoundationApi = {
   }) => api.post('/scheduler-foundation/playlist-materialization/dry-run', payload),
   listPlaylistMaterializationRuns: () => api.get('/scheduler-foundation/playlist-materialization/runs'),
   getPlaylistMaterializationRun: (id: string) => api.get(`/scheduler-foundation/playlist-materialization/runs/${id}`),
+  createTestPlayoutPlan: (payload: {
+    confirmPrepareOnly: boolean;
+    sourcePlaylistPath: string;
+    outputMode: 'local_file' | 'localhost_hls';
+    durationLimitSeconds?: number;
+  }) => api.post('/scheduler-foundation/test-playout/plans', payload),
+  listTestPlayoutPlans: () => api.get('/scheduler-foundation/test-playout/plans'),
+  getTestPlayoutPlan: (id: string) => api.get(`/scheduler-foundation/test-playout/plans/${id}`),
   validationResult: () => api.get('/scheduler-foundation/validation-result'),
   monthlyPreview: () => api.get('/scheduler-foundation/monthly-schedule-preview'),
 };

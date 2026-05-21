@@ -229,6 +229,33 @@ interface MaterializationRun {
   createdAt: string;
 }
 
+interface TestPlayoutPlan {
+  id: string;
+  sourcePlaylistPath: string;
+  outputMode: 'local_file' | 'localhost_hls';
+  outputPath: string;
+  durationLimitSeconds: number;
+  status: 'planned';
+  commandPreview: {
+    command: string;
+    willExecute: false;
+    safety: {
+      ffmpegExecution: false;
+      playoutStarted: false;
+      broadcastStarted: false;
+      rtmpPush: false;
+      streamKeyUsage: false;
+      cursorMutation: false;
+      mediaAccess: false;
+      dnsChanges: false;
+    };
+    notes: string[];
+  };
+  warnings: Array<{ code: string; message: string }>;
+  errors: Array<{ code: string; message: string }>;
+  createdAt: string;
+}
+
 const tabs: Array<{ key: TabKey; label: string; icon: LucideIcon }> = [
   { key: 'programs', label: 'البرامج', icon: FileSpreadsheet },
   { key: 'slots', label: 'المواعيد', icon: CalendarDays },
@@ -275,6 +302,15 @@ export default function SchedulerFoundationPage() {
   const [materializationMessage, setMaterializationMessage] = useState('');
   const [materializationError, setMaterializationError] = useState('');
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [testPlayoutPlans, setTestPlayoutPlans] = useState<TestPlayoutPlan[]>([]);
+  const [testPlayoutLoading, setTestPlayoutLoading] = useState(false);
+  const [testPlayoutPreparing, setTestPlayoutPreparing] = useState(false);
+  const [testPlayoutSourcePath, setTestPlayoutSourcePath] = useState('');
+  const [testPlayoutOutputMode, setTestPlayoutOutputMode] = useState<'local_file' | 'localhost_hls'>('local_file');
+  const [testPlayoutDuration, setTestPlayoutDuration] = useState(1200);
+  const [testPlayoutMessage, setTestPlayoutMessage] = useState('');
+  const [testPlayoutError, setTestPlayoutError] = useState('');
+  const [expandedTestPlayoutPlanId, setExpandedTestPlayoutPlanId] = useState<string | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
   const [error, setError] = useState('');
 
@@ -285,6 +321,7 @@ export default function SchedulerFoundationPage() {
   useEffect(() => {
     void loadActiveSchedule();
     void loadMaterializationRuns();
+    void loadTestPlayoutPlans();
   }, []);
 
   const chooseFile = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -413,6 +450,43 @@ export default function SchedulerFoundationPage() {
       setMaterializationError('Could not create playlist materialization dry-run.');
     } finally {
       setMaterializing(false);
+    }
+  };
+
+  const loadTestPlayoutPlans = async () => {
+    setTestPlayoutLoading(true);
+    setTestPlayoutError('');
+    try {
+      const response = await schedulerFoundationApi.listTestPlayoutPlans();
+      const body = response.data as { plans: TestPlayoutPlan[] };
+      setTestPlayoutPlans(body.plans);
+    } catch {
+      setTestPlayoutError('Could not load test playout plans.');
+    } finally {
+      setTestPlayoutLoading(false);
+    }
+  };
+
+  const prepareTestPlayoutPlan = async () => {
+    if (!testPlayoutSourcePath.trim() || testPlayoutPreparing) return;
+    setTestPlayoutPreparing(true);
+    setTestPlayoutMessage('');
+    setTestPlayoutError('');
+    try {
+      const response = await schedulerFoundationApi.createTestPlayoutPlan({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: testPlayoutSourcePath.trim(),
+        outputMode: testPlayoutOutputMode,
+        durationLimitSeconds: testPlayoutDuration,
+      });
+      const body = response.data as { plan: TestPlayoutPlan };
+      setTestPlayoutMessage(`Plan prepared: ${body.plan.id}`);
+      setExpandedTestPlayoutPlanId(body.plan.id);
+      await loadTestPlayoutPlans();
+    } catch {
+      setTestPlayoutError('Could not prepare the test playout plan. Check that the playlist path is under generated/playlists and the output target is test-only.');
+    } finally {
+      setTestPlayoutPreparing(false);
     }
   };
 
@@ -611,6 +685,124 @@ export default function SchedulerFoundationPage() {
             )
           ))}
         </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h3 className="font-semibold">Test Playout Planning</h3>
+          <span className="badge badge-warning">Plan only. Does not run FFmpeg. Does not broadcast.</span>
+        </div>
+        <div className="rounded-md border p-3" style={{ borderColor: 'var(--bg-border)', background: 'rgba(232,160,32,0.08)' }}>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="badge badge-info">no Run button</span>
+            <span className="badge badge-info">no Start button</span>
+            <span className="badge badge-info">no Stop button</span>
+            <span className="badge badge-info">no RTMP</span>
+            <span className="badge badge-info">no stream keys</span>
+            <span className="badge badge-info">generated/test-playout only</span>
+          </div>
+        </div>
+        <div className="rounded-md border p-4 space-y-3" style={{ borderColor: 'var(--bg-border)' }}>
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+            <label className="lg:col-span-2 text-xs space-y-1">
+              <span style={{ color: 'var(--text-muted)' }}>Dry-run playlist path</span>
+              <input
+                className="w-full rounded-md border px-3 py-2 bg-transparent"
+                style={{ borderColor: 'var(--bg-border)' }}
+                value={testPlayoutSourcePath}
+                placeholder="generated/playlists/<runId>/playlist.json"
+                onChange={event => setTestPlayoutSourcePath(event.target.value)}
+              />
+            </label>
+            <label className="text-xs space-y-1">
+              <span style={{ color: 'var(--text-muted)' }}>Output mode</span>
+              <select
+                className="w-full rounded-md border px-3 py-2 bg-transparent"
+                style={{ borderColor: 'var(--bg-border)' }}
+                value={testPlayoutOutputMode}
+                onChange={event => setTestPlayoutOutputMode(event.target.value as 'local_file' | 'localhost_hls')}
+              >
+                <option value="local_file">local file</option>
+                <option value="localhost_hls">localhost HLS</option>
+              </select>
+            </label>
+            <label className="text-xs space-y-1">
+              <span style={{ color: 'var(--text-muted)' }}>Duration limit seconds</span>
+              <input
+                className="w-full rounded-md border px-3 py-2 bg-transparent"
+                style={{ borderColor: 'var(--bg-border)' }}
+                type="number"
+                min={1}
+                max={1200}
+                value={testPlayoutDuration}
+                onChange={event => setTestPlayoutDuration(Number(event.target.value))}
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="btn-primary flex items-center gap-2 text-sm"
+              disabled={!testPlayoutSourcePath.trim() || testPlayoutPreparing}
+              onClick={() => void prepareTestPlayoutPlan()}
+            >
+              <ShieldCheck size={14} />
+              {testPlayoutPreparing ? 'Preparing Plan...' : 'Prepare Plan'}
+            </button>
+            <button
+              className="btn-ghost flex items-center gap-2 text-sm"
+              disabled={testPlayoutLoading}
+              onClick={() => void loadTestPlayoutPlans()}
+            >
+              <ListChecks size={14} />
+              {testPlayoutLoading ? 'Loading Plans...' : 'Refresh Plans'}
+            </button>
+          </div>
+          {testPlayoutMessage && <p className="text-xs" style={{ color: 'var(--success)' }}>{testPlayoutMessage}</p>}
+          {testPlayoutError && <p className="text-xs" style={{ color: 'var(--danger)' }}>{testPlayoutError}</p>}
+        </div>
+        <DataTable
+          empty={testPlayoutLoading ? 'Loading test playout plans...' : 'No test playout plans yet'}
+          headers={['Plan', 'Mode', 'Status', 'Duration', 'Source playlist', 'Output', 'Details']}
+          rows={testPlayoutPlans.map(plan => [
+            plan.id,
+            plan.outputMode === 'local_file' ? 'local file' : 'localhost HLS',
+            plan.status,
+            `${plan.durationLimitSeconds}s`,
+            plan.sourcePlaylistPath,
+            plan.outputPath,
+            <button
+              key="details"
+              className="btn-ghost inline-flex items-center gap-2 text-xs"
+              onClick={() => setExpandedTestPlayoutPlanId(expandedTestPlayoutPlanId === plan.id ? null : plan.id)}
+            >
+              <Eye size={13} />
+              {expandedTestPlayoutPlanId === plan.id ? 'Hide' : 'Details'}
+            </button>,
+          ])}
+        />
+        {testPlayoutPlans.map(plan => (
+          expandedTestPlayoutPlanId === plan.id && (
+            <div key={plan.id} className="rounded-md border p-3 text-xs space-y-3" style={{ borderColor: 'var(--bg-border)' }}>
+              <div className="flex flex-wrap gap-2">
+                <span className="badge badge-info">will execute: false</span>
+                <span className="badge badge-info">ffmpeg execution: false</span>
+                <span className="badge badge-info">playout started: false</span>
+                <span className="badge badge-info">broadcast started: false</span>
+                <span className="badge badge-info">stream key usage: false</span>
+                <span className="badge badge-info">cursor mutation: false</span>
+                <span className="badge badge-info">media access: false</span>
+              </div>
+              <pre className="rounded-md border p-3 overflow-x-auto" style={{ borderColor: 'var(--bg-border)', color: 'var(--text-muted)' }}>
+                {plan.commandPreview.command}
+              </pre>
+              {plan.warnings.length > 0 && (
+                <div style={{ color: 'var(--warning)' }}>
+                  {plan.warnings.map(warning => <div key={warning.code}>{warning.code}: {warning.message}</div>)}
+                </div>
+              )}
+            </div>
+          )
+        ))}
       </section>
 
       {(drafts.length > 0 || draftsLoading) && (
