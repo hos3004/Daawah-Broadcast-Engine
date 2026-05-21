@@ -60,6 +60,17 @@ describe('scheduler foundation routes', () => {
     expect(response.headers.get('content-disposition')).toContain('scheduler_excel_import_template.xlsx');
   });
 
+  it('keeps media registry scan preview disabled by default', async () => {
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/media-registry/scan-preview`, {
+      method: 'POST',
+    });
+    const body = await response.json() as { code: string; error: string };
+
+    expect(response.status).toBe(403);
+    expect(body.code).toBe('MEDIA_SCAN_PREVIEW_DISABLED');
+    expect(body.error).toContain('ENABLE_MEDIA_SCAN_PREVIEW=true');
+  });
+
   it('accepts an XLSX upload preview without activating schedules or updating cursors', async () => {
     const { getDb } = require('../db/schema') as typeof import('../db/schema');
     const db = getDb();

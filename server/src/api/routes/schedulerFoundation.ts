@@ -42,6 +42,14 @@ schedulerFoundationRouter.post(
   '/media-registry/scan-preview',
   requireRole('admin', 'editor', 'operator'),
   (req: Request, res: Response): void => {
+    if (!isMediaScanPreviewEnabled()) {
+      res.status(403).json({
+        error: 'Media registry scan preview is disabled by default. Set ENABLE_MEDIA_SCAN_PREVIEW=true to enable this read-only preview endpoint.',
+        code: 'MEDIA_SCAN_PREVIEW_DISABLED',
+      });
+      return;
+    }
+
     const body = req.body as {
       root_key?: string;
       maxDepth?: number;
@@ -145,4 +153,8 @@ function sendFoundationError(res: Response, err: unknown): void {
     return;
   }
   res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+}
+
+function isMediaScanPreviewEnabled(): boolean {
+  return process.env['ENABLE_MEDIA_SCAN_PREVIEW'] === 'true';
 }
