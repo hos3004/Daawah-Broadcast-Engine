@@ -174,7 +174,7 @@ interface PublishedListItem {
   sourceDraftId: string;
   name: string;
   status: 'published';
-  isActive: false;
+  isActive: boolean;
   validationStatus: 'draft_valid';
   scheduleStartDate: string;
   scheduleEndDate: string;
@@ -446,7 +446,7 @@ export default function SchedulerFoundationPage() {
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="font-semibold">Published Schedules</h3>
-            <span className="badge badge-ready">inactive until activation phase</span>
+            <span className="badge badge-ready">activation marks one active schedule only</span>
           </div>
           <DataTable
             empty={publishedLoading ? 'Loading published schedules...' : 'No published schedules yet'}
@@ -456,7 +456,7 @@ export default function SchedulerFoundationPage() {
               `${schedule.scheduleStartDate} to ${schedule.scheduleEndDate}`,
               schedule.programCount,
               schedule.slotCount,
-              schedule.status === 'published' && !schedule.isActive ? 'published inactive' : schedule.status,
+              schedule.isActive ? 'published active' : 'published inactive',
               schedule.sourceDraftId,
               schedule.publishedAt,
               <Link

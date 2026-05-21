@@ -36,7 +36,8 @@ describe('scheduler foundation routes', () => {
     const app = express();
     app.use(express.json({ limit: '2mb' }));
     app.use((req: Request, _res: Response, next: NextFunction) => {
-      req.user = { id: 'user-1', email: 'test@example.com', role: 'admin' };
+      const role = (req.header('x-test-role') ?? 'admin') as 'admin' | 'editor' | 'operator';
+      req.user = { id: 'user-1', email: 'test@example.com', role };
       next();
     });
     app.use('/api/scheduler-foundation', schedulerFoundationRouter);
@@ -335,6 +336,142 @@ describe('scheduler foundation routes', () => {
     expect(auditCount).toBe(1);
   });
 
+  it('activates a published schedule with double confirmation without materializing playlists or mutating cursors', async () => {
+    const { getDb } = require('../db/schema') as typeof import('../db/schema');
+    const db = getDb();
+    db.prepare('INSERT INTO cursors (key, value) VALUES (?, ?)').run('program:test', 'file-1');
+
+    const first = await saveAndPublishValidDraft(baseUrl, 'First published schedule', 'first.xlsx');
+    const second = await saveAndPublishValidDraft(baseUrl, 'Second published schedule', 'second.xlsx');
+    const cursorCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+
+    const editorResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-test-role': 'editor' },
+      body: JSON.stringify({
+        scheduleId: first.publishedId,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${first.publishedId}`,
+      }),
+    });
+    expect(editorResponse.status).toBe(403);
+
+    const rejectedResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scheduleId: first.publishedId,
+        confirmActivation: true,
+        confirmationText: 'activate please',
+      }),
+    });
+    const rejected = await rejectedResponse.json() as { code: string };
+    expect(rejectedResponse.status).toBe(400);
+    expect(rejected.code).toBe('ACTIVATION_TEXT_MISMATCH');
+
+    const activateFirstResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scheduleId: first.publishedId,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${first.publishedId}`,
+      }),
+    });
+    const activatedFirst = await activateFirstResponse.json() as {
+      activeSchedule: { id: string; isActive: boolean };
+      previousPublishedScheduleId: string | null;
+      safety: {
+        scheduleActivation: boolean;
+        cursorUpdates: boolean;
+        playlistMaterialization: boolean;
+        ffmpeg: boolean;
+        playout: boolean;
+        broadcast: boolean;
+      };
+    };
+
+    expect(activateFirstResponse.status).toBe(200);
+    expect(activatedFirst.activeSchedule).toMatchObject({ id: first.publishedId, isActive: true });
+    expect(activatedFirst.previousPublishedScheduleId).toBeNull();
+    expect(activatedFirst.safety).toMatchObject({
+      scheduleActivation: true,
+      cursorUpdates: false,
+      playlistMaterialization: false,
+      ffmpeg: false,
+      playout: false,
+      broadcast: false,
+    });
+
+    const alreadyActiveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scheduleId: first.publishedId,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${first.publishedId}`,
+      }),
+    });
+    const alreadyActive = await alreadyActiveResponse.json() as { code: string };
+    expect(alreadyActiveResponse.status).toBe(409);
+    expect(alreadyActive.code).toBe('ALREADY_ACTIVE');
+
+    const activateSecondResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${second.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scheduleId: second.publishedId,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${second.publishedId}`,
+      }),
+    });
+    const activatedSecond = await activateSecondResponse.json() as {
+      activeSchedule: { id: string; isActive: boolean };
+      previousPublishedScheduleId: string | null;
+      activeState: { publishedScheduleId: string; previousPublishedScheduleId: string | null };
+    };
+
+    expect(activateSecondResponse.status).toBe(200);
+    expect(activatedSecond.activeSchedule).toMatchObject({ id: second.publishedId, isActive: true });
+    expect(activatedSecond.previousPublishedScheduleId).toBe(first.publishedId);
+    expect(activatedSecond.activeState).toMatchObject({
+      publishedScheduleId: second.publishedId,
+      previousPublishedScheduleId: first.publishedId,
+    });
+
+    const listResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules`);
+    const list = await listResponse.json() as { publishedSchedules: Array<{ id: string; isActive: boolean }> };
+    expect(listResponse.status).toBe(200);
+    expect(list.publishedSchedules.find(schedule => schedule.id === first.publishedId)?.isActive).toBe(false);
+    expect(list.publishedSchedules.find(schedule => schedule.id === second.publishedId)?.isActive).toBe(true);
+
+    const readSecondResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${second.publishedId}`);
+    const readSecond = await readSecondResponse.json() as { publishedSchedule: { id: string; isActive: boolean } };
+    expect(readSecondResponse.status).toBe(200);
+    expect(readSecond.publishedSchedule).toMatchObject({ id: second.publishedId, isActive: true });
+
+    const activeStateCount = (db.prepare('SELECT COUNT(*) as cnt FROM scheduler_active_schedule_state').get() as { cnt: number }).cnt;
+    const activeState = db.prepare("SELECT * FROM scheduler_active_schedule_state WHERE id='active'").get() as {
+      published_schedule_id: string;
+      previous_published_schedule_id: string | null;
+    };
+    const publishedActiveSum = (db.prepare('SELECT COALESCE(SUM(is_active), 0) as cnt FROM scheduler_published_schedules').get() as { cnt: number }).cnt;
+    const scheduleCount = (db.prepare('SELECT COUNT(*) as cnt FROM schedules').get() as { cnt: number }).cnt;
+    const scheduleItemCount = (db.prepare('SELECT COUNT(*) as cnt FROM schedule_items').get() as { cnt: number }).cnt;
+    const playlistCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
+    const cursorCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const activationAuditCount = (db.prepare("SELECT COUNT(*) as cnt FROM audit_logs WHERE action='scheduler_foundation.activate_schedule'").get() as { cnt: number }).cnt;
+    expect(activeStateCount).toBe(1);
+    expect(activeState.published_schedule_id).toBe(second.publishedId);
+    expect(activeState.previous_published_schedule_id).toBe(first.publishedId);
+    expect(publishedActiveSum).toBe(0);
+    expect(scheduleCount).toBe(0);
+    expect(scheduleItemCount).toBe(0);
+    expect(playlistCount).toBe(0);
+    expect(cursorCountAfter).toBe(cursorCountBefore);
+    expect(activationAuditCount).toBe(2);
+  });
+
   it('saves an inactive invalid draft when the preview has validation errors', async () => {
     const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
       method: 'POST',
@@ -585,6 +722,43 @@ async function previewWorkbook(baseUrl: string, workbook: Buffer): Promise<Recor
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+async function saveAndPublishValidDraft(
+  baseUrl: string,
+  name: string,
+  filename: string
+): Promise<{ draftId: string; publishedId: string }> {
+  const workbook = makeWorkbookBuffer();
+  const preview = await previewWorkbook(baseUrl, workbook);
+
+  const saveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      sourceExcel: {
+        filename,
+        sha256: sha256(workbook),
+      },
+      preview,
+    }),
+  });
+  const saved = await saveResponse.json() as { draft: { id: string; validationStatus: string } };
+  expect(saveResponse.status).toBe(201);
+  expect(saved.draft.validationStatus).toBe('draft_valid');
+
+  const publishResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules/${saved.draft.id}/publish`, {
+    method: 'POST',
+  });
+  const published = await publishResponse.json() as { publishedSchedule: { id: string; isActive: boolean } };
+  expect(publishResponse.status).toBe(201);
+  expect(published.publishedSchedule.isActive).toBe(false);
+
+  return {
+    draftId: saved.draft.id,
+    publishedId: published.publishedSchedule.id,
+  };
 }
 
 function listen(app: express.Express): Promise<http.Server> {

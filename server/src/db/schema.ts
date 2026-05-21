@@ -55,6 +55,7 @@ function runMigrations(db: Database.Database): void {
     { version: 5, apply: migration_005 },
     { version: 6, apply: migration_006 },
     { version: 7, apply: migration_007 },
+    { version: 8, apply: migration_008 },
   ];
 
   for (const m of migrations) {
@@ -577,5 +578,24 @@ function migration_007(db: Database.Database): void {
       BEGIN
         SELECT RAISE(ABORT, 'published schedule snapshots are immutable');
       END;
+  `);
+}
+
+function migration_008(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduler_active_schedule_state (
+      id TEXT PRIMARY KEY CHECK(id = 'active'),
+      published_schedule_id TEXT NOT NULL REFERENCES scheduler_published_schedules(id),
+      previous_published_schedule_id TEXT REFERENCES scheduler_published_schedules(id),
+      activated_by TEXT,
+      activated_at TEXT NOT NULL,
+      confirmation_text TEXT NOT NULL,
+      safety_check_summary_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduler_active_schedule_published
+      ON scheduler_active_schedule_state(published_schedule_id);
   `);
 }

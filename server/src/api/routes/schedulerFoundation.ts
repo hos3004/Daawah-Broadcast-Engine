@@ -12,6 +12,7 @@ import {
 } from '../../media/registry';
 import { SafeRootError } from '../../media/safeRoots';
 import {
+  activatePublishedSchedule,
   DraftValidationError,
   getPublishedSchedule,
   getSchedulerDraft,
@@ -270,6 +271,41 @@ schedulerFoundationRouter.get(
   }
 );
 
+schedulerFoundationRouter.post(
+  '/published-schedules/:id/activate',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Published schedule id is required', code: 'PUBLISHED_SCHEDULE_ID_REQUIRED' });
+      return;
+    }
+
+    const body = req.body as {
+      scheduleId?: string;
+      confirmActivation?: boolean;
+      confirmationText?: string;
+    };
+
+    try {
+      const result = activatePublishedSchedule({
+        publishedScheduleId: id,
+        requestedScheduleId: body.scheduleId,
+        confirmActivation: body.confirmActivation,
+        confirmationText: body.confirmationText,
+        activatedBy: req.user?.id ?? null,
+      });
+
+      res.json({
+        mode: 'activated',
+        ...result,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
 schedulerFoundationRouter.get(
   '/published-schedules/:id',
   requireRole('admin', 'editor', 'operator'),
@@ -307,7 +343,7 @@ schedulerFoundationRouter.get('/monthly-schedule-preview', (_req: Request, res: 
 
 function sendFoundationError(res: Response, err: unknown): void {
   if (err instanceof DraftValidationError) {
-    res.status(400).json({ error: err.message, code: err.code });
+    res.status(err.statusCode).json({ error: err.message, code: err.code });
     return;
   }
   if (err instanceof SafeRootError) {
