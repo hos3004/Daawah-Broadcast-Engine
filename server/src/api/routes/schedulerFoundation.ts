@@ -11,7 +11,17 @@ import {
   scanMediaRegistry,
 } from '../../media/registry';
 import { SafeRootError } from '../../media/safeRoots';
-import { previewExcelImport, previewExcelImportFromXlsx } from '../../schedule/excelPreview';
+import {
+  DraftValidationError,
+  getSchedulerDraft,
+  listSchedulerDrafts,
+  saveSchedulerDraft,
+} from '../../schedule/drafts';
+import {
+  previewExcelImport,
+  previewExcelImportFromXlsx,
+  type ExcelImportPreviewResult,
+} from '../../schedule/excelPreview';
 import { buildMonthlySchedulePreviewStub } from '../../schedule/monthlyPreview';
 import { isSafeUploadMime } from '../../utils/fileUtils';
 
@@ -134,6 +144,82 @@ schedulerFoundationRouter.post(
   }
 );
 
+schedulerFoundationRouter.post(
+  '/draft-schedules',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    try {
+      const body = req.body as {
+        name?: string;
+        sourceExcel?: {
+          filename?: string;
+          sha256?: string;
+        };
+        preview?: unknown;
+      };
+      const draft = saveSchedulerDraft({
+        name: body.name,
+        sourceExcel: {
+          filename: body.sourceExcel?.filename ?? '',
+          sha256: body.sourceExcel?.sha256 ?? '',
+        },
+        preview: body.preview as ExcelImportPreviewResult,
+        createdBy: req.user?.id ?? null,
+      });
+
+      res.status(201).json({
+        mode: 'draft',
+        draft,
+        safety: {
+          inactiveByDefault: true,
+          scheduleActivation: false,
+          cursorUpdates: false,
+          playlistMaterialization: false,
+          ffmpeg: false,
+          playout: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/draft-schedules',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const limit = Number(req.query['limit'] ?? 50);
+    res.json({
+      mode: 'draft-list',
+      drafts: listSchedulerDrafts(limit),
+    });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/draft-schedules/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Draft schedule id is required', code: 'DRAFT_ID_REQUIRED' });
+      return;
+    }
+
+    const draft = getSchedulerDraft(id);
+    if (!draft) {
+      res.status(404).json({ error: 'Draft schedule not found', code: 'DRAFT_NOT_FOUND' });
+      return;
+    }
+    res.json({
+      mode: 'draft',
+      draft,
+    });
+  }
+);
+
 schedulerFoundationRouter.get('/validation-result', (_req: Request, res: Response): void => {
   res.json({
     mode: 'preview',
@@ -148,6 +234,10 @@ schedulerFoundationRouter.get('/monthly-schedule-preview', (_req: Request, res: 
 });
 
 function sendFoundationError(res: Response, err: unknown): void {
+  if (err instanceof DraftValidationError) {
+    res.status(400).json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof SafeRootError) {
     res.status(400).json({ error: err.message, code: err.code });
     return;

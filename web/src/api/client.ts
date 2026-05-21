@@ -69,6 +69,13 @@ export const schedulerFoundationApi = {
     fd.append('file', file);
     return api.post('/scheduler-foundation/excel-import/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
+  saveDraftSchedule: (payload: {
+    name?: string;
+    sourceExcel: { filename: string; sha256: string };
+    preview: unknown;
+  }) => api.post('/scheduler-foundation/draft-schedules', payload),
+  listDraftSchedules: () => api.get('/scheduler-foundation/draft-schedules'),
+  getDraftSchedule: (id: string) => api.get(`/scheduler-foundation/draft-schedules/${id}`),
   validationResult: () => api.get('/scheduler-foundation/validation-result'),
   monthlyPreview: () => api.get('/scheduler-foundation/monthly-schedule-preview'),
 };

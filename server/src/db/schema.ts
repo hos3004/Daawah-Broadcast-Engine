@@ -52,6 +52,7 @@ function runMigrations(db: Database.Database): void {
     { version: 2, sql: migration_002 },
     { version: 3, apply: migration_003 },
     { version: 4, apply: migration_004 },
+    { version: 5, apply: migration_005 },
   ];
 
   for (const m of migrations) {
@@ -463,4 +464,38 @@ function migration_004(db: Database.Database): void {
     is_readonly: 0,
     is_original_library: 0,
   });
+}
+
+function migration_005(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduler_drafts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK(status IN ('draft')),
+      is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active = 0),
+      schedule_start_date TEXT NOT NULL,
+      schedule_end_date TEXT NOT NULL,
+      timezone TEXT NOT NULL,
+      source_excel_filename TEXT NOT NULL,
+      source_excel_sha256 TEXT NOT NULL,
+      validation_summary_json TEXT NOT NULL,
+      settings_json TEXT NOT NULL,
+      programs_json TEXT NOT NULL,
+      slots_json TEXT NOT NULL,
+      folder_matches_json TEXT NOT NULL,
+      issues_json TEXT NOT NULL,
+      schedule_preview_json TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_created
+      ON scheduler_drafts(created_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_range
+      ON scheduler_drafts(schedule_start_date, schedule_end_date);
+    CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_status
+      ON scheduler_drafts(status, is_active);
+  `);
 }
