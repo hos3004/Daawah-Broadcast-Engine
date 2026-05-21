@@ -20,6 +20,7 @@ describe('scheduler foundation routes', () => {
     process.env['NODE_ENV'] = 'test';
     process.env['DB_PATH'] = path.join(tempDir, 'test.db');
     process.env['DATA_PATH'] = tempDir;
+    process.env['PLAYLIST_MATERIALIZATION_PROJECT_ROOT'] = tempDir;
 
     const { initDb, getDb, closeDb: close } = require('../db/schema') as typeof import('../db/schema');
     const { schedulerFoundationRouter } = require('../api/routes/schedulerFoundation') as typeof import('../api/routes/schedulerFoundation');
@@ -472,6 +473,143 @@ describe('scheduler foundation routes', () => {
     expect(activationAuditCount).toBe(2);
   });
 
+  it('returns safe active schedule status when no active schedule exists', async () => {
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/active-schedule`);
+    const body = await response.json() as {
+      activeSchedule: unknown;
+      activeState: unknown;
+      safety: {
+        cursorUpdates: boolean;
+        playlistMaterialization: boolean;
+        ffmpeg: boolean;
+        ffprobe: boolean;
+        playout: boolean;
+        broadcast: boolean;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.activeSchedule).toBeNull();
+    expect(body.activeState).toBeNull();
+    expect(body.safety).toMatchObject({
+      cursorUpdates: false,
+      playlistMaterialization: false,
+      ffmpeg: false,
+      ffprobe: false,
+      playout: false,
+      broadcast: false,
+    });
+  });
+
+  it('creates playlist materialization dry-run artifacts only under generated/playlists without mutating cursors', async () => {
+    const { getDb } = require('../db/schema') as typeof import('../db/schema');
+    const db = getDb();
+    db.prepare('INSERT INTO cursors (key, value) VALUES (?, ?)').run('program:test', 'file-1');
+    const published = await saveAndPublishValidDraft(baseUrl, 'Materialization schedule', 'materialize.xlsx');
+    await activatePublishedScheduleForTest(baseUrl, published.publishedId);
+    const cursorCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+
+    const missingConfirmResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmDryRun: false, publishedScheduleId: published.publishedId }),
+    });
+    const missingConfirm = await missingConfirmResponse.json() as { code: string };
+    expect(missingConfirmResponse.status).toBe(400);
+    expect(missingConfirm.code).toBe('DRY_RUN_CONFIRMATION_REQUIRED');
+
+    const unsafeResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmDryRun: true,
+        publishedScheduleId: published.publishedId,
+        outputRoot: path.join(tempDir, 'outside-generated'),
+      }),
+    });
+    const unsafe = await unsafeResponse.json() as { code: string };
+    expect(unsafeResponse.status).toBe(400);
+    expect(unsafe.code).toBe('UNSAFE_OUTPUT_PATH');
+
+    const dryRunResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmDryRun: true,
+        publishedScheduleId: published.publishedId,
+      }),
+    });
+    const dryRun = await dryRunResponse.json() as {
+      run: {
+        id: string;
+        outputPath: string;
+        status: string;
+        summary: {
+          itemCount: number;
+          safety: {
+            cursorMutation: boolean;
+            ffmpeg: boolean;
+            ffprobe: boolean;
+            playout: boolean;
+            broadcast: boolean;
+            mediaModification: boolean;
+          };
+        };
+        warnings: Array<{ code: string }>;
+      };
+    };
+    const generatedRoot = path.join(tempDir, 'generated', 'playlists');
+
+    expect(dryRunResponse.status).toBe(201);
+    expect(dryRun.run.status).toBe('completed');
+    expect(path.resolve(dryRun.run.outputPath).startsWith(`${path.resolve(generatedRoot)}${path.sep}`)).toBe(true);
+    expect(fs.existsSync(path.join(dryRun.run.outputPath, 'playlist.json'))).toBe(true);
+    expect(fs.existsSync(path.join(dryRun.run.outputPath, 'report.json'))).toBe(true);
+    expect(fs.existsSync(path.join(dryRun.run.outputPath, 'report.md'))).toBe(true);
+    expect(dryRun.run.summary.itemCount).toBeGreaterThan(0);
+    expect(dryRun.run.summary.safety).toMatchObject({
+      cursorMutation: false,
+      ffmpeg: false,
+      ffprobe: false,
+      playout: false,
+      broadcast: false,
+      mediaModification: false,
+    });
+    expect(dryRun.run.warnings.map(warning => warning.code)).toContain('MEDIA_FILE_EXPANSION_NOT_AVAILABLE');
+
+    const cursorCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const playlistCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
+    const runCount = (db.prepare('SELECT COUNT(*) as cnt FROM playlist_materialization_runs').get() as { cnt: number }).cnt;
+    expect(cursorCountAfter).toBe(cursorCountBefore);
+    expect(playlistCount).toBe(0);
+    expect(runCount).toBe(1);
+  });
+
+  it('lists and reads playlist materialization dry-run records', async () => {
+    const published = await saveAndPublishValidDraft(baseUrl, 'Run list schedule', 'run-list.xlsx');
+    await activatePublishedScheduleForTest(baseUrl, published.publishedId);
+
+    const dryRunResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmDryRun: true }),
+    });
+    const dryRun = await dryRunResponse.json() as { run: { id: string } };
+    expect(dryRunResponse.status).toBe(201);
+
+    const listResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/runs`);
+    const list = await listResponse.json() as { runs: Array<{ id: string; mode: string; status: string }> };
+    expect(listResponse.status).toBe(200);
+    expect(list.runs).toHaveLength(1);
+    expect(list.runs[0]).toMatchObject({ id: dryRun.run.id, mode: 'dry_run', status: 'completed' });
+
+    const readResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/runs/${dryRun.run.id}`);
+    const read = await readResponse.json() as { run: { id: string; summary: { safety: { playout: boolean; broadcast: boolean } } } };
+    expect(readResponse.status).toBe(200);
+    expect(read.run.id).toBe(dryRun.run.id);
+    expect(read.run.summary.safety).toMatchObject({ playout: false, broadcast: false });
+  });
+
   it('saves an inactive invalid draft when the preview has validation errors', async () => {
     const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
       method: 'POST',
@@ -759,6 +897,19 @@ async function saveAndPublishValidDraft(
     draftId: saved.draft.id,
     publishedId: published.publishedSchedule.id,
   };
+}
+
+async function activatePublishedScheduleForTest(baseUrl: string, publishedId: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${publishedId}/activate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scheduleId: publishedId,
+      confirmActivation: true,
+      confirmationText: `ACTIVATE SCHEDULE ${publishedId}`,
+    }),
+  });
+  expect(response.status).toBe(200);
 }
 
 function listen(app: express.Express): Promise<http.Server> {
