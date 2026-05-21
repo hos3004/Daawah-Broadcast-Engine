@@ -869,6 +869,58 @@ describe('scheduler foundation routes', () => {
     expect(body.code).toBe('SOURCE_PLAYLIST_FFCONCAT_MISMATCH');
   });
 
+  it('rejects ffconcat line injection through expanded media paths', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+    const playlist = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as {
+      items: Array<{ absolutePath: string }>;
+    };
+    const item = playlist.items[0];
+    if (!item) throw new Error('Expected test playlist item');
+    item.absolutePath = `${item.absolutePath}\nfile 'rtmp://live.example/unsafe'`;
+    fs.writeFileSync(playlistPath, JSON.stringify(playlist), 'utf8');
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+      }),
+    });
+    const body = await response.json() as { code: string };
+
+    expect(response.status).toBe(400);
+    expect(body.code).toBe('SOURCE_PLAYLIST_MEDIA_PATH_UNSAFE');
+  });
+
+  it('rejects unsafe control characters in materialized ffconcat media paths', async () => {
+    const { renderFfconcat } = require('../schedule/playlistExpansion') as typeof import('../schedule/playlistExpansion');
+
+    expect(() => renderFfconcat([{
+      id: 'unsafe-media-path',
+      date: '2026-06-06',
+      type: 'program',
+      source: 'test',
+      sourceRole: 'program',
+      programKey: 'program:test',
+      title: 'Unsafe media path',
+      startTime: '00:00:00',
+      endTime: '00:00:05',
+      timelineStartSeconds: 0,
+      timelineEndSeconds: 5,
+      durationMinutes: 5 / 60,
+      durationSeconds: 5,
+      mediaFileId: 'unsafe-media',
+      absolutePath: `${path.join(tempDir, 'media', 'unsafe.mp4')}\nfile 'rtmp://live.example/unsafe'`,
+      relativePath: null,
+      trimStartSeconds: 0,
+      trimEndSeconds: 5,
+      isTrimmed: false,
+      validationStatus: 'ready',
+    }])).toThrow(/unsafe for ffconcat/);
+  });
+
   it('creates a planned test playout record only without spawning or mutating production tables', async () => {
     const childProcess = require('child_process') as typeof import('child_process');
     const spawnSpy = jest.spyOn(childProcess, 'spawn');

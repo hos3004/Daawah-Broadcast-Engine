@@ -687,6 +687,12 @@ function validateExpandedPlaylistItems(itemsValue: unknown): SafeExpandedPlaylis
 function validateLocalMediaInputPath(value: string, itemLabel: string): string {
   const raw = value.trim();
   rejectForbiddenString(raw, `playlist.items.${itemLabel}.absolutePath`);
+  if (hasFfconcatControlCharacters(raw)) {
+    throw new DraftValidationError(
+      `Source playlist item "${itemLabel}" media path contains characters that are unsafe for ffconcat`,
+      'SOURCE_PLAYLIST_MEDIA_PATH_UNSAFE'
+    );
+  }
 
   if (!path.isAbsolute(raw)) {
     throw new DraftValidationError(
@@ -917,11 +923,25 @@ function renderVerifiedFfconcat(items: SafeExpandedPlaylistItem[]): string {
 }
 
 function formatConcatFileLine(filePath: string): string {
+  assertFfconcatPathSafe(filePath);
   return `file '${filePath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
 }
 
 function formatSeconds(seconds: number): string {
   return seconds.toFixed(3);
+}
+
+function assertFfconcatPathSafe(filePath: string): void {
+  if (hasFfconcatControlCharacters(filePath)) {
+    throw new DraftValidationError(
+      'Media path contains characters that are unsafe for ffconcat',
+      'SOURCE_PLAYLIST_MEDIA_PATH_UNSAFE'
+    );
+  }
+}
+
+function hasFfconcatControlCharacters(value: string): boolean {
+  return /[\u0000-\u001F\u007F]/.test(value);
 }
 
 function getFfmpegTimeoutMs(durationLimitSeconds: number): number {

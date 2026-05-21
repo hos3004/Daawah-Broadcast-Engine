@@ -6,6 +6,7 @@ import {
   fillGapWithProfessionalBumpers,
   type SourceRole,
 } from '../playlist/gapFiller';
+import { DraftValidationError } from './drafts';
 import { parseTimeToMinutes } from './excelPreview';
 import type { PublishedScheduleDetail } from './drafts';
 
@@ -604,6 +605,12 @@ function pad2(value: number): string {
 }
 
 function formatConcatFileLine(filePath: string): string {
+  if (/[\u0000-\u001F\u007F]/.test(filePath)) {
+    throw new DraftValidationError(
+      'Media path contains characters that are unsafe for ffconcat',
+      'MEDIA_PATH_UNSAFE_FOR_FFCONCAT'
+    );
+  }
   return `file '${filePath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
 }
 
