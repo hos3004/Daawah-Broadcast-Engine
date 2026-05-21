@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -192,6 +192,43 @@ interface PublishedListItem {
   publishedBy: string | null;
 }
 
+interface ActiveScheduleStatus {
+  id: string;
+  name: string;
+  isActive: boolean;
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  timezone: string;
+  slotCount: number;
+}
+
+interface MaterializationRun {
+  id: string;
+  publishedScheduleId: string;
+  mode: 'dry_run';
+  status: 'completed' | 'failed';
+  outputPath: string;
+  summary: {
+    itemCount: number;
+    scheduledItemCount: number;
+    gapFillerItemCount: number;
+    totalScheduledMinutes: number;
+    totalGapMinutes: number;
+    mediaExpansionAvailable: false;
+    safety: {
+      cursorMutation: false;
+      ffmpeg: false;
+      ffprobe: false;
+      playout: false;
+      broadcast: false;
+      mediaModification: false;
+    };
+  };
+  warnings: Array<{ code: string; message: string }>;
+  errors: Array<{ code: string; message: string }>;
+  createdAt: string;
+}
+
 const tabs: Array<{ key: TabKey; label: string; icon: LucideIcon }> = [
   { key: 'programs', label: 'البرامج', icon: FileSpreadsheet },
   { key: 'slots', label: 'المواعيد', icon: CalendarDays },
@@ -231,12 +268,24 @@ export default function SchedulerFoundationPage() {
   const [drafts, setDrafts] = useState<DraftListItem[]>([]);
   const [publishedLoading, setPublishedLoading] = useState(false);
   const [publishedSchedules, setPublishedSchedules] = useState<PublishedListItem[]>([]);
+  const [activeSchedule, setActiveSchedule] = useState<ActiveScheduleStatus | null>(null);
+  const [materializationRuns, setMaterializationRuns] = useState<MaterializationRun[]>([]);
+  const [materializationLoading, setMaterializationLoading] = useState(false);
+  const [materializing, setMaterializing] = useState(false);
+  const [materializationMessage, setMaterializationMessage] = useState('');
+  const [materializationError, setMaterializationError] = useState('');
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
   const [error, setError] = useState('');
 
   const completedStep = draftMessage ? 7 : preview ? 6 : selectedFile ? 1 : 0;
   const summary = preview?.summary;
   const issueGroups = useMemo(() => groupIssues(preview?.issues ?? []), [preview]);
+
+  useEffect(() => {
+    void loadActiveSchedule();
+    void loadMaterializationRuns();
+  }, []);
 
   const chooseFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -313,6 +362,57 @@ export default function SchedulerFoundationPage() {
       setError('Could not load published schedules.');
     } finally {
       setPublishedLoading(false);
+    }
+  };
+
+  const loadActiveSchedule = async () => {
+    setMaterializationError('');
+    try {
+      const response = await schedulerFoundationApi.getActiveSchedule();
+      const body = response.data as { activeSchedule: ActiveScheduleStatus | null };
+      setActiveSchedule(body.activeSchedule);
+    } catch {
+      setMaterializationError('Could not load active schedule status.');
+    }
+  };
+
+  const loadMaterializationRuns = async () => {
+    setMaterializationLoading(true);
+    setMaterializationError('');
+    try {
+      const response = await schedulerFoundationApi.listPlaylistMaterializationRuns();
+      const body = response.data as { runs: MaterializationRun[] };
+      setMaterializationRuns(body.runs);
+    } catch {
+      setMaterializationError('Could not load materialization dry-run history.');
+    } finally {
+      setMaterializationLoading(false);
+    }
+  };
+
+  const runMaterializationDryRun = async () => {
+    if (!activeSchedule || materializing) return;
+    const confirmed = window.confirm(
+      `Create a playlist materialization dry-run for "${activeSchedule.name}"?\n\nThis writes test artifacts under generated/playlists only. It does not modify media, update cursors, start playout, or broadcast.`
+    );
+    if (!confirmed) return;
+
+    setMaterializing(true);
+    setMaterializationError('');
+    setMaterializationMessage('');
+    try {
+      const response = await schedulerFoundationApi.createPlaylistMaterializationDryRun({
+        confirmDryRun: true,
+        publishedScheduleId: activeSchedule.id,
+      });
+      const body = response.data as { run: MaterializationRun };
+      setMaterializationMessage(`Dry-run created: ${body.run.id}`);
+      setExpandedRunId(body.run.id);
+      await loadMaterializationRuns();
+    } catch {
+      setMaterializationError('Could not create playlist materialization dry-run.');
+    } finally {
+      setMaterializing(false);
     }
   };
 
@@ -409,6 +509,107 @@ export default function SchedulerFoundationPage() {
           </div>
           {error && <p className="text-xs mt-2" style={{ color: 'var(--danger)' }}>{error}</p>}
           {draftMessage && <p className="text-xs mt-2" style={{ color: 'var(--success)' }}>{draftMessage}</p>}
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <ShieldCheck size={18} style={{ color: 'var(--accent)' }} />
+              <h3 className="font-semibold">Playlist Materialization Dry-Run</h3>
+              <span className="badge badge-info">dry-run only</span>
+              <span className="badge badge-info">no broadcast</span>
+              <span className="badge badge-info">no media modification</span>
+            </div>
+            <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+              Generates review artifacts under generated/playlists only. No ffmpeg, ffprobe, playout, broadcast, production materialization, or cursor mutation.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
+              <Info label="active schedule" value={activeSchedule?.name ?? 'No active schedule'} />
+              <Info label="date range" value={activeSchedule ? `${activeSchedule.scheduleStartDate} to ${activeSchedule.scheduleEndDate}` : '-'} />
+              <Info label="timezone" value={activeSchedule?.timezone ?? '-'} />
+              <Info label="slots" value={activeSchedule?.slotCount ?? 0} />
+            </div>
+            {materializationMessage && <p className="text-xs mt-3" style={{ color: 'var(--success)' }}>{materializationMessage}</p>}
+            {materializationError && <p className="text-xs mt-3" style={{ color: 'var(--danger)' }}>{materializationError}</p>}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="btn-ghost flex items-center gap-2 text-sm"
+              disabled={materializationLoading}
+              onClick={() => {
+                void loadActiveSchedule();
+                void loadMaterializationRuns();
+              }}
+            >
+              <ListChecks size={14} />
+              {materializationLoading ? 'Refreshing...' : 'Refresh Status'}
+            </button>
+            <button
+              className="btn-primary flex items-center gap-2 text-sm"
+              disabled={!activeSchedule || materializing}
+              onClick={() => void runMaterializationDryRun()}
+            >
+              <CheckCircle2 size={14} />
+              {materializing ? 'Creating Dry-Run...' : 'Create Dry-Run'}
+            </button>
+          </div>
+        </div>
+
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h3 className="font-semibold">Playlist Materialization Dry-Runs</h3>
+          <span className="badge badge-info">generated/playlists only</span>
+        </div>
+        <div>
+          <DataTable
+            empty={materializationLoading ? 'Loading dry-runs...' : 'No playlist materialization dry-runs yet'}
+            headers={['Run', 'Schedule', 'Status', 'Items', 'Warnings', 'Errors', 'Output', 'Details']}
+            rows={materializationRuns.map(run => [
+              run.id,
+              run.publishedScheduleId,
+              run.status,
+              run.summary.itemCount,
+              run.warnings.length,
+              run.errors.length,
+              run.outputPath,
+              <button
+                key="details"
+                className="btn-ghost inline-flex items-center gap-2 text-xs"
+                onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)}
+              >
+                <Eye size={13} />
+                {expandedRunId === run.id ? 'Hide' : 'Details'}
+              </button>,
+            ])}
+          />
+          {materializationRuns.map(run => (
+            expandedRunId === run.id && (
+              <div key={run.id} className="rounded-md border p-3 mt-3 text-xs" style={{ borderColor: 'var(--bg-border)' }}>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <Info label="scheduled items" value={run.summary.scheduledItemCount} />
+                  <Info label="gap filler items" value={run.summary.gapFillerItemCount} />
+                  <Info label="scheduled minutes" value={run.summary.totalScheduledMinutes} />
+                  <Info label="gap minutes" value={run.summary.totalGapMinutes} />
+                </div>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <span className="badge badge-info">cursor mutation: false</span>
+                  <span className="badge badge-info">ffmpeg: false</span>
+                  <span className="badge badge-info">ffprobe: false</span>
+                  <span className="badge badge-info">playout: false</span>
+                  <span className="badge badge-info">broadcast: false</span>
+                </div>
+                {run.warnings.length > 0 && (
+                  <div className="mt-3" style={{ color: 'var(--warning)' }}>
+                    {run.warnings.map(warning => <div key={warning.code}>{warning.code}: {warning.message}</div>)}
+                  </div>
+                )}
+              </div>
+            )
+          ))}
         </div>
       </section>
 

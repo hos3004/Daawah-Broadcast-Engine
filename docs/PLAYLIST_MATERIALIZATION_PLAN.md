@@ -262,3 +262,28 @@ The next implementation phase should add a dry-run materializer only:
 - add server tests with temp DB and temp generated output
 - do not integrate with playout
 - do not create ffconcat files unless separately approved
+
+## Phase 12 Dry-Run Foundation
+
+Implemented dry-run endpoints:
+
+- `GET /api/scheduler-foundation/active-schedule`
+- `POST /api/scheduler-foundation/playlist-materialization/dry-run`
+- `GET /api/scheduler-foundation/playlist-materialization/runs`
+- `GET /api/scheduler-foundation/playlist-materialization/runs/:id`
+
+Dry-run output is constrained to:
+
+```text
+generated/playlists/<runId>/
+```
+
+Each run writes:
+
+- `playlist.json`
+- `report.json`
+- `report.md`
+
+The first dry-run foundation uses the active or selected published schedule snapshot only. It does not expand real media files unless that data is already safely available in the schedule snapshot. When expansion is not available, the run reports `MEDIA_FILE_EXPANSION_NOT_AVAILABLE`.
+
+The dry-run foundation does not deploy, scan media, access `/srv/daawah/media`, call ffmpeg/ffprobe, start playout, broadcast, write production playlists, modify media files, or mutate cursors.

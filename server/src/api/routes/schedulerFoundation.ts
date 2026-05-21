@@ -16,11 +16,17 @@ import {
   DraftValidationError,
   getPublishedSchedule,
   getSchedulerDraft,
+  getActiveScheduleState,
   listPublishedSchedules,
   listSchedulerDrafts,
   publishSchedulerDraft,
   saveSchedulerDraft,
 } from '../../schedule/drafts';
+import {
+  createPlaylistMaterializationDryRun,
+  getPlaylistMaterializationRun,
+  listPlaylistMaterializationRuns,
+} from '../../schedule/playlistMaterialization';
 import {
   previewExcelImport,
   previewExcelImportFromXlsx,
@@ -267,6 +273,100 @@ schedulerFoundationRouter.get(
     res.json({
       mode: 'published-list',
       publishedSchedules: listPublishedSchedules(limit),
+    });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/active-schedule',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    const activeState = getActiveScheduleState();
+    const activeSchedule = activeState ? getPublishedSchedule(activeState.publishedScheduleId) : null;
+    res.json({
+      mode: 'active-schedule',
+      activeState,
+      activeSchedule,
+      safety: {
+        readOnly: true,
+        cursorUpdates: false,
+        playlistMaterialization: false,
+        ffmpeg: false,
+        ffprobe: false,
+        playout: false,
+        broadcast: false,
+      },
+    });
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/playlist-materialization/dry-run',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    const body = req.body as {
+      confirmDryRun?: boolean;
+      publishedScheduleId?: string;
+      outputRoot?: string;
+    };
+
+    try {
+      const run = createPlaylistMaterializationDryRun({
+        confirmDryRun: body.confirmDryRun,
+        publishedScheduleId: body.publishedScheduleId,
+        outputRoot: body.outputRoot,
+        createdBy: req.user?.id ?? null,
+      });
+      res.status(201).json({
+        mode: 'playlist-materialization-dry-run',
+        run,
+        safety: {
+          dryRun: true,
+          cursorUpdates: false,
+          playlistArtifactsUsedForPlayout: false,
+          ffmpeg: false,
+          ffprobe: false,
+          playout: false,
+          broadcast: false,
+          mediaModification: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/playlist-materialization/runs',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const limit = Number(req.query['limit'] ?? 50);
+    res.json({
+      mode: 'playlist-materialization-run-list',
+      runs: listPlaylistMaterializationRuns(limit),
+    });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/playlist-materialization/runs/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Playlist materialization run id is required', code: 'MATERIALIZATION_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    const run = getPlaylistMaterializationRun(id);
+    if (!run) {
+      res.status(404).json({ error: 'Playlist materialization run not found', code: 'MATERIALIZATION_RUN_NOT_FOUND' });
+      return;
+    }
+    res.json({
+      mode: 'playlist-materialization-run',
+      run,
     });
   }
 );
