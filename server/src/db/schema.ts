@@ -51,6 +51,7 @@ function runMigrations(db: Database.Database): void {
     { version: 1, sql: migration_001 },
     { version: 2, sql: migration_002 },
     { version: 3, apply: migration_003 },
+    { version: 4, apply: migration_004 },
   ];
 
   for (const m of migrations) {
@@ -330,4 +331,136 @@ function migration_003(db: Database.Database): void {
   addColumnIfMissing(db, 'playlist_items', 'is_trimmed', 'is_trimmed INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'playlist_items', 'trim_out_ms', 'trim_out_ms INTEGER');
   addColumnIfMissing(db, 'playlist_items', 'forced_duration_ms', 'forced_duration_ms INTEGER');
+}
+
+function migration_004(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS media_roots (
+      id TEXT PRIMARY KEY,
+      root_key TEXT NOT NULL UNIQUE,
+      absolute_path TEXT NOT NULL,
+      is_readonly INTEGER NOT NULL DEFAULT 1,
+      is_original_library INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS media_folders (
+      id TEXT PRIMARY KEY,
+      root_id TEXT NOT NULL REFERENCES media_roots(id),
+      original_relative_path TEXT NOT NULL,
+      display_name_ar TEXT NOT NULL,
+      normalized_name TEXT NOT NULL,
+      safe_slug TEXT NOT NULL,
+      parent_folder_id TEXT REFERENCES media_folders(id),
+      file_count INTEGER NOT NULL DEFAULT 0,
+      total_duration_ms INTEGER,
+      longest_file_duration_ms INTEGER,
+      status TEXT NOT NULL DEFAULT 'provisional'
+        CHECK(status IN ('provisional','indexed','missing','needs_review')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(root_id, original_relative_path)
+    );
+
+    CREATE TABLE IF NOT EXISTS safe_name_mappings (
+      id TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      normalized_name TEXT NOT NULL,
+      safe_slug TEXT NOT NULL,
+      collision_group TEXT,
+      collision_index INTEGER NOT NULL DEFAULT 0,
+      approved_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(approved_status IN ('pending','approved','rejected')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(entity_type, entity_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS program_candidates (
+      id TEXT PRIMARY KEY,
+      folder_id TEXT NOT NULL REFERENCES media_folders(id),
+      suggested_program_key TEXT NOT NULL,
+      display_name_ar TEXT NOT NULL,
+      safe_slug TEXT NOT NULL,
+      episode_count INTEGER NOT NULL DEFAULT 0,
+      play_mode_suggestion TEXT NOT NULL
+        CHECK(play_mode_suggestion IN ('sequential','shuffle','newest','round_robin')),
+      slot_mode_suggestion TEXT NOT NULL
+        CHECK(slot_mode_suggestion IN ('fit','playlist','file_count')),
+      confidence_score REAL NOT NULL DEFAULT 0,
+      needs_review INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_program_candidates_folder
+      ON program_candidates(folder_id);
+    CREATE INDEX IF NOT EXISTS idx_media_folders_root
+      ON media_folders(root_id);
+    CREATE INDEX IF NOT EXISTS idx_safe_name_mappings_slug
+      ON safe_name_mappings(entity_type, safe_slug);
+  `);
+
+  addColumnIfMissing(db, 'media_files', 'root_id', 'root_id TEXT REFERENCES media_roots(id)');
+  addColumnIfMissing(db, 'media_files', 'folder_id', 'folder_id TEXT REFERENCES media_folders(id)');
+  addColumnIfMissing(db, 'media_files', 'original_relative_path', 'original_relative_path TEXT');
+  addColumnIfMissing(db, 'media_files', 'original_filename', 'original_filename TEXT');
+  addColumnIfMissing(db, 'media_files', 'display_title_ar', 'display_title_ar TEXT');
+  addColumnIfMissing(db, 'media_files', 'normalized_title', 'normalized_title TEXT');
+  addColumnIfMissing(db, 'media_files', 'safe_slug', 'safe_slug TEXT');
+  addColumnIfMissing(db, 'media_files', 'extension', 'extension TEXT');
+  addColumnIfMissing(db, 'media_files', 'size_bytes', 'size_bytes INTEGER');
+  addColumnIfMissing(db, 'media_files', 'duration_ms', 'duration_ms INTEGER');
+  addColumnIfMissing(db, 'media_files', 'qc_status', 'qc_status TEXT');
+  addColumnIfMissing(db, 'media_files', 'updated_at', 'updated_at TEXT');
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_media_files_registry_root ON media_files(root_id);
+    CREATE INDEX IF NOT EXISTS idx_media_files_registry_folder ON media_files(folder_id);
+    CREATE INDEX IF NOT EXISTS idx_media_files_safe_slug ON media_files(safe_slug);
+  `);
+
+  const stmt = db.prepare(`
+    INSERT INTO media_roots
+      (id, root_key, absolute_path, is_readonly, is_original_library)
+    VALUES
+      (@id, @root_key, @absolute_path, @is_readonly, @is_original_library)
+    ON CONFLICT(root_key) DO UPDATE SET
+      absolute_path=excluded.absolute_path,
+      is_readonly=excluded.is_readonly,
+      is_original_library=excluded.is_original_library,
+      updated_at=datetime('now')
+  `);
+
+  stmt.run({
+    id: 'root-original-ar',
+    root_key: 'original-ar',
+    absolute_path: '/srv/daawah/media/original-ar',
+    is_readonly: 1,
+    is_original_library: 1,
+  });
+  stmt.run({
+    id: 'root-source',
+    root_key: 'source',
+    absolute_path: '/srv/daawah/media/source',
+    is_readonly: 0,
+    is_original_library: 0,
+  });
+  stmt.run({
+    id: 'root-bumpers',
+    root_key: 'bumpers',
+    absolute_path: '/srv/daawah/media/bumpers',
+    is_readonly: 0,
+    is_original_library: 0,
+  });
+  stmt.run({
+    id: 'root-emergency',
+    root_key: 'emergency',
+    absolute_path: '/srv/daawah/media/emergency',
+    is_readonly: 0,
+    is_original_library: 0,
+  });
 }
