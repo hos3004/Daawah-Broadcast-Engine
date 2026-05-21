@@ -547,6 +547,9 @@ describe('scheduler foundation routes', () => {
         status: string;
         summary: {
           itemCount: number;
+          mediaExpansionAvailable: boolean;
+          testPlayoutEligible: boolean;
+          ffconcatPath: string | null;
           safety: {
             cursorMutation: boolean;
             ffmpeg: boolean;
@@ -557,17 +560,22 @@ describe('scheduler foundation routes', () => {
           };
         };
         warnings: Array<{ code: string }>;
+        errors: Array<{ code: string }>;
       };
     };
     const generatedRoot = path.join(tempDir, 'generated', 'playlists');
 
     expect(dryRunResponse.status).toBe(201);
-    expect(dryRun.run.status).toBe('completed');
+    expect(dryRun.run.status).toBe('failed');
     expect(path.resolve(dryRun.run.outputPath).startsWith(`${path.resolve(generatedRoot)}${path.sep}`)).toBe(true);
     expect(fs.existsSync(path.join(dryRun.run.outputPath, 'playlist.json'))).toBe(true);
     expect(fs.existsSync(path.join(dryRun.run.outputPath, 'report.json'))).toBe(true);
     expect(fs.existsSync(path.join(dryRun.run.outputPath, 'report.md'))).toBe(true);
+    expect(fs.existsSync(path.join(dryRun.run.outputPath, 'playlist.ffconcat'))).toBe(false);
     expect(dryRun.run.summary.itemCount).toBeGreaterThan(0);
+    expect(dryRun.run.summary.mediaExpansionAvailable).toBe(false);
+    expect(dryRun.run.summary.testPlayoutEligible).toBe(false);
+    expect(dryRun.run.summary.ffconcatPath).toBeNull();
     expect(dryRun.run.summary.safety).toMatchObject({
       cursorMutation: false,
       ffmpeg: false,
@@ -576,7 +584,7 @@ describe('scheduler foundation routes', () => {
       broadcast: false,
       mediaModification: false,
     });
-    expect(dryRun.run.warnings.map(warning => warning.code)).toContain('MEDIA_FILE_EXPANSION_NOT_AVAILABLE');
+    expect(dryRun.run.errors.map(error => error.code)).toContain('PROGRAM_MEDIA_NOT_AVAILABLE');
 
     const cursorCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
     const playlistCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
@@ -593,10 +601,99 @@ describe('scheduler foundation routes', () => {
     expect(JSON.parse(auditRow?.detail ?? '{}')).toMatchObject({
       runId: dryRun.run.id,
       createdBy: 'user-1',
+      mediaExpansionAvailable: false,
+      testPlayoutEligible: false,
       cursorMutation: false,
       playout: false,
       broadcast: false,
     });
+  });
+
+  it('expands a published schedule to file-level playlist artifacts and ffconcat when media is ready', async () => {
+    const { getDb } = require('../db/schema') as typeof import('../db/schema');
+    const db = getDb();
+    const published = await saveAndPublishValidDraft(baseUrl, 'Expanded materialization schedule', 'expanded.xlsx');
+    await activatePublishedScheduleForTest(baseUrl, published.publishedId);
+    const mediaDir = path.join(tempDir, 'media', 'tafseer');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    const first = path.join(mediaDir, '001.mp4');
+    const second = path.join(mediaDir, '002.mp4');
+    const filler = path.join(mediaDir, 'filler.mp4');
+    fs.writeFileSync(first, 'media-1');
+    fs.writeFileSync(second, 'media-2');
+    fs.writeFileSync(filler, 'filler');
+    insertMediaFile(db, {
+      id: 'program-media-1',
+      filePath: first,
+      filename: '001.mp4',
+      type: 'program',
+      folderId: 'folder-1',
+      durationSec: 1800,
+    });
+    insertMediaFile(db, {
+      id: 'program-media-2',
+      filePath: second,
+      filename: '002.mp4',
+      type: 'program',
+      folderId: 'folder-1',
+      durationSec: 1800,
+    });
+    insertMediaFile(db, {
+      id: 'filler-media-1',
+      filePath: filler,
+      filename: 'filler.mp4',
+      type: 'filler',
+      folderId: null,
+      durationSec: 23 * 60 * 60,
+    });
+
+    const dryRunResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmDryRun: true,
+        publishedScheduleId: published.publishedId,
+      }),
+    });
+    const dryRun = await dryRunResponse.json() as {
+      run: {
+        outputPath: string;
+        status: string;
+        summary: {
+          mediaExpansionAvailable: boolean;
+          testPlayoutEligible: boolean;
+          ffconcatPath: string | null;
+          missingMediaFileCount: number;
+          unknownDurationCount: number;
+        };
+        errors: Array<{ code: string }>;
+      };
+    };
+    const playlistPath = path.join(dryRun.run.outputPath, 'playlist.json');
+    const ffconcatPath = path.join(dryRun.run.outputPath, 'playlist.ffconcat');
+    const playlist = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as {
+      mediaExpansionAvailable: boolean;
+      items: Array<{ mediaFileId: string | null; absolutePath: string | null; validationStatus: string }>;
+    };
+    const ffconcat = fs.readFileSync(ffconcatPath, 'utf8');
+
+    expect(dryRunResponse.status).toBe(201);
+    expect(dryRun.run.status).toBe('completed');
+    expect(dryRun.run.summary).toMatchObject({
+      mediaExpansionAvailable: true,
+      testPlayoutEligible: true,
+      missingMediaFileCount: 0,
+      unknownDurationCount: 0,
+    });
+    expect(dryRun.run.summary.ffconcatPath).toBe(ffconcatPath);
+    expect(dryRun.run.errors).toEqual([]);
+    expect(playlist.mediaExpansionAvailable).toBe(true);
+    expect(playlist.items.every(item => item.validationStatus === 'ready')).toBe(true);
+    expect(playlist.items.map(item => item.mediaFileId)).toContain('program-media-1');
+    expect(playlist.items.map(item => item.mediaFileId)).toContain('program-media-2');
+    expect(playlist.items.every(item => item.absolutePath)).toBe(true);
+    expect(ffconcat).toContain('ffconcat version 1.0');
+    expect(ffconcat).toContain(first.replace(/\\/g, '/').split('/').pop());
   });
 
   it('lists and reads playlist materialization dry-run records', async () => {
@@ -615,7 +712,7 @@ describe('scheduler foundation routes', () => {
     const list = await listResponse.json() as { runs: Array<{ id: string; mode: string; status: string }> };
     expect(listResponse.status).toBe(200);
     expect(list.runs).toHaveLength(1);
-    expect(list.runs[0]).toMatchObject({ id: dryRun.run.id, mode: 'dry_run', status: 'completed' });
+    expect(list.runs[0]).toMatchObject({ id: dryRun.run.id, mode: 'dry_run', status: 'failed' });
 
     const readResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/runs/${dryRun.run.id}`);
     const read = await readResponse.json() as { run: { id: string; summary: { safety: { playout: boolean; broadcast: boolean } } } };
@@ -841,6 +938,98 @@ describe('scheduler foundation routes', () => {
     expect(readResponse.status).toBe(200);
     expect(read.plan.id).toBe(created.plan.id);
     expect(read.plan.commandPreview.safety.broadcastStarted).toBe(false);
+  });
+
+  it('executes an isolated test playout run only after explicit execution confirmation', async () => {
+    const childProcess = require('child_process') as typeof import('child_process');
+    const { EventEmitter } = require('events') as typeof import('events');
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+    const spawnSpy = jest.spyOn(childProcess, 'spawn').mockImplementation((() => {
+      const child = new EventEmitter() as any;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      setImmediate(() => {
+        child.stderr?.emit('data', Buffer.from('ffmpeg ok'));
+        child.emit('close', 0, null);
+      });
+      return child;
+    }) as typeof childProcess.spawn);
+
+    const rejectedResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        durationLimitSeconds: 5,
+      }),
+    });
+    const rejected = await rejectedResponse.json() as { code: string };
+    expect(rejectedResponse.status).toBe(400);
+    expect(rejected.code).toBe('TEST_PLAYOUT_EXECUTION_CONFIRMATION_REQUIRED');
+    expect(spawnSpy).not.toHaveBeenCalled();
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmExecution: true,
+        confirmationText: 'RUN ISOLATED TEST PLAYOUT',
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        durationLimitSeconds: 5,
+      }),
+    });
+    const body = await response.json() as {
+      run: {
+        status: string;
+        outputPath: string;
+        artifacts: {
+          statusPath: string;
+          reportPath: string;
+          ffmpegLogPath: string;
+        };
+        commandPreview: {
+          willExecute: boolean;
+          args: string[];
+          safety: {
+            ffmpegExecution: boolean;
+            broadcastStarted: boolean;
+            rtmpPush: boolean;
+            streamKeyUsage: boolean;
+          };
+        };
+        safety: {
+          broadcastStarted: boolean;
+          rtmpPush: boolean;
+          streamKeyUsage: boolean;
+          productionPaths: boolean;
+        };
+      };
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.run.status).toBe('completed');
+    expect(path.resolve(body.run.outputPath).startsWith(`${path.resolve(tempDir, 'generated', 'test-playout')}${path.sep}`)).toBe(true);
+    expect(body.run.commandPreview.willExecute).toBe(true);
+    expect(body.run.commandPreview.args.join(' ')).not.toContain('rtmp');
+    expect(body.run.commandPreview.safety).toMatchObject({
+      ffmpegExecution: true,
+      broadcastStarted: false,
+      rtmpPush: false,
+      streamKeyUsage: false,
+    });
+    expect(body.run.safety).toMatchObject({
+      broadcastStarted: false,
+      rtmpPush: false,
+      streamKeyUsage: false,
+      productionPaths: false,
+    });
+    expect(fs.existsSync(body.run.artifacts.statusPath)).toBe(true);
+    expect(fs.existsSync(body.run.artifacts.reportPath)).toBe(true);
+    expect(fs.existsSync(body.run.artifacts.ffmpegLogPath)).toBe(true);
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    spawnSpy.mockRestore();
   });
 
   it('saves an inactive invalid draft when the preview has validation errors', async () => {
@@ -1099,12 +1288,48 @@ function createDryRunPlaylistArtifact(root: string): string {
   const playlistDir = path.join(root, 'generated', 'playlists', 'test-run');
   fs.mkdirSync(playlistDir, { recursive: true });
   const playlistPath = path.join(playlistDir, 'playlist.json');
+  const ffconcatPath = path.join(playlistDir, 'playlist.ffconcat');
   fs.writeFileSync(playlistPath, JSON.stringify({
     runId: 'test-run',
     dryRun: true,
-    items: [],
+    mediaExpansionAvailable: true,
+    ffconcatPath,
+    items: [{
+      id: 'expanded-1',
+      validationStatus: 'ready',
+      absolutePath: path.join(root, 'media', 'expanded-1.mp4'),
+    }],
   }), 'utf8');
+  fs.writeFileSync(ffconcatPath, 'ffconcat version 1.0\n', 'utf8');
   return playlistPath;
+}
+
+function insertMediaFile(
+  db: ReturnType<typeof import('../db/schema').getDb>,
+  input: {
+    id: string;
+    filePath: string;
+    filename: string;
+    type: 'program' | 'filler' | 'emergency';
+    folderId: string | null;
+    durationSec: number;
+  }
+): void {
+  db.prepare(`
+    INSERT INTO media_files
+      (id, path, relative_path, filename, type, status, folder_id, duration_sec, duration_ms, file_size)
+    VALUES (?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)
+  `).run(
+    input.id,
+    input.filePath,
+    input.filename,
+    input.filename,
+    input.type,
+    input.folderId,
+    input.durationSec,
+    input.durationSec * 1000,
+    fs.statSync(input.filePath).size
+  );
 }
 
 async function saveAndPublishValidDraft(

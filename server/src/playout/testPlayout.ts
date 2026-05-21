@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import childProcess from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/schema';
 import { DraftValidationError } from '../schedule/drafts';
@@ -13,6 +14,11 @@ export interface TestPlayoutPlanInput {
   outputPath?: string;
   durationLimitSeconds?: number;
   [key: string]: unknown;
+}
+
+export interface TestPlayoutRunInput extends Omit<TestPlayoutPlanInput, 'confirmPrepareOnly'> {
+  confirmExecution?: boolean;
+  confirmationText?: string;
 }
 
 export interface TestPlayoutWarning {
@@ -59,6 +65,94 @@ export interface TestPlayoutPlanDetail {
   createdAt: string;
 }
 
+export interface TestPlayoutRunDetail {
+  id: string;
+  sourcePlaylistPath: string;
+  outputMode: TestPlayoutOutputMode;
+  outputPath: string;
+  durationLimitSeconds: number;
+  status: 'running' | 'completed' | 'failed';
+  startedAt: string;
+  endedAt: string | null;
+  exitCode: number | null;
+  signal: NodeJS.Signals | string | null;
+  commandPreview: {
+    executable: 'ffmpeg';
+    args: string[];
+    command: string;
+    prepareOnly: false;
+    willExecute: true;
+    outputMode: TestPlayoutOutputMode;
+    outputPath: string;
+    safety: {
+      ffmpegExecution: boolean;
+      playoutStarted: boolean;
+      broadcastStarted: boolean;
+      rtmpPush: boolean;
+      streamKeyUsage: boolean;
+      cursorMutation: boolean;
+      mediaAccess: boolean;
+      dnsChanges: boolean;
+    };
+    notes: string[];
+  };
+  artifacts: {
+    runDir: string;
+    statusPath: string;
+    reportPath: string;
+    ffmpegLogPath: string;
+  };
+  monitoring: TestPlayoutMonitoringSnapshot;
+  safety: {
+    ffmpegExecution: true;
+    playoutStarted: true;
+    broadcastStarted: false;
+    rtmpPush: false;
+    streamKeyUsage: false;
+    cursorMutation: false;
+    mediaAccess: true;
+    dnsChanges: false;
+    productionPaths: false;
+  };
+  errors: TestPlayoutError[];
+}
+
+export interface TestPlayoutMonitoringSnapshot {
+  heartbeatAt: string;
+  status: 'running' | 'completed' | 'failed';
+  currentItem: PlaylistArtifactItem | null;
+  nextItem: PlaylistArtifactItem | null;
+  elapsedSeconds: number;
+  driftSeconds: 0;
+  ffmpegStatus: 'not_started' | 'running' | 'completed' | 'failed';
+  output: {
+    mode: TestPlayoutOutputMode;
+    path: string;
+    exists: boolean;
+    sizeBytes: number | null;
+    hlsSegmentCount: number | null;
+  };
+  process: {
+    rssBytes: number;
+    heapUsedBytes: number;
+  };
+}
+
+interface PlaylistArtifactItem {
+  id?: string;
+  title?: string;
+  date?: string;
+  type?: string;
+  sourceRole?: string;
+  startTime?: string;
+  endTime?: string;
+  timelineStartSeconds?: number;
+  timelineEndSeconds?: number;
+  durationSeconds?: number;
+  mediaFileId?: string | null;
+  absolutePath?: string | null;
+}
+
 interface ValidatedTestPlayoutPlan {
   planId: string;
   sourcePlaylistPath: string;
@@ -81,6 +175,7 @@ interface TestPlayoutPlanRow {
 }
 
 const MAX_DURATION_LIMIT_SECONDS = 20 * 60;
+const EXECUTION_CONFIRMATION_TEXT = 'RUN ISOLATED TEST PLAYOUT';
 
 export function validateTestPlayoutPlan(input: TestPlayoutPlanInput, planId = '__validation__'): ValidatedTestPlayoutPlan {
   rejectForbiddenInputStrings(input);
@@ -153,6 +248,132 @@ export function writeTestPlayoutPlan(input: TestPlayoutPlanInput): TestPlayoutPl
   return saved;
 }
 
+export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promise<TestPlayoutRunDetail> {
+  const runId = uuidv4();
+  const validated = validateTestPlayoutExecution(input, runId);
+  const runDir = path.dirname(validated.outputPath);
+  const statusPath = path.join(runDir, 'status.json');
+  const reportPath = path.join(runDir, 'report.md');
+  const ffmpegLogPath = path.join(runDir, 'ffmpeg.log');
+  const startedAt = new Date().toISOString();
+  const commandPreview = buildExecutableCommandPreview(validated);
+  const playlistItems = readPlaylistItems(validated.sourcePlaylistPath);
+  const errors: TestPlayoutError[] = [];
+
+  fs.mkdirSync(runDir, { recursive: true });
+  if (validated.outputMode === 'localhost_hls') {
+    fs.mkdirSync(validated.outputPath, { recursive: true });
+  } else {
+    fs.mkdirSync(path.dirname(validated.outputPath), { recursive: true });
+  }
+  const logStream = fs.createWriteStream(ffmpegLogPath, { encoding: 'utf8' });
+
+  let status: TestPlayoutRunDetail['status'] = 'running';
+  let exitCode: number | null = null;
+  let signal: NodeJS.Signals | string | null = null;
+  let endedAt: string | null = null;
+
+  const writeStatus = (ffmpegStatus: TestPlayoutMonitoringSnapshot['ffmpegStatus']): TestPlayoutMonitoringSnapshot => {
+    const snapshot = buildMonitoringSnapshot(
+      status,
+      ffmpegStatus,
+      playlistItems,
+      Date.parse(startedAt),
+      validated.outputMode,
+      validated.outputPath
+    );
+    writeJsonFile(statusPath, snapshot);
+    return snapshot;
+  };
+
+  writeStatus('running');
+  const heartbeat = setInterval(() => {
+    writeStatus('running');
+  }, 1000);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = childProcess.spawn(commandPreview.executable, commandPreview.args, {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      child.stdout?.on('data', chunk => {
+        logStream.write(chunk);
+      });
+      child.stderr?.on('data', chunk => {
+        logStream.write(chunk);
+      });
+      child.on('error', err => {
+        reject(err);
+      });
+      child.on('close', (code, closeSignal) => {
+        exitCode = code;
+        signal = closeSignal;
+        resolve();
+      });
+    });
+
+    status = exitCode === 0 ? 'completed' : 'failed';
+    if (exitCode !== 0) {
+      errors.push({
+        code: 'FFMPEG_EXIT_NON_ZERO',
+        message: `FFmpeg exited with code ${exitCode ?? 'null'}${signal ? ` and signal ${signal}` : ''}.`,
+      });
+    }
+  } catch (err) {
+    status = 'failed';
+    errors.push({
+      code: 'FFMPEG_SPAWN_FAILED',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    clearInterval(heartbeat);
+    endedAt = new Date().toISOString();
+    await new Promise<void>(resolve => {
+      logStream.end(resolve);
+    });
+  }
+
+  const monitoring = writeStatus(status === 'completed' ? 'completed' : 'failed');
+  const detail: TestPlayoutRunDetail = {
+    id: runId,
+    sourcePlaylistPath: validated.sourcePlaylistPath,
+    outputMode: validated.outputMode,
+    outputPath: validated.outputPath,
+    durationLimitSeconds: validated.durationLimitSeconds,
+    status,
+    startedAt,
+    endedAt,
+    exitCode,
+    signal,
+    commandPreview,
+    artifacts: {
+      runDir,
+      statusPath,
+      reportPath,
+      ffmpegLogPath,
+    },
+    monitoring,
+    safety: {
+      ffmpegExecution: true,
+      playoutStarted: true,
+      broadcastStarted: false,
+      rtmpPush: false,
+      streamKeyUsage: false,
+      cursorMutation: false,
+      mediaAccess: true,
+      dnsChanges: false,
+      productionPaths: false,
+    },
+    errors,
+  };
+
+  writeJsonFile(path.join(runDir, 'run.json'), detail);
+  fs.writeFileSync(reportPath, renderRunReport(detail), 'utf8');
+  return detail;
+}
+
 export function readTestPlayoutPlan(id: string): TestPlayoutPlanDetail | null {
   const row = getDb().prepare('SELECT * FROM test_playout_plans WHERE id=?').get(id) as TestPlayoutPlanRow | undefined;
   return row ? rowToPlan(row) : null;
@@ -169,15 +390,20 @@ export function listTestPlayoutPlans(limit = 50): TestPlayoutPlanDetail[] {
 }
 
 function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCommandPreview {
-  const futureInput = '<future-ffconcat-from-approved-playlist-json>';
+  const ffconcatInput = path.join(path.dirname(validated.sourcePlaylistPath), 'playlist.ffconcat');
   const args = validated.outputMode === 'local_file'
     ? [
         '-hide_banner',
         '-nostdin',
         '-loglevel',
         'info',
+        '-re',
+        '-f',
+        'concat',
+        '-safe',
+        '0',
         '-i',
-        futureInput,
+        ffconcatInput,
         '-t',
         String(validated.durationLimitSeconds),
         '-movflags',
@@ -190,8 +416,13 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '-nostdin',
         '-loglevel',
         'info',
+        '-re',
+        '-f',
+        'concat',
+        '-safe',
+        '0',
         '-i',
-        futureInput,
+        ffconcatInput,
         '-t',
         String(validated.durationLimitSeconds),
         '-f',
@@ -200,6 +431,8 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '6',
         '-hls_list_size',
         '12',
+        '-hls_segment_filename',
+        path.join(validated.outputPath, 'seg%05d.ts'),
         path.join(validated.outputPath, 'index.m3u8'),
       ];
 
@@ -223,10 +456,51 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
     },
     notes: [
       'Plan only. This command preview is not executed by this phase.',
-      'Playlist JSON to executable input conversion is reserved for a later approved phase.',
+      'The source playlist must already be file-expanded and paired with playlist.ffconcat.',
       'Output target is constrained to generated/test-playout.',
     ],
   };
+}
+
+function buildExecutableCommandPreview(
+  validated: ValidatedTestPlayoutPlan
+): TestPlayoutRunDetail['commandPreview'] {
+  const preview = buildCommandPreview(validated);
+  return {
+    ...preview,
+    prepareOnly: false,
+    willExecute: true,
+    safety: {
+      ...preview.safety,
+      ffmpegExecution: true,
+      playoutStarted: true,
+      mediaAccess: true,
+    },
+    notes: [
+      'Isolated execution only. Output remains constrained to generated/test-playout.',
+      'No RTMP, stream keys, DNS, production paths, OBS, or cursor mutation are allowed.',
+      'Input is the approved playlist.ffconcat paired with the expanded playlist.json.',
+    ],
+  };
+}
+
+function validateTestPlayoutExecution(input: TestPlayoutRunInput, runId: string): ValidatedTestPlayoutPlan {
+  rejectForbiddenInputStrings(input);
+
+  if (input.confirmExecution !== true) {
+    throw new DraftValidationError('Test playout execution requires confirmExecution=true', 'TEST_PLAYOUT_EXECUTION_CONFIRMATION_REQUIRED');
+  }
+  if (cleanString(input.confirmationText) !== EXECUTION_CONFIRMATION_TEXT) {
+    throw new DraftValidationError(
+      `Test playout execution requires confirmationText="${EXECUTION_CONFIRMATION_TEXT}"`,
+      'TEST_PLAYOUT_EXECUTION_TEXT_REQUIRED'
+    );
+  }
+
+  return validateTestPlayoutPlan({
+    ...input,
+    confirmPrepareOnly: true,
+  }, runId);
 }
 
 function validateSourcePlaylistPath(value: unknown): string {
@@ -243,7 +517,39 @@ function validateSourcePlaylistPath(value: unknown): string {
   if (!fs.existsSync(resolved)) {
     throw new DraftValidationError('Source dry-run playlist artifact was not found', 'SOURCE_PLAYLIST_NOT_FOUND', 404);
   }
+  validateSourcePlaylistArtifact(resolved);
   return resolved;
+}
+
+function validateSourcePlaylistArtifact(playlistPath: string): void {
+  let artifact: {
+    mediaExpansionAvailable?: unknown;
+    ffconcatPath?: unknown;
+    items?: unknown;
+  };
+  try {
+    artifact = JSON.parse(readUtf8JsonText(playlistPath)) as typeof artifact;
+  } catch {
+    throw new DraftValidationError('Source playlist artifact is not valid JSON', 'SOURCE_PLAYLIST_INVALID');
+  }
+
+  if (artifact.mediaExpansionAvailable !== true) {
+    throw new DraftValidationError(
+      'Source playlist must be file-expanded before test playout planning',
+      'SOURCE_PLAYLIST_NOT_EXPANDED'
+    );
+  }
+  if (!Array.isArray(artifact.items) || artifact.items.length === 0) {
+    throw new DraftValidationError('Source playlist has no expanded media items', 'SOURCE_PLAYLIST_EMPTY');
+  }
+
+  const expectedFfconcatPath = path.join(path.dirname(playlistPath), 'playlist.ffconcat');
+  if (typeof artifact.ffconcatPath === 'string' && path.resolve(artifact.ffconcatPath) !== path.resolve(expectedFfconcatPath)) {
+    throw new DraftValidationError('Source playlist ffconcat path does not match its run directory', 'SOURCE_PLAYLIST_FFCONCAT_MISMATCH');
+  }
+  if (!fs.existsSync(expectedFfconcatPath)) {
+    throw new DraftValidationError('Source playlist ffconcat artifact was not found', 'SOURCE_PLAYLIST_FFCONCAT_NOT_FOUND', 404);
+  }
 }
 
 function validateOutputPath(value: unknown, outputMode: TestPlayoutOutputMode, planId: string): string {
@@ -375,6 +681,125 @@ function cleanString(value: unknown): string {
 function clampLimit(limit: number): number {
   if (!Number.isInteger(limit)) return 50;
   return Math.min(Math.max(limit, 1), 100);
+}
+
+function readPlaylistItems(playlistPath: string): PlaylistArtifactItem[] {
+  const artifact = JSON.parse(readUtf8JsonText(playlistPath)) as { items?: unknown };
+  return Array.isArray(artifact.items) ? artifact.items as PlaylistArtifactItem[] : [];
+}
+
+function readUtf8JsonText(filePath: string): string {
+  return fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+}
+
+function buildMonitoringSnapshot(
+  status: TestPlayoutMonitoringSnapshot['status'],
+  ffmpegStatus: TestPlayoutMonitoringSnapshot['ffmpegStatus'],
+  items: PlaylistArtifactItem[],
+  startedAtMs: number,
+  outputMode: TestPlayoutOutputMode,
+  outputPath: string
+): TestPlayoutMonitoringSnapshot {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  const currentItem = items.find(item =>
+    typeof item.timelineStartSeconds === 'number' &&
+    typeof item.timelineEndSeconds === 'number' &&
+    item.timelineStartSeconds <= elapsedSeconds &&
+    item.timelineEndSeconds > elapsedSeconds
+  ) ?? null;
+  const nextItem = items.find(item =>
+    typeof item.timelineStartSeconds === 'number' &&
+    item.timelineStartSeconds > elapsedSeconds
+  ) ?? null;
+  const output = inspectOutput(outputMode, outputPath);
+  const memory = process.memoryUsage();
+
+  return {
+    heartbeatAt: new Date().toISOString(),
+    status,
+    currentItem,
+    nextItem,
+    elapsedSeconds,
+    driftSeconds: 0,
+    ffmpegStatus,
+    output,
+    process: {
+      rssBytes: memory.rss,
+      heapUsedBytes: memory.heapUsed,
+    },
+  };
+}
+
+function inspectOutput(outputMode: TestPlayoutOutputMode, outputPath: string): TestPlayoutMonitoringSnapshot['output'] {
+  if (outputMode === 'localhost_hls') {
+    const exists = fs.existsSync(path.join(outputPath, 'index.m3u8'));
+    const hlsSegmentCount = fs.existsSync(outputPath)
+      ? fs.readdirSync(outputPath).filter(file => file.endsWith('.ts')).length
+      : 0;
+    return {
+      mode: outputMode,
+      path: outputPath,
+      exists,
+      sizeBytes: null,
+      hlsSegmentCount,
+    };
+  }
+
+  const exists = fs.existsSync(outputPath);
+  return {
+    mode: outputMode,
+    path: outputPath,
+    exists,
+    sizeBytes: exists ? fs.statSync(outputPath).size : null,
+    hlsSegmentCount: null,
+  };
+}
+
+function writeJsonFile(filePath: string, value: unknown): void {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function renderRunReport(detail: TestPlayoutRunDetail): string {
+  const errorLines = detail.errors.length > 0
+    ? detail.errors.map(error => `- ${error.code}: ${error.message}`).join('\n')
+    : '- none';
+  return `# Isolated Test Playout Report
+
+## Summary
+
+- Run ID: ${detail.id}
+- Status: ${detail.status}
+- Source playlist: ${detail.sourcePlaylistPath}
+- Output mode: ${detail.outputMode}
+- Output path: ${detail.outputPath}
+- Duration limit seconds: ${detail.durationLimitSeconds}
+- Started at: ${detail.startedAt}
+- Ended at: ${detail.endedAt ?? 'running'}
+- FFmpeg exit code: ${detail.exitCode ?? 'null'}
+
+## Monitoring
+
+- Last heartbeat: ${detail.monitoring.heartbeatAt}
+- Current item: ${detail.monitoring.currentItem?.title ?? 'none'}
+- Next item: ${detail.monitoring.nextItem?.title ?? 'none'}
+- Drift seconds: ${detail.monitoring.driftSeconds}
+- Output exists: ${detail.monitoring.output.exists}
+- HLS segment count: ${detail.monitoring.output.hlsSegmentCount ?? 'n/a'}
+
+## Safety
+
+- ffmpeg execution: true
+- broadcast started: false
+- RTMP push: false
+- stream key usage: false
+- cursor mutation: false
+- DNS changes: false
+- production paths: false
+
+## Errors
+
+${errorLines}
+`;
 }
 
 function quoteArg(value: string): string {
