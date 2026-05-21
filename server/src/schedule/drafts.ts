@@ -62,12 +62,57 @@ export interface PublishSchedulerDraftInput {
   publishedBy?: string | null;
 }
 
+export interface ActivatePublishedScheduleInput {
+  publishedScheduleId: string;
+  requestedScheduleId?: string;
+  confirmActivation?: boolean;
+  confirmationText?: string;
+  activatedBy?: string | null;
+}
+
+export interface ActivationSafetySummary {
+  publishedScheduleId: string;
+  scheduleActivation: true;
+  cursorUpdates: false;
+  playlistMaterialization: false;
+  ffmpeg: false;
+  playout: false;
+  broadcast: false;
+  validationStatus: 'draft_valid';
+  validationErrorCount: number;
+  warningCount: number;
+  conflictCount: number;
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  timezone: string;
+  slotCount: number;
+}
+
+export interface ActiveScheduleState {
+  id: 'active';
+  publishedScheduleId: string;
+  previousPublishedScheduleId: string | null;
+  activatedBy: string | null;
+  activatedAt: string;
+  confirmationText: string;
+  safetyCheckSummary: ActivationSafetySummary;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ActivationResult {
+  activeSchedule: PublishedScheduleDetail;
+  previousPublishedScheduleId: string | null;
+  activeState: ActiveScheduleState;
+  safety: ActivationSafetySummary;
+}
+
 export interface PublishedScheduleListItem {
   id: string;
   sourceDraftId: string;
   name: string;
   status: 'published';
-  isActive: false;
+  isActive: boolean;
   validationStatus: 'draft_valid';
   validationErrors: DraftValidationIssue[];
   scheduleStartDate: string;
@@ -143,6 +188,18 @@ interface PublishedScheduleRow {
   published_by: string | null;
   published_at: string;
   created_at: string;
+}
+
+interface ActiveScheduleStateRow {
+  id: 'active';
+  published_schedule_id: string;
+  previous_published_schedule_id: string | null;
+  activated_by: string | null;
+  activated_at: string;
+  confirmation_text: string;
+  safety_check_summary_json: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export class DraftValidationError extends Error {
@@ -315,8 +372,101 @@ export function publishSchedulerDraft(input: PublishSchedulerDraftInput): Publis
   return published;
 }
 
+export function activatePublishedSchedule(input: ActivatePublishedScheduleInput): ActivationResult {
+  const db = getDb();
+  const publishedScheduleId = cleanString(input.publishedScheduleId);
+  if (!publishedScheduleId) {
+    throw new DraftValidationError('Published schedule id is required', 'PUBLISHED_SCHEDULE_ID_REQUIRED');
+  }
+
+  const requestedScheduleId = cleanString(input.requestedScheduleId);
+  if (requestedScheduleId !== publishedScheduleId) {
+    throw new DraftValidationError('Activation request body must repeat the published schedule id', 'ACTIVATION_SCHEDULE_ID_MISMATCH');
+  }
+  if (input.confirmActivation !== true) {
+    throw new DraftValidationError('Activation requires explicit confirmation', 'ACTIVATION_CONFIRMATION_REQUIRED');
+  }
+
+  const requiredConfirmation = requiredActivationText(publishedScheduleId);
+  if (cleanString(input.confirmationText) !== requiredConfirmation) {
+    throw new DraftValidationError(`Activation confirmation text must be "${requiredConfirmation}"`, 'ACTIVATION_TEXT_MISMATCH');
+  }
+
+  const publishedSchedule = getPublishedSchedule(publishedScheduleId);
+  if (!publishedSchedule) {
+    throw new DraftValidationError('Published schedule not found', 'PUBLISHED_SCHEDULE_NOT_FOUND');
+  }
+  assertPublishedCanActivate(publishedSchedule);
+
+  const previousPublishedScheduleId = getActivePublishedScheduleId();
+  const activatedAt = new Date().toISOString();
+  const safety = buildActivationSafetySummary(publishedSchedule);
+
+  const activate = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO scheduler_active_schedule_state (
+        id, published_schedule_id, previous_published_schedule_id, activated_by,
+        activated_at, confirmation_text, safety_check_summary_json, updated_at
+      )
+      VALUES (
+        'active', @published_schedule_id, @previous_published_schedule_id, @activated_by,
+        @activated_at, @confirmation_text, @safety_check_summary_json, datetime('now')
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        published_schedule_id=excluded.published_schedule_id,
+        previous_published_schedule_id=excluded.previous_published_schedule_id,
+        activated_by=excluded.activated_by,
+        activated_at=excluded.activated_at,
+        confirmation_text=excluded.confirmation_text,
+        safety_check_summary_json=excluded.safety_check_summary_json,
+        updated_at=datetime('now')
+    `).run({
+      published_schedule_id: publishedSchedule.id,
+      previous_published_schedule_id: previousPublishedScheduleId,
+      activated_by: input.activatedBy ?? null,
+      activated_at: activatedAt,
+      confirmation_text: requiredConfirmation,
+      safety_check_summary_json: JSON.stringify(safety),
+    });
+
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, entity_type, entity_id, detail)
+      VALUES (@id, @action, @entity_type, @entity_id, @detail)
+    `).run({
+      id: uuidv4(),
+      action: 'scheduler_foundation.activate_schedule',
+      entity_type: 'scheduler_published_schedule',
+      entity_id: publishedSchedule.id,
+      detail: JSON.stringify({
+        publishedScheduleId: publishedSchedule.id,
+        previousPublishedScheduleId,
+        activatedBy: input.activatedBy ?? null,
+        activatedAt,
+        confirmationTextPresent: true,
+        safety,
+      }),
+    });
+  });
+
+  activate();
+
+  const activeSchedule = getPublishedSchedule(publishedSchedule.id);
+  const activeState = getActiveScheduleState();
+  if (!activeSchedule || !activeState) {
+    throw new Error('Published schedule was activated but could not be read back');
+  }
+
+  return {
+    activeSchedule,
+    previousPublishedScheduleId,
+    activeState,
+    safety,
+  };
+}
+
 export function listPublishedSchedules(limit = 50): PublishedScheduleListItem[] {
   const db = getDb();
+  const activePublishedScheduleId = getActivePublishedScheduleId();
   const rows = db.prepare(`
     SELECT *
     FROM scheduler_published_schedules
@@ -324,7 +474,7 @@ export function listPublishedSchedules(limit = 50): PublishedScheduleListItem[] 
     LIMIT ?
   `).all(clampLimit(limit)) as PublishedScheduleRow[];
 
-  return rows.map(rowToPublishedListItem);
+  return rows.map(row => rowToPublishedListItem(row, activePublishedScheduleId));
 }
 
 export function getPublishedSchedule(id: string): PublishedScheduleDetail | null {
@@ -332,7 +482,15 @@ export function getPublishedSchedule(id: string): PublishedScheduleDetail | null
   const row = db.prepare('SELECT * FROM scheduler_published_schedules WHERE id=?').get(id) as
     | PublishedScheduleRow
     | undefined;
-  return row ? rowToPublishedDetail(row) : null;
+  return row ? rowToPublishedDetail(row, getActivePublishedScheduleId()) : null;
+}
+
+export function getActiveScheduleState(): ActiveScheduleState | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM scheduler_active_schedule_state WHERE id='active'").get() as
+    | ActiveScheduleStateRow
+    | undefined;
+  return row ? rowToActiveScheduleState(row) : null;
 }
 
 function assertDraftCanPublish(draft: SchedulerDraftDetail): void {
@@ -375,6 +533,71 @@ function assertDraftCanPublish(draft: SchedulerDraftDetail): void {
   ) {
     throw new DraftValidationError('Unsafe draft cannot be published', 'UNSAFE_DRAFT_PAYLOAD');
   }
+}
+
+function assertPublishedCanActivate(schedule: PublishedScheduleDetail): void {
+  if (schedule.status !== 'published') {
+    throw new DraftValidationError('Only published schedules can be activated', 'PUBLISHED_STATUS_REQUIRED');
+  }
+  if (schedule.validationStatus !== 'draft_valid') {
+    throw new DraftValidationError('Only valid published schedules can be activated', 'PUBLISHED_NOT_ACTIVATABLE');
+  }
+  if (schedule.validationErrors.length > 0) {
+    throw new DraftValidationError('Published schedule validation errors must be resolved before activation', 'PUBLISHED_VALIDATION_ERRORS_PRESENT');
+  }
+  if (schedule.validationSummary.errors !== 0) {
+    throw new DraftValidationError('Published schedule errors must be zero before activation', 'PUBLISHED_PREVIEW_ERRORS_PRESENT');
+  }
+  if (typeof schedule.validationSummary.conflicts === 'number' && schedule.validationSummary.conflicts > 0) {
+    throw new DraftValidationError('Published schedule conflicts must be zero before activation', 'PUBLISHED_CONFLICTS_PRESENT');
+  }
+
+  const start = parseDateOnly(schedule.scheduleStartDate);
+  const end = parseDateOnly(schedule.scheduleEndDate);
+  if (!start || !end || end.getTime() < start.getTime()) {
+    throw new DraftValidationError('Published schedule date range is invalid', 'PUBLISHED_DATE_RANGE_INVALID');
+  }
+  if (!isValidTimezone(schedule.timezone)) {
+    throw new DraftValidationError('Published schedule timezone is invalid', 'PUBLISHED_INVALID_TIMEZONE');
+  }
+  if (
+    schedule.willUpdateCursors !== false ||
+    schedule.willMaterializePlaylist !== false
+  ) {
+    throw new DraftValidationError('Unsafe published schedule cannot be activated', 'UNSAFE_PUBLISHED_SCHEDULE');
+  }
+}
+
+function buildActivationSafetySummary(schedule: PublishedScheduleDetail): ActivationSafetySummary {
+  return {
+    publishedScheduleId: schedule.id,
+    scheduleActivation: true,
+    cursorUpdates: false,
+    playlistMaterialization: false,
+    ffmpeg: false,
+    playout: false,
+    broadcast: false,
+    validationStatus: schedule.validationStatus,
+    validationErrorCount: schedule.validationErrors.length,
+    warningCount: schedule.validationSummary.warnings,
+    conflictCount: schedule.validationSummary.conflicts,
+    scheduleStartDate: schedule.scheduleStartDate,
+    scheduleEndDate: schedule.scheduleEndDate,
+    timezone: schedule.timezone,
+    slotCount: schedule.slotCount,
+  };
+}
+
+function requiredActivationText(publishedScheduleId: string): string {
+  return `ACTIVATE SCHEDULE ${publishedScheduleId}`;
+}
+
+function getActivePublishedScheduleId(): string | null {
+  const db = getDb();
+  const row = db.prepare("SELECT published_schedule_id FROM scheduler_active_schedule_state WHERE id='active'").get() as
+    | { published_schedule_id: string }
+    | undefined;
+  return row?.published_schedule_id ?? null;
 }
 
 function validateDraftInput(
@@ -1012,7 +1235,10 @@ function rowToDetail(row: DraftRow): SchedulerDraftDetail {
   };
 }
 
-function rowToPublishedListItem(row: PublishedScheduleRow): PublishedScheduleListItem {
+function rowToPublishedListItem(
+  row: PublishedScheduleRow,
+  activePublishedScheduleId: string | null
+): PublishedScheduleListItem {
   const validationSummary = parseJson<ExcelImportPreviewResult['summary']>(row.validation_summary_json);
   const validationErrors = parseJson<DraftValidationIssue[]>(row.validation_errors_json);
   return {
@@ -1020,7 +1246,7 @@ function rowToPublishedListItem(row: PublishedScheduleRow): PublishedScheduleLis
     sourceDraftId: row.source_draft_id,
     name: row.name,
     status: row.status,
-    isActive: false,
+    isActive: row.id === activePublishedScheduleId,
     validationStatus: row.validation_status,
     validationErrors,
     scheduleStartDate: row.schedule_start_date,
@@ -1037,9 +1263,12 @@ function rowToPublishedListItem(row: PublishedScheduleRow): PublishedScheduleLis
   };
 }
 
-function rowToPublishedDetail(row: PublishedScheduleRow): PublishedScheduleDetail {
+function rowToPublishedDetail(
+  row: PublishedScheduleRow,
+  activePublishedScheduleId: string | null
+): PublishedScheduleDetail {
   return {
-    ...rowToPublishedListItem(row),
+    ...rowToPublishedListItem(row, activePublishedScheduleId),
     settings: parseJson(row.settings_json),
     programs: parseJson(row.programs_json),
     slots: parseJson(row.slots_json),
@@ -1056,6 +1285,20 @@ function rowToPublishedDetail(row: PublishedScheduleRow): PublishedScheduleDetai
     willActivateSchedule: false,
     willUpdateCursors: false,
     willMaterializePlaylist: false,
+  };
+}
+
+function rowToActiveScheduleState(row: ActiveScheduleStateRow): ActiveScheduleState {
+  return {
+    id: row.id,
+    publishedScheduleId: row.published_schedule_id,
+    previousPublishedScheduleId: row.previous_published_schedule_id,
+    activatedBy: row.activated_by,
+    activatedAt: row.activated_at,
+    confirmationText: row.confirmation_text,
+    safetyCheckSummary: parseJson<ActivationSafetySummary>(row.safety_check_summary_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

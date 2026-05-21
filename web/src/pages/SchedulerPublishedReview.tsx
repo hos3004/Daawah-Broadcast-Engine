@@ -60,7 +60,7 @@ interface PublishedScheduleDetail {
   sourceDraftId: string;
   name: string;
   status: 'published';
-  isActive: false;
+  isActive: boolean;
   validationStatus: 'draft_valid';
   validationErrors: ScheduleIssue[];
   scheduleStartDate: string;
@@ -104,6 +104,9 @@ export default function SchedulerPublishedReviewPage() {
   const [schedule, setSchedule] = useState<PublishedScheduleDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
+  const [activating, setActivating] = useState(false);
 
   useEffect(() => {
     if (!publishedId) {
@@ -114,6 +117,8 @@ export default function SchedulerPublishedReviewPage() {
 
     setLoading(true);
     setError('');
+    setActionError('');
+    setActionMessage('');
     schedulerFoundationApi.getPublishedSchedule(publishedId)
       .then(response => {
         const body = response.data as { publishedSchedule: PublishedScheduleDetail };
@@ -134,6 +139,49 @@ export default function SchedulerPublishedReviewPage() {
       { scheduledMinutes: 0, gapMinutes: 0 }
     );
   }, [schedule]);
+
+  const canActivate = Boolean(
+    schedule &&
+    !schedule.isActive &&
+    schedule.status === 'published' &&
+    schedule.validationStatus === 'draft_valid' &&
+    schedule.validationErrors.length === 0 &&
+    schedule.validationSummary.errors === 0 &&
+    schedule.validationSummary.conflicts === 0
+  );
+
+  const activateSchedule = async () => {
+    if (!schedule || !canActivate || activating) return;
+    const requiredText = `ACTIVATE SCHEDULE ${schedule.id}`;
+    const confirmed = window.confirm(
+      `Activate "${schedule.name}"?\n\nThis only marks the published schedule active in the database. It will not materialize playlists, update cursors, start playout, or broadcast.`
+    );
+    if (!confirmed) return;
+    const typedText = window.prompt(`Type exactly to confirm:\n${requiredText}`);
+    if (typedText === null) return;
+
+    setActivating(true);
+    setActionError('');
+    setActionMessage('');
+    try {
+      const response = await schedulerFoundationApi.activatePublishedSchedule(schedule.id, {
+        scheduleId: schedule.id,
+        confirmActivation: true,
+        confirmationText: typedText,
+      });
+      const body = response.data as { activeSchedule: PublishedScheduleDetail; previousPublishedScheduleId: string | null };
+      setSchedule(body.activeSchedule);
+      setActionMessage(
+        body.previousPublishedScheduleId
+          ? `Activated schedule. Previous active schedule: ${body.previousPublishedScheduleId}`
+          : 'Activated schedule. There was no previous active schedule.'
+      );
+    } catch {
+      setActionError('Could not activate this schedule. Confirm the typed text and validation status.');
+    } finally {
+      setActivating(false);
+    }
+  };
 
   const folderCounts = useMemo(() => {
     return (schedule?.folderMatches ?? []).reduce<Record<string, number>>((acc, match) => {
@@ -166,12 +214,28 @@ export default function SchedulerPublishedReviewPage() {
             <ShieldCheck size={20} style={{ color: 'var(--accent)' }} />
             <h2 className="text-xl font-bold">{schedule.name}</h2>
             <span className="badge badge-ready">published</span>
-            <span className="badge badge-info">inactive</span>
+            <span className={`badge ${schedule.isActive ? 'badge-ready' : 'badge-info'}`}>
+              {schedule.isActive ? 'active' : 'inactive'}
+            </span>
             <span className="badge badge-ready">{schedule.validationStatus}</span>
           </div>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-            Published review only. There is no activation, playlist materialization, cursor update, playout, or broadcast control on this screen.
+            Activation only marks this published schedule active. It does not materialize playlists, update cursors, run playout, or broadcast.
           </p>
+          {actionMessage && <p className="text-xs mt-2" style={{ color: 'var(--success)' }}>{actionMessage}</p>}
+          {actionError && <p className="text-xs mt-2" style={{ color: 'var(--danger)' }}>{actionError}</p>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {canActivate && (
+            <button
+              className="btn-primary inline-flex items-center gap-2 text-sm"
+              disabled={activating}
+              onClick={() => void activateSchedule()}
+            >
+              <CheckCircle2 size={14} />
+              {activating ? 'Activating...' : 'Activate Schedule'}
+            </button>
+          )}
         </div>
       </section>
 
@@ -229,10 +293,11 @@ export default function SchedulerPublishedReviewPage() {
       <section className="card">
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <CheckCircle2 size={16} style={{ color: 'var(--success)' }} />
-          <span>Publish did not activate this schedule.</span>
+          <span>Activation status is stored separately from playlist materialization and playout.</span>
           <span className="badge badge-info">materialize playlists: false</span>
           <span className="badge badge-info">cursor updates: false</span>
           <span className="badge badge-info">playout: false</span>
+          <span className="badge badge-info">broadcast: false</span>
         </div>
       </section>
 

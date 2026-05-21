@@ -12,6 +12,7 @@ import {
 } from '../../media/registry';
 import { SafeRootError } from '../../media/safeRoots';
 import {
+  activatePublishedSchedule,
   DraftValidationError,
   getPublishedSchedule,
   getSchedulerDraft,
@@ -267,6 +268,41 @@ schedulerFoundationRouter.get(
       mode: 'published-list',
       publishedSchedules: listPublishedSchedules(limit),
     });
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/published-schedules/:id/activate',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Published schedule id is required', code: 'PUBLISHED_SCHEDULE_ID_REQUIRED' });
+      return;
+    }
+
+    const body = req.body as {
+      scheduleId?: string;
+      confirmActivation?: boolean;
+      confirmationText?: string;
+    };
+
+    try {
+      const result = activatePublishedSchedule({
+        publishedScheduleId: id,
+        requestedScheduleId: body.scheduleId,
+        confirmActivation: body.confirmActivation,
+        confirmationText: body.confirmationText,
+        activatedBy: req.user?.id ?? null,
+      });
+
+      res.json({
+        mode: 'activated',
+        ...result,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
   }
 );
 
