@@ -28,6 +28,12 @@ import {
   listPlaylistMaterializationRuns,
 } from '../../schedule/playlistMaterialization';
 import {
+  listTestPlayoutPlans,
+  readTestPlayoutPlan,
+  writeTestPlayoutPlan,
+  type TestPlayoutPlanInput,
+} from '../../playout/testPlayout';
+import {
   previewExcelImport,
   previewExcelImportFromXlsx,
   type ExcelImportPreviewResult,
@@ -367,6 +373,81 @@ schedulerFoundationRouter.get(
     res.json({
       mode: 'playlist-materialization-run',
       run,
+    });
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/test-playout/plans',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    const body = req.body as TestPlayoutPlanInput;
+
+    try {
+      const plan = writeTestPlayoutPlan(body);
+      res.status(201).json({
+        mode: 'test-playout-plan',
+        plan,
+        safety: {
+          prepareOnly: true,
+          ffmpegExecution: false,
+          playoutStarted: false,
+          broadcastStarted: false,
+          rtmpPush: false,
+          streamKeyUsage: false,
+          cursorUpdates: false,
+          mediaAccess: false,
+          dnsChanges: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/test-playout/plans',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const limit = Number(req.query['limit'] ?? 50);
+    res.json({
+      mode: 'test-playout-plan-list',
+      plans: listTestPlayoutPlans(limit),
+      safety: {
+        readOnly: true,
+        ffmpegExecution: false,
+        playoutStarted: false,
+        broadcastStarted: false,
+      },
+    });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/test-playout/plans/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Test playout plan id is required', code: 'TEST_PLAYOUT_PLAN_ID_REQUIRED' });
+      return;
+    }
+
+    const plan = readTestPlayoutPlan(id);
+    if (!plan) {
+      res.status(404).json({ error: 'Test playout plan not found', code: 'TEST_PLAYOUT_PLAN_NOT_FOUND' });
+      return;
+    }
+    res.json({
+      mode: 'test-playout-plan',
+      plan,
+      safety: {
+        readOnly: true,
+        ffmpegExecution: false,
+        playoutStarted: false,
+        broadcastStarted: false,
+      },
     });
   }
 );

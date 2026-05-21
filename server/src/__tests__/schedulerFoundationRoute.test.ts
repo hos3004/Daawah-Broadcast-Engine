@@ -21,6 +21,7 @@ describe('scheduler foundation routes', () => {
     process.env['DB_PATH'] = path.join(tempDir, 'test.db');
     process.env['DATA_PATH'] = tempDir;
     process.env['PLAYLIST_MATERIALIZATION_PROJECT_ROOT'] = tempDir;
+    process.env['TEST_PLAYOUT_PROJECT_ROOT'] = tempDir;
 
     const { initDb, getDb, closeDb: close } = require('../db/schema') as typeof import('../db/schema');
     const { schedulerFoundationRouter } = require('../api/routes/schedulerFoundation') as typeof import('../api/routes/schedulerFoundation');
@@ -623,6 +624,225 @@ describe('scheduler foundation routes', () => {
     expect(read.run.summary.safety).toMatchObject({ playout: false, broadcast: false });
   });
 
+  it('requires explicit prepare-only confirmation for test playout plans', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: false,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+      }),
+    });
+    const body = await response.json() as { code: string };
+
+    expect(response.status).toBe(400);
+    expect(body.code).toBe('TEST_PLAYOUT_CONFIRMATION_REQUIRED');
+  });
+
+  it('rejects RTMP, RTMPS, and live URL targets for test playout plans', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+
+    const rtmpResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: 'rtmp://live.example/stream',
+        outputMode: 'local_file',
+      }),
+    });
+    const rtmp = await rtmpResponse.json() as { code: string };
+    expect(rtmpResponse.status).toBe(400);
+    expect(rtmp.code).toBe('RTMP_TARGET_FORBIDDEN');
+
+    const rtmpsResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        outputPath: 'rtmps://live.example/stream',
+      }),
+    });
+    const rtmps = await rtmpsResponse.json() as { code: string };
+    expect(rtmpsResponse.status).toBe(400);
+    expect(rtmps.code).toBe('RTMP_TARGET_FORBIDDEN');
+
+    const liveUrlResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'localhost_hls',
+        outputPath: 'https://live.example/hls/index.m3u8',
+      }),
+    });
+    const liveUrl = await liveUrlResponse.json() as { code: string };
+    expect(liveUrlResponse.status).toBe(400);
+    expect(liveUrl.code).toBe('LIVE_URL_FORBIDDEN');
+  });
+
+  it('rejects unsafe output and media paths for test playout plans', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+
+    const outsideResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        outputPath: path.join(tempDir, 'outside', 'output.mp4'),
+      }),
+    });
+    const outside = await outsideResponse.json() as { code: string };
+    expect(outsideResponse.status).toBe(400);
+    expect(outside.code).toBe('UNSAFE_TEST_PLAYOUT_OUTPUT_PATH');
+
+    const mediaResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        outputPath: '/srv/daawah/media/output.mp4',
+      }),
+    });
+    const media = await mediaResponse.json() as { code: string };
+    expect(mediaResponse.status).toBe(400);
+    expect(media.code).toBe('MEDIA_PATH_FORBIDDEN');
+
+    const streamKeyResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        streamKey: 'sk_live_secret_stream_key_value',
+      }),
+    });
+    const streamKey = await streamKeyResponse.json() as { code: string };
+    expect(streamKeyResponse.status).toBe(400);
+    expect(streamKey.code).toBe('STREAM_KEY_FORBIDDEN');
+  });
+
+  it('creates a planned test playout record only without spawning or mutating production tables', async () => {
+    const childProcess = require('child_process') as typeof import('child_process');
+    const spawnSpy = jest.spyOn(childProcess, 'spawn');
+    const { getDb } = require('../db/schema') as typeof import('../db/schema');
+    const db = getDb();
+    db.prepare('INSERT INTO cursors (key, value) VALUES (?, ?)').run('program:test', 'file-1');
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+    const cursorCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const playlistCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        durationLimitSeconds: 600,
+      }),
+    });
+    const body = await response.json() as {
+      plan: {
+        id: string;
+        status: string;
+        sourcePlaylistPath: string;
+        outputPath: string;
+        durationLimitSeconds: number;
+        commandPreview: {
+          willExecute: boolean;
+          safety: {
+            ffmpegExecution: boolean;
+            playoutStarted: boolean;
+            broadcastStarted: boolean;
+            cursorMutation: boolean;
+            mediaAccess: boolean;
+          };
+        };
+      };
+      safety: {
+        prepareOnly: boolean;
+        ffmpegExecution: boolean;
+        playoutStarted: boolean;
+        broadcastStarted: boolean;
+        cursorUpdates: boolean;
+      };
+    };
+    const cursorCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const playlistCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
+    const planCount = (db.prepare('SELECT COUNT(*) as cnt FROM test_playout_plans').get() as { cnt: number }).cnt;
+
+    expect(response.status).toBe(201);
+    expect(body.plan).toMatchObject({
+      status: 'planned',
+      sourcePlaylistPath: playlistPath,
+      durationLimitSeconds: 600,
+    });
+    expect(path.resolve(body.plan.outputPath).startsWith(`${path.resolve(tempDir, 'generated', 'test-playout')}${path.sep}`)).toBe(true);
+    expect(body.plan.outputPath.endsWith(`${path.sep}output.mp4`)).toBe(true);
+    expect(body.plan.commandPreview.willExecute).toBe(false);
+    expect(body.plan.commandPreview.safety).toMatchObject({
+      ffmpegExecution: false,
+      playoutStarted: false,
+      broadcastStarted: false,
+      cursorMutation: false,
+      mediaAccess: false,
+    });
+    expect(body.safety).toMatchObject({
+      prepareOnly: true,
+      ffmpegExecution: false,
+      playoutStarted: false,
+      broadcastStarted: false,
+      cursorUpdates: false,
+    });
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(cursorCountAfter).toBe(cursorCountBefore);
+    expect(playlistCountAfter).toBe(playlistCountBefore);
+    expect(planCount).toBe(1);
+    spawnSpy.mockRestore();
+  });
+
+  it('lists and reads test playout plans', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+
+    const createResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'localhost_hls',
+      }),
+    });
+    const created = await createResponse.json() as { plan: { id: string; outputMode: string; outputPath: string } };
+    expect(createResponse.status).toBe(201);
+    expect(created.plan.outputMode).toBe('localhost_hls');
+    expect(created.plan.outputPath.endsWith(`${path.sep}hls`)).toBe(true);
+
+    const listResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`);
+    const list = await listResponse.json() as { plans: Array<{ id: string; status: string }> };
+    expect(listResponse.status).toBe(200);
+    expect(list.plans).toHaveLength(1);
+    expect(list.plans[0]).toMatchObject({ id: created.plan.id, status: 'planned' });
+
+    const readResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans/${created.plan.id}`);
+    const read = await readResponse.json() as { plan: { id: string; commandPreview: { safety: { broadcastStarted: boolean } } } };
+    expect(readResponse.status).toBe(200);
+    expect(read.plan.id).toBe(created.plan.id);
+    expect(read.plan.commandPreview.safety.broadcastStarted).toBe(false);
+  });
+
   it('saves an inactive invalid draft when the preview has validation errors', async () => {
     const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
       method: 'POST',
@@ -873,6 +1093,18 @@ async function previewWorkbook(baseUrl: string, workbook: Buffer): Promise<Recor
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createDryRunPlaylistArtifact(root: string): string {
+  const playlistDir = path.join(root, 'generated', 'playlists', 'test-run');
+  fs.mkdirSync(playlistDir, { recursive: true });
+  const playlistPath = path.join(playlistDir, 'playlist.json');
+  fs.writeFileSync(playlistPath, JSON.stringify({
+    runId: 'test-run',
+    dryRun: true,
+    items: [],
+  }), 'utf8');
+  return playlistPath;
 }
 
 async function saveAndPublishValidDraft(
