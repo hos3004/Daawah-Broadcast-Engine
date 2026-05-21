@@ -55,6 +55,24 @@ export const scheduleApi = {
   buildPlaylist: (date: string) => api.post(`/schedules/playlist/build/${date}`),
 };
 
+// Scheduler foundation preview APIs
+export const schedulerFoundationApi = {
+  excelTemplateUrl: '/api/scheduler-foundation/excel-template',
+  registryStatus: () => api.get('/scheduler-foundation/media-registry/status'),
+  scanPreview: (payload?: { root_key?: string; maxDepth?: number; skipRecentlyModifiedMinutes?: number }) =>
+    api.post('/scheduler-foundation/media-registry/scan-preview', payload ?? {}),
+  safeNamingPreview: (names: string[]) =>
+    api.post('/scheduler-foundation/safe-naming/preview', { names }),
+  programCandidates: () => api.get('/scheduler-foundation/program-candidates'),
+  excelImportPreview: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post('/scheduler-foundation/excel-import/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  validationResult: () => api.get('/scheduler-foundation/validation-result'),
+  monthlyPreview: () => api.get('/scheduler-foundation/monthly-schedule-preview'),
+};
+
 // Broadcast
 export const broadcastApi = {
   start:     () => api.post('/broadcast/start'),

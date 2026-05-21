@@ -7,6 +7,7 @@ import DashboardPage from './pages/Dashboard';
 import MediaLibraryPage from './pages/MediaLibrary';
 import MediaBrowserPage from './pages/MediaBrowser';
 import SchedulePage from './pages/Schedule';
+import SchedulerFoundationPage from './pages/SchedulerFoundation';
 import OverlaysPage from './pages/Overlays';
 import BroadcastPage from './pages/BroadcastControl';
 import LogsPage from './pages/Logs';
@@ -51,6 +52,7 @@ export default function App() {
         <Route path="/media" element={<MediaLibraryPage />} />
         <Route path="/media-browser" element={<MediaBrowserPage />} />
         <Route path="/schedule" element={<SchedulePage />} />
+        <Route path="/scheduler-foundation" element={<SchedulerFoundationPage />} />
         <Route path="/overlays" element={<OverlaysPage />} />
         <Route path="/broadcast" element={<BroadcastPage />} />
         <Route path="/logs" element={<LogsPage />} />

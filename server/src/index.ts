@@ -26,6 +26,7 @@ import { scheduleRouter } from './api/routes/schedule';
 import { broadcastRouter } from './api/routes/broadcast';
 import { overlaysRouter } from './api/routes/overlays';
 import { systemRouter } from './api/routes/system';
+import { schedulerFoundationRouter } from './api/routes/schedulerFoundation';
 
 async function main(): Promise<void> {
   // Init directories
@@ -113,6 +114,7 @@ async function main(): Promise<void> {
   app.use('/api/broadcast', requireAuth, broadcastRouter);
   app.use('/api/overlays',  requireAuth, overlaysRouter);
   app.use('/api/system',    requireAuth, systemRouter);
+  app.use('/api/scheduler-foundation', requireAuth, schedulerFoundationRouter);
 
   // Admin dashboard SPA (production; dev uses Vite proxy)
   if (config.env === 'production') {
