@@ -36,7 +36,8 @@ describe('scheduler foundation routes', () => {
     const app = express();
     app.use(express.json({ limit: '2mb' }));
     app.use((req: Request, _res: Response, next: NextFunction) => {
-      req.user = { id: 'user-1', email: 'test@example.com', role: 'admin' };
+      const role = (req.header('x-test-role') ?? 'admin') as 'admin' | 'editor' | 'operator';
+      req.user = { id: 'user-1', email: 'test@example.com', role };
       next();
     });
     app.use('/api/scheduler-foundation', schedulerFoundationRouter);
@@ -344,6 +345,17 @@ describe('scheduler foundation routes', () => {
     const second = await saveAndPublishValidDraft(baseUrl, 'Second published schedule', 'second.xlsx');
     const cursorCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
 
+    const editorResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-test-role': 'editor' },
+      body: JSON.stringify({
+        scheduleId: first.publishedId,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${first.publishedId}`,
+      }),
+    });
+    expect(editorResponse.status).toBe(403);
+
     const rejectedResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -390,6 +402,19 @@ describe('scheduler foundation routes', () => {
       playout: false,
       broadcast: false,
     });
+
+    const alreadyActiveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${first.publishedId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scheduleId: first.publishedId,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${first.publishedId}`,
+      }),
+    });
+    const alreadyActive = await alreadyActiveResponse.json() as { code: string };
+    expect(alreadyActiveResponse.status).toBe(409);
+    expect(alreadyActive.code).toBe('ALREADY_ACTIVE');
 
     const activateSecondResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${second.publishedId}/activate`, {
       method: 'POST',

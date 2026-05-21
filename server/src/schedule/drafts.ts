@@ -205,7 +205,8 @@ interface ActiveScheduleStateRow {
 export class DraftValidationError extends Error {
   constructor(
     message: string,
-    public readonly code: string
+    public readonly code: string,
+    public readonly statusCode = 400
   ) {
     super(message);
   }
@@ -399,6 +400,10 @@ export function activatePublishedSchedule(input: ActivatePublishedScheduleInput)
   assertPublishedCanActivate(publishedSchedule);
 
   const previousPublishedScheduleId = getActivePublishedScheduleId();
+  if (previousPublishedScheduleId === publishedSchedule.id) {
+    throw new DraftValidationError('Published schedule is already active', 'ALREADY_ACTIVE', 409);
+  }
+
   const activatedAt = new Date().toISOString();
   const safety = buildActivationSafetySummary(publishedSchedule);
 

@@ -273,7 +273,7 @@ schedulerFoundationRouter.get(
 
 schedulerFoundationRouter.post(
   '/published-schedules/:id/activate',
-  requireRole('admin', 'editor'),
+  requireRole('admin'),
   (req: Request, res: Response): void => {
     const id = req.params.id;
     if (!id) {
@@ -343,7 +343,7 @@ schedulerFoundationRouter.get('/monthly-schedule-preview', (_req: Request, res: 
 
 function sendFoundationError(res: Response, err: unknown): void {
   if (err instanceof DraftValidationError) {
-    res.status(400).json({ error: err.message, code: err.code });
+    res.status(err.statusCode).json({ error: err.message, code: err.code });
     return;
   }
   if (err instanceof SafeRootError) {
