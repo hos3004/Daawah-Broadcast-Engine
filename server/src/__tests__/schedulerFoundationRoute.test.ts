@@ -828,6 +828,45 @@ describe('scheduler foundation routes', () => {
     const streamKey = await streamKeyResponse.json() as { code: string };
     expect(streamKeyResponse.status).toBe(400);
     expect(streamKey.code).toBe('STREAM_KEY_FORBIDDEN');
+
+    const nestedStreamKeyResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        metadata: {
+          streamKey: 'sk_live_nested_secret',
+        },
+      }),
+    });
+    const nestedStreamKey = await nestedStreamKeyResponse.json() as { code: string };
+    expect(nestedStreamKeyResponse.status).toBe(400);
+    expect(nestedStreamKey.code).toBe('STREAM_KEY_FORBIDDEN');
+  });
+
+  it('rejects test playout plans when ffconcat does not match expanded playlist items', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+    fs.writeFileSync(
+      path.join(path.dirname(playlistPath), 'playlist.ffconcat'),
+      "ffconcat version 1.0\nfile 'rtmp://live.example/unsafe'\n",
+      'utf8'
+    );
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+      }),
+    });
+    const body = await response.json() as { code: string };
+
+    expect(response.status).toBe(400);
+    expect(body.code).toBe('SOURCE_PLAYLIST_FFCONCAT_MISMATCH');
   });
 
   it('creates a planned test playout record only without spawning or mutating production tables', async () => {
@@ -969,6 +1008,22 @@ describe('scheduler foundation routes', () => {
     expect(rejected.code).toBe('TEST_PLAYOUT_EXECUTION_CONFIRMATION_REQUIRED');
     expect(spawnSpy).not.toHaveBeenCalled();
 
+    const paddedConfirmationResponse = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmExecution: true,
+        confirmationText: ' RUN ISOLATED TEST PLAYOUT ',
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        durationLimitSeconds: 5,
+      }),
+    });
+    const paddedConfirmation = await paddedConfirmationResponse.json() as { code: string };
+    expect(paddedConfirmationResponse.status).toBe(400);
+    expect(paddedConfirmation.code).toBe('TEST_PLAYOUT_EXECUTION_TEXT_REQUIRED');
+    expect(spawnSpy).not.toHaveBeenCalled();
+
     const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1028,6 +1083,56 @@ describe('scheduler foundation routes', () => {
     expect(fs.existsSync(body.run.artifacts.statusPath)).toBe(true);
     expect(fs.existsSync(body.run.artifacts.reportPath)).toBe(true);
     expect(fs.existsSync(body.run.artifacts.ffmpegLogPath)).toBe(true);
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    const args = spawnSpy.mock.calls[0]?.[1] as string[];
+    const inputIndex = args.indexOf('-i');
+    expect(inputIndex).toBeGreaterThanOrEqual(0);
+    const verifiedFfconcatPath = args[inputIndex + 1];
+    if (!verifiedFfconcatPath) throw new Error('Missing verified ffconcat path in FFmpeg args');
+    expect(path.resolve(verifiedFfconcatPath)).toContain(`${path.resolve(tempDir, 'generated', 'test-playout')}${path.sep}`);
+    expect(path.basename(verifiedFfconcatPath)).toBe('verified-playlist.ffconcat');
+    expect(fs.readFileSync(verifiedFfconcatPath, 'utf8')).toContain('expanded-1.mp4');
+    spawnSpy.mockRestore();
+  });
+
+  it('fails an isolated test playout run and kills FFmpeg when it exceeds the watchdog timeout', async () => {
+    process.env['TEST_PLAYOUT_FFMPEG_TIMEOUT_MS'] = '5';
+    process.env['TEST_PLAYOUT_FFMPEG_KILL_GRACE_MS'] = '5';
+    const childProcess = require('child_process') as typeof import('child_process');
+    const { EventEmitter } = require('events') as typeof import('events');
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+    let killSpy: jest.Mock<boolean, [NodeJS.Signals]> | null = null;
+    const spawnSpy = jest.spyOn(childProcess, 'spawn').mockImplementation((() => {
+      const child = new EventEmitter() as any;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = jest.fn((signal: NodeJS.Signals) => {
+        setImmediate(() => {
+          child.emit('close', null, signal);
+        });
+        return true;
+      });
+      killSpy = child.kill;
+      return child;
+    }) as typeof childProcess.spawn);
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmExecution: true,
+        confirmationText: 'RUN ISOLATED TEST PLAYOUT',
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+        durationLimitSeconds: 5,
+      }),
+    });
+    const body = await response.json() as { run: { status: string; errors: Array<{ code: string }> } };
+
+    expect(response.status).toBe(500);
+    expect(body.run.status).toBe('failed');
+    expect(body.run.errors.map(error => error.code)).toContain('FFMPEG_TIMEOUT');
+    expect(killSpy).toHaveBeenCalledWith('SIGTERM');
     expect(spawnSpy).toHaveBeenCalledTimes(1);
     spawnSpy.mockRestore();
   });
@@ -1289,6 +1394,10 @@ function createDryRunPlaylistArtifact(root: string): string {
   fs.mkdirSync(playlistDir, { recursive: true });
   const playlistPath = path.join(playlistDir, 'playlist.json');
   const ffconcatPath = path.join(playlistDir, 'playlist.ffconcat');
+  const mediaDir = path.join(root, 'media');
+  const mediaPath = path.join(mediaDir, 'expanded-1.mp4');
+  fs.mkdirSync(mediaDir, { recursive: true });
+  fs.writeFileSync(mediaPath, 'test media placeholder', 'utf8');
   fs.writeFileSync(playlistPath, JSON.stringify({
     runId: 'test-run',
     dryRun: true,
@@ -1296,11 +1405,16 @@ function createDryRunPlaylistArtifact(root: string): string {
     ffconcatPath,
     items: [{
       id: 'expanded-1',
+      title: 'Expanded test item',
+      timelineStartSeconds: 0,
+      timelineEndSeconds: 5,
+      durationSeconds: 5,
       validationStatus: 'ready',
-      absolutePath: path.join(root, 'media', 'expanded-1.mp4'),
+      absolutePath: mediaPath,
+      isTrimmed: false,
     }],
   }), 'utf8');
-  fs.writeFileSync(ffconcatPath, 'ffconcat version 1.0\n', 'utf8');
+  fs.writeFileSync(ffconcatPath, `ffconcat version 1.0\nfile '${mediaPath.replace(/\\/g, '/')}'\n`, 'utf8');
   return playlistPath;
 }
 
