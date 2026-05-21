@@ -110,6 +110,7 @@ interface SchedulePreviewDay {
 }
 
 interface ExcelPreview {
+  mode: 'preview';
   settings: SettingsPreview;
   programs: ProgramRow[];
   slots: SlotRow[];
@@ -134,9 +135,36 @@ interface ExcelPreview {
     fileStatus: string;
   };
   issues: ExcelIssue[];
+  productionSafety: {
+    previewOnly: true;
+    cursorUpdates: false;
+    playlistMaterialization: false;
+    ffmpeg: false;
+    scheduleActivation: false;
+  };
   willActivateSchedule: false;
   willUpdateCursors: false;
   willMaterializePlaylist: false;
+}
+
+interface DraftListItem {
+  id: string;
+  name: string;
+  status: 'draft';
+  isActive: false;
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  timezone: string;
+  sourceExcelFilename: string;
+  sourceExcelSha256: string;
+  programCount: number;
+  slotCount: number;
+  validationSummary: {
+    errors: number;
+    warnings: number;
+    fileStatus: string;
+  };
+  createdAt: string;
 }
 
 const tabs: Array<{ key: TabKey; label: string; icon: LucideIcon }> = [
@@ -173,9 +201,13 @@ export default function SchedulerFoundationPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ExcelPreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [drafts, setDrafts] = useState<DraftListItem[]>([]);
+  const [draftMessage, setDraftMessage] = useState('');
   const [error, setError] = useState('');
 
-  const completedStep = preview ? 6 : selectedFile ? 1 : 0;
+  const completedStep = draftMessage ? 7 : preview ? 6 : selectedFile ? 1 : 0;
   const summary = preview?.summary;
   const issueGroups = useMemo(() => groupIssues(preview?.issues ?? []), [preview]);
 
@@ -183,6 +215,7 @@ export default function SchedulerFoundationPage() {
     const file = event.target.files?.[0] ?? null;
     setSelectedFile(file);
     setPreview(null);
+    setDraftMessage('');
     setError('');
   };
 
@@ -193,11 +226,52 @@ export default function SchedulerFoundationPage() {
     try {
       const response = await schedulerFoundationApi.excelImportPreview(selectedFile);
       setPreview(response.data as ExcelPreview);
+      setDraftMessage('');
       setActiveTab('programs');
     } catch {
       setError('تعذر قراءة ملف Excel. تأكد من أن الملف بصيغة .xlsx ويحتوي على Sheets المطلوبة.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveDraft = async () => {
+    if (!selectedFile || !preview || preview.summary.errors > 0) return;
+    setSavingDraft(true);
+    setError('');
+    setDraftMessage('');
+    try {
+      const sha256 = await sha256File(selectedFile);
+      const name = `${stripExcelExtension(selectedFile.name)} ${preview.settings.schedule_start_date} to ${preview.settings.schedule_end_date}`;
+      const response = await schedulerFoundationApi.saveDraftSchedule({
+        name,
+        sourceExcel: {
+          filename: selectedFile.name,
+          sha256,
+        },
+        preview,
+      });
+      const body = response.data as { draft: DraftListItem };
+      setDraftMessage(`Draft saved: ${body.draft.name}`);
+      await loadDrafts();
+    } catch {
+      setError('Could not save the draft. Make sure the preview has zero errors and try again.');
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
+  const loadDrafts = async () => {
+    setDraftsLoading(true);
+    setError('');
+    try {
+      const response = await schedulerFoundationApi.listDraftSchedules();
+      const body = response.data as { drafts: DraftListItem[] };
+      setDrafts(body.drafts);
+    } catch {
+      setError('Could not load draft schedules.');
+    } finally {
+      setDraftsLoading(false);
     }
   };
 
@@ -214,10 +288,24 @@ export default function SchedulerFoundationPage() {
             تحميل نموذج Excel، رفع الجدول، فحص البرامج والمواعيد، ومراجعة المطابقة قبل أي تفعيل.
           </p>
         </div>
-        <button className="btn-ghost flex items-center gap-2 text-sm" disabled title="سيتم تفعيل حفظ المسودة بعد إضافة endpoint آمن">
-          <Save size={14} />
-          حفظ المسودة - قريبًا
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="btn-primary flex items-center gap-2 text-sm"
+            disabled={!selectedFile || !preview || preview.summary.errors > 0 || savingDraft}
+            onClick={() => void saveDraft()}
+          >
+            <Save size={14} />
+            {savingDraft ? 'Saving Draft...' : 'Save Draft'}
+          </button>
+          <button
+            className="btn-ghost flex items-center gap-2 text-sm"
+            disabled={draftsLoading}
+            onClick={() => void loadDrafts()}
+          >
+            <ListChecks size={14} />
+            {draftsLoading ? 'Loading Drafts...' : 'View Drafts'}
+          </button>
+        </div>
       </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -269,8 +357,31 @@ export default function SchedulerFoundationPage() {
             </button>
           </div>
           {error && <p className="text-xs mt-2" style={{ color: 'var(--danger)' }}>{error}</p>}
+          {draftMessage && <p className="text-xs mt-2" style={{ color: 'var(--success)' }}>{draftMessage}</p>}
         </div>
       </section>
+
+      {(drafts.length > 0 || draftsLoading) && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="font-semibold">Draft Schedules</h3>
+            <span className="badge badge-info">inactive drafts only</span>
+          </div>
+          <DataTable
+            empty={draftsLoading ? 'Loading drafts...' : 'No draft schedules saved yet'}
+            headers={['Name', 'Date range', 'Programs', 'Slots', 'Status', 'Source Excel', 'Created']}
+            rows={drafts.map(draft => [
+              draft.name,
+              `${draft.scheduleStartDate} to ${draft.scheduleEndDate}`,
+              draft.programCount,
+              draft.slotCount,
+              draft.status === 'draft' && !draft.isActive ? 'inactive draft' : draft.status,
+              `${draft.sourceExcelFilename} (${draft.sourceExcelSha256.slice(0, 12)}...)`,
+              draft.createdAt,
+            ])}
+          />
+        </section>
+      )}
 
       <section className="grid grid-cols-1 md:grid-cols-7 gap-2">
         {steps.map((step, index) => {
@@ -560,6 +671,17 @@ function groupIssues(issues: ExcelIssue[]): Record<string, number> {
     acc[issue.code] = (acc[issue.code] ?? 0) + 1;
     return acc;
   }, {});
+}
+
+async function sha256File(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function stripExcelExtension(filename: string): string {
+  return filename.replace(/\.xlsx$/i, '').slice(0, 120) || 'Excel schedule';
 }
 
 function statusBadgeClass(value: string | undefined): string {

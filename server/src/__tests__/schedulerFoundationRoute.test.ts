@@ -2,6 +2,7 @@ import fs from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
+import { createHash } from 'crypto';
 import express, { NextFunction, Request, Response } from 'express';
 import * as XLSX from 'xlsx';
 
@@ -33,6 +34,7 @@ describe('scheduler foundation routes', () => {
     `).run('folder-1', 'root-original-ar', 'Tafseer/Season 01', 'برنامج التفسير', 'season 01', 'tafseer-season-01', 12, 'provisional');
 
     const app = express();
+    app.use(express.json({ limit: '2mb' }));
     app.use((req: Request, _res: Response, next: NextFunction) => {
       req.user = { id: 'user-1', email: 'test@example.com', role: 'admin' };
       next();
@@ -109,6 +111,135 @@ describe('scheduler foundation routes', () => {
     expect(scheduleCount).toBe(0);
     expect(cursorCount).toBe(1);
   });
+
+  it('saves, lists, and reads an inactive draft from a validated Excel preview without publishing', async () => {
+    const { getDb } = require('../db/schema') as typeof import('../db/schema');
+    const db = getDb();
+    db.prepare('INSERT INTO cursors (key, value) VALUES (?, ?)').run('program:test', 'file-1');
+
+    const workbook = makeWorkbookBuffer();
+    const form = new FormData();
+    form.append(
+      'file',
+      new Blob([workbook], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      'schedule.xlsx'
+    );
+
+    const previewResponse = await fetch(`${baseUrl}/api/scheduler-foundation/excel-import/preview`, {
+      method: 'POST',
+      body: form,
+    });
+    const preview = await previewResponse.json() as {
+      summary: { errors: number };
+      [key: string]: unknown;
+    };
+    expect(previewResponse.status).toBe(200);
+    expect(preview.summary.errors).toBe(0);
+
+    const saveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Safe draft',
+        sourceExcel: {
+          filename: 'schedule.xlsx',
+          sha256: sha256(workbook),
+        },
+        preview,
+      }),
+    });
+    const saved = await saveResponse.json() as {
+      draft: {
+        id: string;
+        name: string;
+        status: string;
+        isActive: boolean;
+        sourceExcelSha256: string;
+        programCount: number;
+        slotCount: number;
+        willActivateSchedule: boolean;
+        willUpdateCursors: boolean;
+        willMaterializePlaylist: boolean;
+      };
+    };
+
+    expect(saveResponse.status).toBe(201);
+    expect(saved.draft).toMatchObject({
+      name: 'Safe draft',
+      status: 'draft',
+      isActive: false,
+      programCount: 1,
+      slotCount: 1,
+      willActivateSchedule: false,
+      willUpdateCursors: false,
+      willMaterializePlaylist: false,
+    });
+
+    const listResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`);
+    const list = await listResponse.json() as { drafts: Array<{ id: string; isActive: boolean }> };
+    expect(listResponse.status).toBe(200);
+    expect(list.drafts).toHaveLength(1);
+    expect(list.drafts[0]?.isActive).toBe(false);
+
+    const readResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules/${saved.draft.id}`);
+    const read = await readResponse.json() as { draft: { slots: unknown[]; schedulePreview: { days: unknown[] } } };
+    expect(readResponse.status).toBe(200);
+    expect(read.draft.slots).toHaveLength(1);
+    expect(read.draft.schedulePreview.days.length).toBeGreaterThan(0);
+
+    const scheduleCount = (db.prepare('SELECT COUNT(*) as cnt FROM schedules').get() as { cnt: number }).cnt;
+    const scheduleItemCount = (db.prepare('SELECT COUNT(*) as cnt FROM schedule_items').get() as { cnt: number }).cnt;
+    const playlistCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
+    const cursorCount = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const draftCount = (db.prepare('SELECT COUNT(*) as cnt FROM scheduler_drafts').get() as { cnt: number }).cnt;
+    expect(scheduleCount).toBe(0);
+    expect(scheduleItemCount).toBe(0);
+    expect(playlistCount).toBe(0);
+    expect(cursorCount).toBe(1);
+    expect(draftCount).toBe(1);
+  });
+
+  it('rejects draft save when the preview has validation errors', async () => {
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Bad draft',
+        sourceExcel: {
+          filename: 'bad.xlsx',
+          sha256: 'a'.repeat(64),
+        },
+        preview: {
+          mode: 'preview',
+          settings: {
+            timezone: 'Europe/Istanbul',
+            schedule_start_date: '2026-06-06',
+            schedule_end_date: '2026-06-06',
+          },
+          programs: [{ program_key: 'bad' }],
+          slots: [{ program_key: 'bad' }],
+          folderMatches: [],
+          issues: [{ severity: 'error', code: 'TEST_ERROR', sheet: 'Programs', message: 'bad' }],
+          summary: { errors: 1, warnings: 0, programCount: 1, slotCount: 1 },
+          schedulePreview: { timezone: 'Europe/Istanbul', gapPattern: 'main', truncated: false, days: [] },
+          willActivateSchedule: false,
+          willUpdateCursors: false,
+          willMaterializePlaylist: false,
+          productionSafety: {
+            previewOnly: true,
+            cursorUpdates: false,
+            playlistMaterialization: false,
+            ffmpeg: false,
+            scheduleActivation: false,
+          },
+        },
+      }),
+    });
+    const body = await response.json() as { code: string };
+
+    expect(response.status).toBe(400);
+    expect(body.code).toBe('PREVIEW_HAS_ERRORS');
+  });
 });
 
 function makeWorkbookBuffer(): Buffer {
@@ -139,6 +270,10 @@ function makeWorkbookBuffer(): Buffer {
     priority: '10',
   }]), 'Slots');
   return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
+function sha256(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex');
 }
 
 function listen(app: express.Express): Promise<http.Server> {
