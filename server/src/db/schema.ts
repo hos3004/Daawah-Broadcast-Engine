@@ -53,6 +53,7 @@ function runMigrations(db: Database.Database): void {
     { version: 3, apply: migration_003 },
     { version: 4, apply: migration_004 },
     { version: 5, apply: migration_005 },
+    { version: 6, apply: migration_006 },
   ];
 
   for (const m of migrations) {
@@ -479,6 +480,9 @@ function migration_005(db: Database.Database): void {
       timezone TEXT NOT NULL,
       source_excel_filename TEXT NOT NULL,
       source_excel_sha256 TEXT NOT NULL,
+      validation_status TEXT NOT NULL DEFAULT 'draft_valid'
+        CHECK(validation_status IN ('draft_valid','draft_invalid')),
+      validation_errors_json TEXT NOT NULL DEFAULT '[]',
       validation_summary_json TEXT NOT NULL,
       settings_json TEXT NOT NULL,
       programs_json TEXT NOT NULL,
@@ -497,5 +501,27 @@ function migration_005(db: Database.Database): void {
       ON scheduler_drafts(schedule_start_date, schedule_end_date);
     CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_status
       ON scheduler_drafts(status, is_active);
+    CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_validation_status
+      ON scheduler_drafts(validation_status);
+  `);
+}
+
+function migration_006(db: Database.Database): void {
+  addColumnIfMissing(
+    db,
+    'scheduler_drafts',
+    'validation_status',
+    "validation_status TEXT NOT NULL DEFAULT 'draft_valid' CHECK(validation_status IN ('draft_valid','draft_invalid'))"
+  );
+  addColumnIfMissing(
+    db,
+    'scheduler_drafts',
+    'validation_errors_json',
+    "validation_errors_json TEXT NOT NULL DEFAULT '[]'"
+  );
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_validation_status
+      ON scheduler_drafts(validation_status);
   `);
 }

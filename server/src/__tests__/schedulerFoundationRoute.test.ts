@@ -154,6 +154,8 @@ describe('scheduler foundation routes', () => {
         name: string;
         status: string;
         isActive: boolean;
+        validationStatus: string;
+        validationErrors: unknown[];
         sourceExcelSha256: string;
         programCount: number;
         slotCount: number;
@@ -168,6 +170,8 @@ describe('scheduler foundation routes', () => {
       name: 'Safe draft',
       status: 'draft',
       isActive: false,
+      validationStatus: 'draft_valid',
+      validationErrors: [],
       programCount: 1,
       slotCount: 1,
       willActivateSchedule: false,
@@ -176,14 +180,17 @@ describe('scheduler foundation routes', () => {
     });
 
     const listResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`);
-    const list = await listResponse.json() as { drafts: Array<{ id: string; isActive: boolean }> };
+    const list = await listResponse.json() as { drafts: Array<{ id: string; isActive: boolean; validationStatus: string }> };
     expect(listResponse.status).toBe(200);
     expect(list.drafts).toHaveLength(1);
     expect(list.drafts[0]?.isActive).toBe(false);
+    expect(list.drafts[0]?.validationStatus).toBe('draft_valid');
 
     const readResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules/${saved.draft.id}`);
-    const read = await readResponse.json() as { draft: { slots: unknown[]; schedulePreview: { days: unknown[] } } };
+    const read = await readResponse.json() as { draft: { validationStatus: string; validationErrors: unknown[]; slots: unknown[]; schedulePreview: { days: unknown[] } } };
     expect(readResponse.status).toBe(200);
+    expect(read.draft.validationStatus).toBe('draft_valid');
+    expect(read.draft.validationErrors).toEqual([]);
     expect(read.draft.slots).toHaveLength(1);
     expect(read.draft.schedulePreview.days.length).toBeGreaterThan(0);
 
@@ -199,7 +206,7 @@ describe('scheduler foundation routes', () => {
     expect(draftCount).toBe(1);
   });
 
-  it('rejects draft save when the preview has validation errors', async () => {
+  it('saves an inactive invalid draft when the preview has validation errors', async () => {
     const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -222,6 +229,153 @@ describe('scheduler foundation routes', () => {
           issues: [{ severity: 'error', code: 'TEST_ERROR', sheet: 'Programs', message: 'bad' }],
           summary: { errors: 1, warnings: 0, programCount: 1, slotCount: 1 },
           schedulePreview: { timezone: 'Europe/Istanbul', gapPattern: 'main', truncated: false, days: [] },
+          acceptedProgramKeys: ['bad'],
+          willActivateSchedule: false,
+          willUpdateCursors: false,
+          willMaterializePlaylist: false,
+          productionSafety: {
+            previewOnly: true,
+            cursorUpdates: false,
+            playlistMaterialization: false,
+            ffmpeg: false,
+            scheduleActivation: false,
+          },
+        },
+      }),
+    });
+    const body = await response.json() as {
+      draft: {
+        status: string;
+        isActive: boolean;
+        validationStatus: string;
+        validationErrors: Array<{ code: string }>;
+      };
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.draft).toMatchObject({
+      status: 'draft',
+      isActive: false,
+      validationStatus: 'draft_invalid',
+    });
+    expect(body.draft.validationErrors.map(issue => issue.code)).toContain('PREVIEW_HAS_ERRORS');
+  });
+
+  it('recomputes overlap validation instead of trusting the submitted summary', async () => {
+    const workbook = makeWorkbookBuffer();
+    const preview = await previewWorkbook(baseUrl, workbook);
+    const overlappingPreview = cloneJson(preview) as {
+      slots: Array<Record<string, unknown>>;
+      summary: Record<string, unknown>;
+    };
+    const originalSlot = overlappingPreview.slots[0]!;
+    overlappingPreview.slots = [
+      originalSlot,
+      {
+        ...originalSlot,
+        row: 3,
+        start_time: '08:30',
+        end_time: '09:30',
+        start_minutes: 510,
+        end_minutes: 570,
+        computed_end_minutes: 570,
+      },
+    ];
+    overlappingPreview.summary = {
+      ...overlappingPreview.summary,
+      errors: 0,
+      conflicts: 0,
+      slotCount: 2,
+    };
+
+    const saveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Overlap draft',
+        sourceExcel: {
+          filename: 'overlap.xlsx',
+          sha256: sha256(workbook),
+        },
+        preview: overlappingPreview,
+      }),
+    });
+    const body = await saveResponse.json() as {
+      draft: {
+        validationStatus: string;
+        validationErrors: Array<{ code: string }>;
+      };
+    };
+
+    expect(saveResponse.status).toBe(201);
+    expect(body.draft.validationStatus).toBe('draft_invalid');
+    expect(body.draft.validationErrors.map(issue => issue.code)).toContain('DRAFT_SLOT_OVERLAP');
+  });
+
+  it('marks a draft invalid when timezone or indexed folder matches are inconsistent', async () => {
+    const workbook = makeWorkbookBuffer();
+    const preview = await previewWorkbook(baseUrl, workbook);
+    const hardenedPreview = cloneJson(preview) as {
+      settings: Record<string, unknown>;
+      schedulePreview: Record<string, unknown>;
+      folderMatches: Array<Record<string, unknown>>;
+    };
+    hardenedPreview.settings.timezone = 'Mars/Base';
+    hardenedPreview.schedulePreview.timezone = 'Mars/Base';
+    hardenedPreview.folderMatches[0] = {
+      ...hardenedPreview.folderMatches[0],
+      matched_folder_id: 'missing-folder',
+    };
+
+    const saveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Hardened validation draft',
+        sourceExcel: {
+          filename: 'hardened.xlsx',
+          sha256: sha256(workbook),
+        },
+        preview: hardenedPreview,
+      }),
+    });
+    const body = await saveResponse.json() as {
+      draft: {
+        validationStatus: string;
+        validationErrors: Array<{ code: string }>;
+      };
+    };
+    const codes = body.draft.validationErrors.map(issue => issue.code);
+
+    expect(saveResponse.status).toBe(201);
+    expect(body.draft.validationStatus).toBe('draft_invalid');
+    expect(codes).toContain('DRAFT_INVALID_TIMEZONE');
+    expect(codes).toContain('DRAFT_FOLDER_MATCH_NOT_INDEXED');
+  });
+
+  it('rejects malformed draft payload shapes before saving', async () => {
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourceExcel: {
+          filename: 'bad-shape.xlsx',
+          sha256: 'a'.repeat(64),
+        },
+        preview: {
+          mode: 'preview',
+          settings: {
+            timezone: 'Europe/Istanbul',
+            schedule_start_date: '2026-06-06',
+            schedule_end_date: '2026-06-06',
+          },
+          summary: { errors: 0, warnings: 0, programCount: 1, slotCount: 1 },
+          programs: [{ program_key: 'tafseer' }],
+          slots: 'not-an-array',
+          folderMatches: [],
+          issues: [],
+          schedulePreview: { timezone: 'Europe/Istanbul', gapPattern: 'main', truncated: false, days: [] },
+          acceptedProgramKeys: ['tafseer'],
           willActivateSchedule: false,
           willUpdateCursors: false,
           willMaterializePlaylist: false,
@@ -238,7 +392,7 @@ describe('scheduler foundation routes', () => {
     const body = await response.json() as { code: string };
 
     expect(response.status).toBe(400);
-    expect(body.code).toBe('PREVIEW_HAS_ERRORS');
+    expect(body.code).toBe('SLOTS_REQUIRED');
   });
 });
 
@@ -274,6 +428,26 @@ function makeWorkbookBuffer(): Buffer {
 
 function sha256(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex');
+}
+
+async function previewWorkbook(baseUrl: string, workbook: Buffer): Promise<Record<string, unknown>> {
+  const form = new FormData();
+  form.append(
+    'file',
+    new Blob([workbook], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    'schedule.xlsx'
+  );
+
+  const response = await fetch(`${baseUrl}/api/scheduler-foundation/excel-import/preview`, {
+    method: 'POST',
+    body: form,
+  });
+  expect(response.status).toBe(200);
+  return await response.json() as Record<string, unknown>;
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function listen(app: express.Express): Promise<http.Server> {
