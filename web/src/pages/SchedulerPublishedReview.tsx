@@ -7,10 +7,8 @@ import {
   CheckCircle2,
   Clock3,
   FileSpreadsheet,
-  Filter,
   FolderSearch,
   ListChecks,
-  Send,
   ShieldCheck,
   XCircle,
 } from 'lucide-react';
@@ -19,23 +17,14 @@ import type { ReactNode } from 'react';
 import { schedulerFoundationApi } from '../api/client';
 
 type IssueSeverity = 'error' | 'warning' | 'info';
-type IssueFilter = 'all' | 'warnings' | 'errors';
 
-interface DraftIssue {
+interface ScheduleIssue {
   severity: IssueSeverity;
   code: string;
-  sheet: string;
+  sheet?: string;
   row?: number;
   field?: string;
   message: string;
-}
-
-interface DraftProgram {
-  program_key: string;
-  program_name: string;
-  folder_root: string;
-  folder_hint: string;
-  status?: string;
 }
 
 interface FolderMatch {
@@ -66,19 +55,14 @@ interface PreviewDay {
   rows: PreviewRow[];
 }
 
-interface DraftDetail {
+interface PublishedScheduleDetail {
   id: string;
+  sourceDraftId: string;
   name: string;
-  status: 'draft';
+  status: 'published';
   isActive: false;
-  validationStatus: 'draft_valid' | 'draft_invalid';
-  validationErrors: Array<{
-    severity: 'error';
-    code: string;
-    message: string;
-    field?: string;
-    row?: number;
-  }>;
+  validationStatus: 'draft_valid';
+  validationErrors: ScheduleIssue[];
   scheduleStartDate: string;
   scheduleEndDate: string;
   timezone: string;
@@ -99,11 +83,11 @@ interface DraftDetail {
   };
   programCount: number;
   slotCount: number;
+  publishedBy: string | null;
+  publishedAt: string;
   createdAt: string;
-  updatedAt: string;
-  programs: DraftProgram[];
   folderMatches: FolderMatch[];
-  issues: DraftIssue[];
+  issues: ScheduleIssue[];
   schedulePreview: {
     timezone: string;
     gapPattern: string;
@@ -115,52 +99,32 @@ interface DraftDetail {
   willMaterializePlaylist: false;
 }
 
-export default function SchedulerDraftReviewPage() {
-  const { draftId } = useParams();
-  const [draft, setDraft] = useState<DraftDetail | null>(null);
+export default function SchedulerPublishedReviewPage() {
+  const { publishedId } = useParams();
+  const [schedule, setSchedule] = useState<PublishedScheduleDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [actionError, setActionError] = useState('');
-  const [dayFilter, setDayFilter] = useState('all');
-  const [programFilter, setProgramFilter] = useState('all');
-  const [issueFilter, setIssueFilter] = useState<IssueFilter>('all');
-  const [publishing, setPublishing] = useState(false);
-  const [publishMessage, setPublishMessage] = useState('');
-  const [publishedScheduleId, setPublishedScheduleId] = useState('');
 
   useEffect(() => {
-    if (!draftId) {
-      setError('Draft id is missing.');
+    if (!publishedId) {
+      setError('Published schedule id is missing.');
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setError('');
-    setActionError('');
-    setPublishMessage('');
-    setPublishedScheduleId('');
-    schedulerFoundationApi.getDraftSchedule(draftId)
+    schedulerFoundationApi.getPublishedSchedule(publishedId)
       .then(response => {
-        const body = response.data as { draft: DraftDetail };
-        setDraft(body.draft);
+        const body = response.data as { publishedSchedule: PublishedScheduleDetail };
+        setSchedule(body.publishedSchedule);
       })
-      .catch(() => setError('Could not load draft schedule details.'))
+      .catch(() => setError('Could not load published schedule details.'))
       .finally(() => setLoading(false));
-  }, [draftId]);
-
-  const programs = useMemo(() => {
-    const rows = draft?.programs ?? [];
-    return rows
-      .map(program => ({
-        key: program.program_key,
-        name: program.program_name || program.program_key,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [draft]);
+  }, [publishedId]);
 
   const totals = useMemo(() => {
-    const rows = draft?.schedulePreview.days.flatMap(day => day.rows) ?? [];
+    const rows = schedule?.schedulePreview.days.flatMap(day => day.rows) ?? [];
     return rows.reduce(
       (acc, row) => {
         if (row.type === 'gap') acc.gapMinutes += row.duration_minutes || 0;
@@ -169,76 +133,25 @@ export default function SchedulerDraftReviewPage() {
       },
       { scheduledMinutes: 0, gapMinutes: 0 }
     );
-  }, [draft]);
+  }, [schedule]);
 
   const folderCounts = useMemo(() => {
-    return (draft?.folderMatches ?? []).reduce<Record<string, number>>((acc, match) => {
+    return (schedule?.folderMatches ?? []).reduce<Record<string, number>>((acc, match) => {
       acc[match.status] = (acc[match.status] ?? 0) + 1;
       return acc;
     }, {});
-  }, [draft]);
-
-  const visibleDays = useMemo(() => {
-    const days = draft?.schedulePreview.days ?? [];
-    return days
-      .filter(day => dayFilter === 'all' || day.date === dayFilter)
-      .map(day => ({
-        ...day,
-        rows: day.rows.filter(row => programFilter === 'all' || row.program_key === programFilter),
-      }))
-      .filter(day => day.rows.length > 0);
-  }, [dayFilter, draft, programFilter]);
-
-  const filteredIssues = useMemo(() => {
-    const issues = draft?.issues ?? [];
-    if (issueFilter === 'errors') return issues.filter(issue => issue.severity === 'error');
-    if (issueFilter === 'warnings') return issues.filter(issue => issue.severity === 'warning');
-    return issues;
-  }, [draft, issueFilter]);
-
-  const canPublish = Boolean(
-    draft &&
-    draft.status === 'draft' &&
-    draft.isActive === false &&
-    draft.validationStatus === 'draft_valid' &&
-    draft.validationErrors.length === 0 &&
-    draft.validationSummary.errors === 0 &&
-    !publishedScheduleId
-  );
-
-  const publishDraft = async () => {
-    if (!draft || !canPublish || publishing) return;
-    const confirmed = window.confirm(
-      `Publish "${draft.name}" as an inactive schedule version?\n\nThis will not activate the schedule, materialize playlists, update cursors, start playout, or broadcast.`
-    );
-    if (!confirmed) return;
-
-    setPublishing(true);
-    setActionError('');
-    setPublishMessage('');
-    setPublishedScheduleId('');
-    try {
-      const response = await schedulerFoundationApi.publishDraftSchedule(draft.id);
-      const body = response.data as { publishedSchedule: { id: string; name: string; isActive: boolean } };
-      setPublishedScheduleId(body.publishedSchedule.id);
-      setPublishMessage(`Published inactive schedule: ${body.publishedSchedule.name}`);
-    } catch {
-      setActionError('Could not publish this draft. Confirm it is valid and has not already been published.');
-    } finally {
-      setPublishing(false);
-    }
-  };
+  }, [schedule]);
 
   if (loading) {
-    return <div className="card text-center py-10" style={{ color: 'var(--text-muted)' }}>Loading draft review...</div>;
+    return <div className="card text-center py-10" style={{ color: 'var(--text-muted)' }}>Loading published schedule...</div>;
   }
 
-  if (error || !draft) {
+  if (error || !schedule) {
     return (
       <div className="space-y-4">
         <BackLink />
         <div className="card text-center py-10" style={{ color: 'var(--danger)' }}>
-          {error || 'Draft schedule was not found.'}
+          {error || 'Published schedule was not found.'}
         </div>
       </div>
     );
@@ -251,50 +164,22 @@ export default function SchedulerDraftReviewPage() {
           <BackLink />
           <div className="flex flex-wrap items-center gap-2 mt-3">
             <ShieldCheck size={20} style={{ color: 'var(--accent)' }} />
-            <h2 className="text-xl font-bold">{draft.name}</h2>
-            <span className="badge badge-pending">draft review</span>
+            <h2 className="text-xl font-bold">{schedule.name}</h2>
+            <span className="badge badge-ready">published</span>
             <span className="badge badge-info">inactive</span>
-            <span className={`badge ${draft.validationStatus === 'draft_valid' ? 'badge-ready' : 'badge-error'}`}>
-              {draft.validationStatus}
-            </span>
+            <span className="badge badge-ready">{schedule.validationStatus}</span>
           </div>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-            Publishing creates an inactive immutable schedule version only. This screen does not activate, materialize playlists, update cursors, or run playout.
+            Published review only. There is no activation, playlist materialization, cursor update, playout, or broadcast control on this screen.
           </p>
-          {publishMessage && (
-            <p className="text-xs mt-2" style={{ color: 'var(--success)' }}>
-              {publishMessage}
-              {publishedScheduleId && (
-                <>
-                  {' '}
-                  <Link to={`/scheduler-foundation/published/${publishedScheduleId}`} className="underline">
-                    Open published review
-                  </Link>
-                </>
-              )}
-            </p>
-          )}
-          {actionError && <p className="text-xs mt-2" style={{ color: 'var(--danger)' }}>{actionError}</p>}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {canPublish && (
-            <button
-              className="btn-primary inline-flex items-center gap-2 text-sm"
-              disabled={publishing}
-              onClick={() => void publishDraft()}
-            >
-              <Send size={14} />
-              {publishing ? 'Publishing...' : 'Publish Draft'}
-            </button>
-          )}
         </div>
       </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-        <MetricCard label="Status" value={draft.status} tone="info" />
-        <MetricCard label="Active" value={draft.isActive ? 'yes' : 'no'} tone={draft.isActive ? 'error' : 'ready'} />
-        <MetricCard label="Programs" value={draft.programCount} />
-        <MetricCard label="Slots" value={draft.slotCount} />
+        <MetricCard label="Status" value={schedule.status} tone="ready" />
+        <MetricCard label="Active" value={schedule.isActive ? 'yes' : 'no'} tone={schedule.isActive ? 'error' : 'info'} />
+        <MetricCard label="Programs" value={schedule.programCount} />
+        <MetricCard label="Slots" value={schedule.slotCount} />
         <MetricCard label="Scheduled time" value={formatMinutes(totals.scheduledMinutes)} />
         <MetricCard label="Gap time" value={formatMinutes(totals.gapMinutes)} tone={totals.gapMinutes > 0 ? 'warning' : 'ready'} />
       </section>
@@ -304,65 +189,33 @@ export default function SchedulerDraftReviewPage() {
           icon={CalendarDays}
           title="Schedule"
           rows={[
-            ['Date range', `${draft.scheduleStartDate} to ${draft.scheduleEndDate}`],
-            ['Timezone', draft.timezone],
-            ['Created', draft.createdAt],
-            ['Updated', draft.updatedAt],
+            ['Date range', `${schedule.scheduleStartDate} to ${schedule.scheduleEndDate}`],
+            ['Timezone', schedule.timezone],
+            ['Published', schedule.publishedAt],
+            ['Published by', schedule.publishedBy ?? '-'],
           ]}
         />
         <InfoPanel
           icon={ListChecks}
           title="Validation"
           rows={[
-            ['Validation status', draft.validationStatus],
-            ['Stored validation errors', draft.validationErrors.length],
-            ['File status', draft.validationSummary.fileStatus],
-            ['Errors', draft.validationSummary.errors],
-            ['Warnings', draft.validationSummary.warnings],
-            ['Conflicts', draft.validationSummary.conflicts],
+            ['Validation status', schedule.validationStatus],
+            ['Stored validation errors', schedule.validationErrors.length],
+            ['Errors', schedule.validationSummary.errors],
+            ['Warnings', schedule.validationSummary.warnings],
+            ['Conflicts', schedule.validationSummary.conflicts],
           ]}
         />
         <InfoPanel
           icon={FileSpreadsheet}
-          title="Source Excel"
+          title="Source"
           rows={[
-            ['Filename', draft.sourceExcelFilename],
-            ['SHA-256', <span className="ltr-text break-all">{draft.sourceExcelSha256}</span>],
-            ['Activation flag', draft.willActivateSchedule ? 'true' : 'false'],
-            ['Cursor flag', draft.willUpdateCursors ? 'true' : 'false'],
+            ['Source draft', <span className="ltr-text break-all">{schedule.sourceDraftId}</span>],
+            ['Excel filename', schedule.sourceExcelFilename],
+            ['Excel SHA-256', <span className="ltr-text break-all">{schedule.sourceExcelSha256}</span>],
+            ['Activation flag', schedule.willActivateSchedule ? 'true' : 'false'],
           ]}
         />
-      </section>
-
-      <section className="card">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <div className="flex items-center gap-2">
-            <Filter size={16} style={{ color: 'var(--accent)' }} />
-            <h3 className="font-semibold">Filters</h3>
-          </div>
-          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-            Filters affect the timeline and issue tables only.
-          </span>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <SelectField label="Day" value={dayFilter} onChange={setDayFilter}>
-            <option value="all">All days</option>
-            {draft.schedulePreview.days.map(day => (
-              <option key={day.date} value={day.date}>{day.date}</option>
-            ))}
-          </SelectField>
-          <SelectField label="Program" value={programFilter} onChange={setProgramFilter}>
-            <option value="all">All programs</option>
-            {programs.map(program => (
-              <option key={program.key} value={program.key}>{program.name}</option>
-            ))}
-          </SelectField>
-          <SelectField label="Issues" value={issueFilter} onChange={value => setIssueFilter(value as IssueFilter)}>
-            <option value="all">All issues</option>
-            <option value="warnings">Warnings only</option>
-            <option value="errors">Errors only</option>
-          </SelectField>
-        </div>
       </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-5 gap-3">
@@ -373,11 +226,19 @@ export default function SchedulerDraftReviewPage() {
         <MetricCard label="Folder errors" value={folderCounts.error ?? 0} tone="error" />
       </section>
 
+      <section className="card">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <CheckCircle2 size={16} style={{ color: 'var(--success)' }} />
+          <span>Publish did not activate this schedule.</span>
+          <span className="badge badge-info">materialize playlists: false</span>
+          <span className="badge badge-info">cursor updates: false</span>
+          <span className="badge badge-info">playout: false</span>
+        </div>
+      </section>
+
       <section className="space-y-3">
-        <SectionTitle icon={Clock3} title="Timeline Preview" detail={`${visibleDays.length} day(s) shown`} />
-        {visibleDays.length === 0 ? (
-          <div className="card text-center py-8" style={{ color: 'var(--text-muted)' }}>No timeline rows match the current filters.</div>
-        ) : visibleDays.map(day => (
+        <SectionTitle icon={Clock3} title="Timeline Preview" detail={`${schedule.schedulePreview.days.length} day(s) shown`} />
+        {schedule.schedulePreview.days.map(day => (
           <div key={day.date} className="card p-0 overflow-hidden">
             <div className="px-4 py-3 font-semibold" style={{ borderBottom: '1px solid var(--bg-border)' }}>
               {day.date}
@@ -399,10 +260,10 @@ export default function SchedulerDraftReviewPage() {
       </section>
 
       <section className="space-y-3">
-        <SectionTitle icon={FolderSearch} title="Folder Matches" detail={`${draft.folderMatches.length} program folder match(es)`} />
+        <SectionTitle icon={FolderSearch} title="Folder Matches" detail={`${schedule.folderMatches.length} program folder match(es)`} />
         <DataTable
           headers={['Program', 'Root', 'Hint', 'Status', 'Confidence', 'Matched path', 'Message']}
-          rows={draft.folderMatches.map(match => [
+          rows={schedule.folderMatches.map(match => [
             <span key="program" className="ltr-text">{match.program_key}</span>,
             match.folder_root,
             match.folder_hint,
@@ -415,14 +276,14 @@ export default function SchedulerDraftReviewPage() {
       </section>
 
       <section className="space-y-3">
-        <SectionTitle icon={AlertTriangle} title="Warnings And Issues" detail={`${filteredIssues.length} issue(s) shown`} />
+        <SectionTitle icon={AlertTriangle} title="Warnings And Issues" detail={`${schedule.issues.length} issue(s)`} />
         <DataTable
-          empty="No issues match the current filter."
+          empty="No issues recorded for this published schedule."
           headers={['Severity', 'Code', 'Sheet', 'Row', 'Field', 'Message']}
-          rows={filteredIssues.map(issue => [
+          rows={schedule.issues.map(issue => [
             <Severity key="severity" severity={issue.severity} />,
             issue.code,
-            issue.sheet,
+            issue.sheet ?? '-',
             issue.row ?? '-',
             issue.field ?? '-',
             issue.message,
@@ -437,7 +298,7 @@ function BackLink() {
   return (
     <Link to="/scheduler-foundation" className="btn-ghost inline-flex items-center gap-2 text-sm">
       <ArrowRight size={14} />
-      Back to drafts
+      Back to scheduler foundation
     </Link>
   );
 }
@@ -478,27 +339,6 @@ function InfoPanel({ icon: Icon, title, rows }: {
         ))}
       </div>
     </div>
-  );
-}
-
-function SelectField({ label, value, onChange, children }: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="block text-xs mb-1" style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <select
-        value={value}
-        onChange={event => onChange(event.target.value)}
-        className="w-full rounded-md px-3 py-2 text-sm outline-none"
-        style={{ background: 'var(--bg-primary)', border: '1px solid var(--bg-border)', color: 'var(--text-primary)' }}
-      >
-        {children}
-      </select>
-    </label>
   );
 }
 
