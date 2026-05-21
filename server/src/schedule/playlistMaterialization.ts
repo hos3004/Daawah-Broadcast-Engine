@@ -164,67 +164,75 @@ export function createPlaylistMaterializationDryRun(input: PlaylistMaterializati
   const status: 'completed' | 'failed' = errors.length === 0 ? 'completed' : 'failed';
   summary.status = status;
 
-  fs.mkdirSync(paths.runDir, { recursive: true });
-  writeJsonWithin(paths.generatedRoot, path.join(paths.runDir, 'playlist.json'), playlist);
-  writeJsonWithin(paths.generatedRoot, path.join(paths.runDir, 'report.json'), {
-    runId,
-    summary,
-    warnings,
-    errors,
-  });
-  writeTextWithin(paths.generatedRoot, path.join(paths.runDir, 'report.md'), renderMarkdownReport(summary, warnings, errors));
-
   const db = getDb();
-  db.prepare(`
-    INSERT INTO playlist_materialization_runs (
-      id, published_schedule_id, mode, status, output_path,
-      summary_json, warnings_json, errors_json, created_by, created_at
-    )
-    VALUES (
-      @id, @published_schedule_id, @mode, @status, @output_path,
-      @summary_json, @warnings_json, @errors_json, @created_by, @created_at
-    )
-  `).run({
-    id: runId,
-    published_schedule_id: validated.schedule.id,
-    mode: 'dry_run',
-    status,
-    output_path: paths.runDir,
-    summary_json: JSON.stringify(summary),
-    warnings_json: JSON.stringify(warnings),
-    errors_json: JSON.stringify(errors),
-    created_by: validated.createdBy,
-    created_at: createdAt,
-  });
-
-  db.prepare(`
-    INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, detail)
-    VALUES (@id, @user_id, @action, @entity_type, @entity_id, @detail)
-  `).run({
-    id: uuidv4(),
-    user_id: validated.createdBy,
-    action: 'scheduler_foundation.playlist_materialization_dry_run',
-    entity_type: 'playlist_materialization_run',
-    entity_id: runId,
-    detail: JSON.stringify({
+  try {
+    fs.mkdirSync(paths.runDir, { recursive: true });
+    writeJsonWithin(paths.generatedRoot, path.join(paths.runDir, 'playlist.json'), playlist);
+    writeJsonWithin(paths.generatedRoot, path.join(paths.runDir, 'report.json'), {
       runId,
-      publishedScheduleId: validated.schedule.id,
-      outputPath: paths.runDir,
-      status,
-      warningCount: warnings.length,
-      errorCount: errors.length,
-      dryRun: true,
-      cursorMutation: false,
-      playout: false,
-      broadcast: false,
-    }),
-  });
+      summary,
+      warnings,
+      errors,
+    });
+    writeTextWithin(paths.generatedRoot, path.join(paths.runDir, 'report.md'), renderMarkdownReport(summary, warnings, errors));
 
-  const saved = getPlaylistMaterializationRun(runId);
-  if (!saved) {
-    throw new Error('Playlist materialization dry-run was saved but could not be read back');
+    const saveRun = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO playlist_materialization_runs (
+          id, published_schedule_id, mode, status, output_path,
+          summary_json, warnings_json, errors_json, created_by, created_at
+        )
+        VALUES (
+          @id, @published_schedule_id, @mode, @status, @output_path,
+          @summary_json, @warnings_json, @errors_json, @created_by, @created_at
+        )
+      `).run({
+        id: runId,
+        published_schedule_id: validated.schedule.id,
+        mode: 'dry_run',
+        status,
+        output_path: paths.runDir,
+        summary_json: JSON.stringify(summary),
+        warnings_json: JSON.stringify(warnings),
+        errors_json: JSON.stringify(errors),
+        created_by: validated.createdBy,
+        created_at: createdAt,
+      });
+
+      db.prepare(`
+        INSERT INTO audit_logs (id, action, entity_type, entity_id, detail)
+        VALUES (@id, @action, @entity_type, @entity_id, @detail)
+      `).run({
+        id: uuidv4(),
+        action: 'scheduler_foundation.playlist_materialization_dry_run',
+        entity_type: 'playlist_materialization_run',
+        entity_id: runId,
+        detail: JSON.stringify({
+          runId,
+          publishedScheduleId: validated.schedule.id,
+          outputPath: paths.runDir,
+          status,
+          createdBy: validated.createdBy,
+          warningCount: warnings.length,
+          errorCount: errors.length,
+          dryRun: true,
+          cursorMutation: false,
+          playout: false,
+          broadcast: false,
+        }),
+      });
+    });
+    saveRun();
+
+    const saved = getPlaylistMaterializationRun(runId);
+    if (!saved) {
+      throw new Error('Playlist materialization dry-run was saved but could not be read back');
+    }
+    return saved;
+  } catch (err) {
+    cleanupRunDir(paths.generatedRoot, paths.runDir);
+    throw err;
   }
-  return saved;
 }
 
 export function listPlaylistMaterializationRuns(limit = 50): PlaylistMaterializationRunDetail[] {
@@ -468,6 +476,13 @@ function writeTextWithin(root: string, filePath: string, value: string): void {
     throw new DraftValidationError('Refusing to write playlist artifact outside generated/playlists', 'UNSAFE_OUTPUT_PATH');
   }
   fs.writeFileSync(filePath, value, 'utf8');
+}
+
+function cleanupRunDir(root: string, runDir: string): void {
+  if (!isPathInside(runDir, root)) {
+    return;
+  }
+  fs.rmSync(runDir, { recursive: true, force: true });
 }
 
 function isPathInside(candidatePath: string, rootPath: string): boolean {

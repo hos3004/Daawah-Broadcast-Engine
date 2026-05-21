@@ -580,9 +580,22 @@ describe('scheduler foundation routes', () => {
     const cursorCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
     const playlistCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
     const runCount = (db.prepare('SELECT COUNT(*) as cnt FROM playlist_materialization_runs').get() as { cnt: number }).cnt;
+    const auditRow = db.prepare(`
+      SELECT detail
+      FROM audit_logs
+      WHERE action='scheduler_foundation.playlist_materialization_dry_run'
+    `).get() as { detail: string } | undefined;
     expect(cursorCountAfter).toBe(cursorCountBefore);
     expect(playlistCount).toBe(0);
     expect(runCount).toBe(1);
+    expect(auditRow).toBeDefined();
+    expect(JSON.parse(auditRow?.detail ?? '{}')).toMatchObject({
+      runId: dryRun.run.id,
+      createdBy: 'user-1',
+      cursorMutation: false,
+      playout: false,
+      broadcast: false,
+    });
   });
 
   it('lists and reads playlist materialization dry-run records', async () => {
