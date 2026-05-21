@@ -169,6 +169,29 @@ interface DraftListItem {
   createdAt: string;
 }
 
+interface PublishedListItem {
+  id: string;
+  sourceDraftId: string;
+  name: string;
+  status: 'published';
+  isActive: false;
+  validationStatus: 'draft_valid';
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  timezone: string;
+  sourceExcelFilename: string;
+  sourceExcelSha256: string;
+  programCount: number;
+  slotCount: number;
+  validationSummary: {
+    errors: number;
+    warnings: number;
+    fileStatus: string;
+  };
+  publishedAt: string;
+  publishedBy: string | null;
+}
+
 const tabs: Array<{ key: TabKey; label: string; icon: LucideIcon }> = [
   { key: 'programs', label: 'البرامج', icon: FileSpreadsheet },
   { key: 'slots', label: 'المواعيد', icon: CalendarDays },
@@ -206,6 +229,8 @@ export default function SchedulerFoundationPage() {
   const [savingDraft, setSavingDraft] = useState(false);
   const [draftsLoading, setDraftsLoading] = useState(false);
   const [drafts, setDrafts] = useState<DraftListItem[]>([]);
+  const [publishedLoading, setPublishedLoading] = useState(false);
+  const [publishedSchedules, setPublishedSchedules] = useState<PublishedListItem[]>([]);
   const [draftMessage, setDraftMessage] = useState('');
   const [error, setError] = useState('');
 
@@ -277,6 +302,20 @@ export default function SchedulerFoundationPage() {
     }
   };
 
+  const loadPublishedSchedules = async () => {
+    setPublishedLoading(true);
+    setError('');
+    try {
+      const response = await schedulerFoundationApi.listPublishedSchedules();
+      const body = response.data as { publishedSchedules: PublishedListItem[] };
+      setPublishedSchedules(body.publishedSchedules);
+    } catch {
+      setError('Could not load published schedules.');
+    } finally {
+      setPublishedLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <section className="flex flex-wrap items-center justify-between gap-3">
@@ -308,6 +347,14 @@ export default function SchedulerFoundationPage() {
           >
             <ListChecks size={14} />
             {draftsLoading ? 'Loading Drafts...' : 'View Drafts'}
+          </button>
+          <button
+            className="btn-ghost flex items-center gap-2 text-sm"
+            disabled={publishedLoading}
+            onClick={() => void loadPublishedSchedules()}
+          >
+            <CheckCircle2 size={14} />
+            {publishedLoading ? 'Loading Published...' : 'View Published'}
           </button>
         </div>
       </section>
@@ -385,6 +432,36 @@ export default function SchedulerFoundationPage() {
               <Link
                 key="review"
                 to={`/scheduler-foundation/drafts/${draft.id}`}
+                className="btn-ghost inline-flex items-center gap-2 text-xs"
+              >
+                <Eye size={13} />
+                Review
+              </Link>,
+            ])}
+          />
+        </section>
+      )}
+
+      {(publishedSchedules.length > 0 || publishedLoading) && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="font-semibold">Published Schedules</h3>
+            <span className="badge badge-ready">inactive until activation phase</span>
+          </div>
+          <DataTable
+            empty={publishedLoading ? 'Loading published schedules...' : 'No published schedules yet'}
+            headers={['Name', 'Date range', 'Programs', 'Slots', 'Status', 'Source draft', 'Published', 'Review']}
+            rows={publishedSchedules.map(schedule => [
+              schedule.name,
+              `${schedule.scheduleStartDate} to ${schedule.scheduleEndDate}`,
+              schedule.programCount,
+              schedule.slotCount,
+              schedule.status === 'published' && !schedule.isActive ? 'published inactive' : schedule.status,
+              schedule.sourceDraftId,
+              schedule.publishedAt,
+              <Link
+                key="review"
+                to={`/scheduler-foundation/published/${schedule.id}`}
                 className="btn-ghost inline-flex items-center gap-2 text-xs"
               >
                 <Eye size={13} />

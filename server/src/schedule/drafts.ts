@@ -57,6 +57,45 @@ export interface SchedulerDraftDetail extends SchedulerDraftListItem {
   willMaterializePlaylist: false;
 }
 
+export interface PublishSchedulerDraftInput {
+  draftId: string;
+  publishedBy?: string | null;
+}
+
+export interface PublishedScheduleListItem {
+  id: string;
+  sourceDraftId: string;
+  name: string;
+  status: 'published';
+  isActive: false;
+  validationStatus: 'draft_valid';
+  validationErrors: DraftValidationIssue[];
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  timezone: string;
+  sourceExcelFilename: string;
+  sourceExcelSha256: string;
+  validationSummary: ExcelImportPreviewResult['summary'];
+  programCount: number;
+  slotCount: number;
+  publishedBy: string | null;
+  publishedAt: string;
+  createdAt: string;
+}
+
+export interface PublishedScheduleDetail extends PublishedScheduleListItem {
+  settings: ExcelImportPreviewResult['settings'];
+  programs: ExcelImportPreviewResult['programs'];
+  slots: ExcelImportPreviewResult['slots'];
+  folderMatches: ExcelImportPreviewResult['folderMatches'];
+  issues: ExcelImportPreviewResult['issues'];
+  schedulePreview: ExcelImportPreviewResult['schedulePreview'];
+  productionSafety: ExcelImportPreviewResult['productionSafety'];
+  willActivateSchedule: false;
+  willUpdateCursors: false;
+  willMaterializePlaylist: false;
+}
+
 interface DraftRow {
   id: string;
   name: string;
@@ -79,6 +118,31 @@ interface DraftRow {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface PublishedScheduleRow {
+  id: string;
+  source_draft_id: string;
+  name: string;
+  status: 'published';
+  is_active: number;
+  schedule_start_date: string;
+  schedule_end_date: string;
+  timezone: string;
+  source_excel_filename: string;
+  source_excel_sha256: string;
+  validation_status: 'draft_valid';
+  validation_errors_json: string;
+  validation_summary_json: string;
+  settings_json: string;
+  programs_json: string;
+  slots_json: string;
+  folder_matches_json: string;
+  issues_json: string;
+  schedule_preview_json: string;
+  published_by: string | null;
+  published_at: string;
+  created_at: string;
 }
 
 export class DraftValidationError extends Error {
@@ -157,6 +221,160 @@ export function getSchedulerDraft(id: string): SchedulerDraftDetail | null {
   const db = getDb();
   const row = db.prepare('SELECT * FROM scheduler_drafts WHERE id=?').get(id) as DraftRow | undefined;
   return row ? rowToDetail(row) : null;
+}
+
+export function publishSchedulerDraft(input: PublishSchedulerDraftInput): PublishedScheduleDetail {
+  const db = getDb();
+  const draftId = cleanString(input.draftId);
+  if (!draftId) {
+    throw new DraftValidationError('Draft schedule id is required', 'DRAFT_ID_REQUIRED');
+  }
+
+  const draft = getSchedulerDraft(draftId);
+  if (!draft) {
+    throw new DraftValidationError('Draft schedule not found', 'DRAFT_NOT_FOUND');
+  }
+
+  const existing = db.prepare('SELECT id FROM scheduler_published_schedules WHERE source_draft_id=?').get(draftId) as
+    | { id: string }
+    | undefined;
+  if (existing) {
+    throw new DraftValidationError('Draft schedule has already been published', 'DRAFT_ALREADY_PUBLISHED');
+  }
+
+  assertDraftCanPublish(draft);
+
+  const id = uuidv4();
+  const publishedAt = new Date().toISOString();
+  const row = {
+    id,
+    source_draft_id: draft.id,
+    name: draft.name,
+    schedule_start_date: draft.scheduleStartDate,
+    schedule_end_date: draft.scheduleEndDate,
+    timezone: draft.timezone,
+    source_excel_filename: draft.sourceExcelFilename,
+    source_excel_sha256: draft.sourceExcelSha256,
+    validation_status: draft.validationStatus,
+    validation_errors_json: JSON.stringify(draft.validationErrors),
+    validation_summary_json: JSON.stringify(draft.validationSummary),
+    settings_json: JSON.stringify(draft.settings),
+    programs_json: JSON.stringify(draft.programs),
+    slots_json: JSON.stringify(draft.slots),
+    folder_matches_json: JSON.stringify(draft.folderMatches),
+    issues_json: JSON.stringify(draft.issues),
+    schedule_preview_json: JSON.stringify(draft.schedulePreview),
+    published_by: input.publishedBy ?? null,
+    published_at: publishedAt,
+  };
+
+  const insertPublished = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO scheduler_published_schedules (
+        id, source_draft_id, name, schedule_start_date, schedule_end_date,
+        timezone, source_excel_filename, source_excel_sha256, validation_status,
+        validation_errors_json, validation_summary_json, settings_json,
+        programs_json, slots_json, folder_matches_json, issues_json,
+        schedule_preview_json, published_by, published_at
+      )
+      VALUES (
+        @id, @source_draft_id, @name, @schedule_start_date, @schedule_end_date,
+        @timezone, @source_excel_filename, @source_excel_sha256, @validation_status,
+        @validation_errors_json, @validation_summary_json, @settings_json,
+        @programs_json, @slots_json, @folder_matches_json, @issues_json,
+        @schedule_preview_json, @published_by, @published_at
+      )
+    `).run(row);
+
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, entity_type, entity_id, detail)
+      VALUES (@id, @action, @entity_type, @entity_id, @detail)
+    `).run({
+      id: uuidv4(),
+      action: 'scheduler_foundation.publish_schedule',
+      entity_type: 'scheduler_published_schedule',
+      entity_id: id,
+      detail: JSON.stringify({
+        sourceDraftId: draft.id,
+        publishedBy: input.publishedBy ?? null,
+        validationStatus: draft.validationStatus,
+        validationSummary: draft.validationSummary,
+        willActivateSchedule: false,
+        willUpdateCursors: false,
+        willMaterializePlaylist: false,
+      }),
+    });
+  });
+
+  insertPublished();
+
+  const published = getPublishedSchedule(id);
+  if (!published) {
+    throw new Error('Published schedule was saved but could not be read back');
+  }
+  return published;
+}
+
+export function listPublishedSchedules(limit = 50): PublishedScheduleListItem[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT *
+    FROM scheduler_published_schedules
+    ORDER BY published_at DESC
+    LIMIT ?
+  `).all(clampLimit(limit)) as PublishedScheduleRow[];
+
+  return rows.map(rowToPublishedListItem);
+}
+
+export function getPublishedSchedule(id: string): PublishedScheduleDetail | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM scheduler_published_schedules WHERE id=?').get(id) as
+    | PublishedScheduleRow
+    | undefined;
+  return row ? rowToPublishedDetail(row) : null;
+}
+
+function assertDraftCanPublish(draft: SchedulerDraftDetail): void {
+  if (draft.status !== 'draft') {
+    throw new DraftValidationError('Only draft schedules can be published', 'DRAFT_STATUS_REQUIRED');
+  }
+  if (draft.isActive !== false) {
+    throw new DraftValidationError('Active schedules cannot be published from the draft workflow', 'DRAFT_MUST_BE_INACTIVE');
+  }
+  if (draft.validationStatus !== 'draft_valid') {
+    throw new DraftValidationError('Only valid drafts can be published', 'DRAFT_NOT_PUBLISHABLE');
+  }
+  if (draft.validationErrors.length > 0) {
+    throw new DraftValidationError('Draft validation errors must be resolved before publishing', 'DRAFT_VALIDATION_ERRORS_PRESENT');
+  }
+  if (draft.validationSummary.errors !== 0) {
+    throw new DraftValidationError('Draft preview errors must be zero before publishing', 'DRAFT_PREVIEW_ERRORS_PRESENT');
+  }
+  if (typeof draft.validationSummary.conflicts === 'number' && draft.validationSummary.conflicts > 0) {
+    throw new DraftValidationError('Draft schedule conflicts must be zero before publishing', 'DRAFT_CONFLICTS_PRESENT');
+  }
+  if (!parseDateOnly(draft.scheduleStartDate) || !parseDateOnly(draft.scheduleEndDate)) {
+    throw new DraftValidationError('Draft schedule date range is invalid', 'DRAFT_DATE_RANGE_INVALID');
+  }
+  const start = parseDateOnly(draft.scheduleStartDate);
+  const end = parseDateOnly(draft.scheduleEndDate);
+  if (!start || !end || end.getTime() < start.getTime()) {
+    throw new DraftValidationError('Draft schedule date range is invalid', 'DRAFT_DATE_RANGE_INVALID');
+  }
+  if (!isValidTimezone(draft.timezone)) {
+    throw new DraftValidationError('Draft timezone is invalid', 'DRAFT_INVALID_TIMEZONE');
+  }
+  if (!/^[a-f0-9]{64}$/i.test(draft.sourceExcelSha256)) {
+    throw new DraftValidationError('Draft source Excel SHA-256 hash is invalid', 'SOURCE_EXCEL_HASH_REQUIRED');
+  }
+  if (
+    draft.willActivateSchedule !== false ||
+    draft.willUpdateCursors !== false ||
+    draft.willMaterializePlaylist !== false
+  ) {
+    throw new DraftValidationError('Unsafe draft cannot be published', 'UNSAFE_DRAFT_PAYLOAD');
+  }
 }
 
 function validateDraftInput(
@@ -775,6 +993,53 @@ function rowToListItem(row: DraftRow): SchedulerDraftListItem {
 function rowToDetail(row: DraftRow): SchedulerDraftDetail {
   return {
     ...rowToListItem(row),
+    settings: parseJson(row.settings_json),
+    programs: parseJson(row.programs_json),
+    slots: parseJson(row.slots_json),
+    folderMatches: parseJson(row.folder_matches_json),
+    issues: parseJson(row.issues_json),
+    schedulePreview: parseJson(row.schedule_preview_json),
+    productionSafety: {
+      previewOnly: true,
+      cursorUpdates: false,
+      playlistMaterialization: false,
+      ffmpeg: false,
+      scheduleActivation: false,
+    },
+    willActivateSchedule: false,
+    willUpdateCursors: false,
+    willMaterializePlaylist: false,
+  };
+}
+
+function rowToPublishedListItem(row: PublishedScheduleRow): PublishedScheduleListItem {
+  const validationSummary = parseJson<ExcelImportPreviewResult['summary']>(row.validation_summary_json);
+  const validationErrors = parseJson<DraftValidationIssue[]>(row.validation_errors_json);
+  return {
+    id: row.id,
+    sourceDraftId: row.source_draft_id,
+    name: row.name,
+    status: row.status,
+    isActive: false,
+    validationStatus: row.validation_status,
+    validationErrors,
+    scheduleStartDate: row.schedule_start_date,
+    scheduleEndDate: row.schedule_end_date,
+    timezone: row.timezone,
+    sourceExcelFilename: row.source_excel_filename,
+    sourceExcelSha256: row.source_excel_sha256,
+    validationSummary,
+    programCount: validationSummary.programCount,
+    slotCount: validationSummary.slotCount,
+    publishedBy: row.published_by,
+    publishedAt: row.published_at,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToPublishedDetail(row: PublishedScheduleRow): PublishedScheduleDetail {
+  return {
+    ...rowToPublishedListItem(row),
     settings: parseJson(row.settings_json),
     programs: parseJson(row.programs_json),
     slots: parseJson(row.slots_json),

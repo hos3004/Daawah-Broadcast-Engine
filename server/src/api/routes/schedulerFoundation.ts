@@ -13,8 +13,11 @@ import {
 import { SafeRootError } from '../../media/safeRoots';
 import {
   DraftValidationError,
+  getPublishedSchedule,
   getSchedulerDraft,
+  listPublishedSchedules,
   listSchedulerDrafts,
+  publishSchedulerDraft,
   saveSchedulerDraft,
 } from '../../schedule/drafts';
 import {
@@ -198,6 +201,41 @@ schedulerFoundationRouter.get(
   }
 );
 
+schedulerFoundationRouter.post(
+  '/draft-schedules/:id/publish',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Draft schedule id is required', code: 'DRAFT_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      const publishedSchedule = publishSchedulerDraft({
+        draftId: id,
+        publishedBy: req.user?.id ?? null,
+      });
+
+      res.status(201).json({
+        mode: 'published',
+        publishedSchedule,
+        safety: {
+          inactiveByDefault: true,
+          scheduleActivation: false,
+          cursorUpdates: false,
+          playlistMaterialization: false,
+          ffmpeg: false,
+          playout: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
 schedulerFoundationRouter.get(
   '/draft-schedules/:id',
   requireRole('admin', 'editor', 'operator'),
@@ -216,6 +254,40 @@ schedulerFoundationRouter.get(
     res.json({
       mode: 'draft',
       draft,
+    });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/published-schedules',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const limit = Number(req.query['limit'] ?? 50);
+    res.json({
+      mode: 'published-list',
+      publishedSchedules: listPublishedSchedules(limit),
+    });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/published-schedules/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Published schedule id is required', code: 'PUBLISHED_SCHEDULE_ID_REQUIRED' });
+      return;
+    }
+
+    const publishedSchedule = getPublishedSchedule(id);
+    if (!publishedSchedule) {
+      res.status(404).json({ error: 'Published schedule not found', code: 'PUBLISHED_SCHEDULE_NOT_FOUND' });
+      return;
+    }
+    res.json({
+      mode: 'published',
+      publishedSchedule,
     });
   }
 );

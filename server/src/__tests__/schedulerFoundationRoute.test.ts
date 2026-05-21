@@ -206,6 +206,135 @@ describe('scheduler foundation routes', () => {
     expect(draftCount).toBe(1);
   });
 
+  it('publishes a valid draft as an inactive immutable schedule snapshot only', async () => {
+    const { getDb } = require('../db/schema') as typeof import('../db/schema');
+    const db = getDb();
+    db.prepare('INSERT INTO cursors (key, value) VALUES (?, ?)').run('program:test', 'file-1');
+
+    const workbook = makeWorkbookBuffer();
+    const preview = await previewWorkbook(baseUrl, workbook);
+    const saveResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Publishable draft',
+        sourceExcel: {
+          filename: 'publishable.xlsx',
+          sha256: sha256(workbook),
+        },
+        preview,
+      }),
+    });
+    const saved = await saveResponse.json() as {
+      draft: {
+        id: string;
+        validationStatus: string;
+        validationErrors: unknown[];
+      };
+    };
+    expect(saveResponse.status).toBe(201);
+    expect(saved.draft.validationStatus).toBe('draft_valid');
+    expect(saved.draft.validationErrors).toEqual([]);
+
+    const cursorCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const publishResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules/${saved.draft.id}/publish`, {
+      method: 'POST',
+    });
+    const published = await publishResponse.json() as {
+      safety: {
+        scheduleActivation: boolean;
+        cursorUpdates: boolean;
+        playlistMaterialization: boolean;
+        ffmpeg: boolean;
+        playout: boolean;
+        broadcast: boolean;
+      };
+      publishedSchedule: {
+        id: string;
+        sourceDraftId: string;
+        name: string;
+        status: string;
+        isActive: boolean;
+        validationStatus: string;
+        validationErrors: unknown[];
+        programCount: number;
+        slotCount: number;
+        publishedBy: string | null;
+        publishedAt: string;
+        willActivateSchedule: boolean;
+        willUpdateCursors: boolean;
+        willMaterializePlaylist: boolean;
+      };
+    };
+
+    expect(publishResponse.status).toBe(201);
+    expect(published.publishedSchedule).toMatchObject({
+      sourceDraftId: saved.draft.id,
+      name: 'Publishable draft',
+      status: 'published',
+      isActive: false,
+      validationStatus: 'draft_valid',
+      validationErrors: [],
+      programCount: 1,
+      slotCount: 1,
+      publishedBy: 'user-1',
+      willActivateSchedule: false,
+      willUpdateCursors: false,
+      willMaterializePlaylist: false,
+    });
+    expect(published.publishedSchedule.publishedAt).toEqual(expect.any(String));
+    expect(published.safety).toMatchObject({
+      scheduleActivation: false,
+      cursorUpdates: false,
+      playlistMaterialization: false,
+      ffmpeg: false,
+      playout: false,
+      broadcast: false,
+    });
+
+    const listResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules`);
+    const list = await listResponse.json() as {
+      publishedSchedules: Array<{ id: string; sourceDraftId: string; isActive: boolean; status: string }>;
+    };
+    expect(listResponse.status).toBe(200);
+    expect(list.publishedSchedules).toHaveLength(1);
+    expect(list.publishedSchedules[0]).toMatchObject({
+      id: published.publishedSchedule.id,
+      sourceDraftId: saved.draft.id,
+      isActive: false,
+      status: 'published',
+    });
+
+    const readResponse = await fetch(`${baseUrl}/api/scheduler-foundation/published-schedules/${published.publishedSchedule.id}`);
+    const read = await readResponse.json() as { publishedSchedule: { slots: unknown[]; schedulePreview: { days: unknown[] } } };
+    expect(readResponse.status).toBe(200);
+    expect(read.publishedSchedule.slots).toHaveLength(1);
+    expect(read.publishedSchedule.schedulePreview.days.length).toBeGreaterThan(0);
+
+    const duplicateResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules/${saved.draft.id}/publish`, {
+      method: 'POST',
+    });
+    const duplicate = await duplicateResponse.json() as { code: string };
+    expect(duplicateResponse.status).toBe(400);
+    expect(duplicate.code).toBe('DRAFT_ALREADY_PUBLISHED');
+
+    expect(() => db.prepare('UPDATE scheduler_published_schedules SET name=? WHERE id=?').run('Changed', published.publishedSchedule.id))
+      .toThrow(/immutable/);
+
+    const scheduleCount = (db.prepare('SELECT COUNT(*) as cnt FROM schedules').get() as { cnt: number }).cnt;
+    const scheduleItemCount = (db.prepare('SELECT COUNT(*) as cnt FROM schedule_items').get() as { cnt: number }).cnt;
+    const playlistCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_playlists').get() as { cnt: number }).cnt;
+    const cursorCountAfter = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
+    const publishedCount = (db.prepare('SELECT COUNT(*) as cnt FROM scheduler_published_schedules').get() as { cnt: number }).cnt;
+    const auditCount = (db.prepare("SELECT COUNT(*) as cnt FROM audit_logs WHERE action='scheduler_foundation.publish_schedule'").get() as { cnt: number }).cnt;
+    expect(scheduleCount).toBe(0);
+    expect(scheduleItemCount).toBe(0);
+    expect(playlistCount).toBe(0);
+    expect(cursorCountAfter).toBe(cursorCountBefore);
+    expect(publishedCount).toBe(1);
+    expect(auditCount).toBe(1);
+  });
+
   it('saves an inactive invalid draft when the preview has validation errors', async () => {
     const response = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules`, {
       method: 'POST',
@@ -245,6 +374,7 @@ describe('scheduler foundation routes', () => {
     });
     const body = await response.json() as {
       draft: {
+        id: string;
         status: string;
         isActive: boolean;
         validationStatus: string;
@@ -259,6 +389,13 @@ describe('scheduler foundation routes', () => {
       validationStatus: 'draft_invalid',
     });
     expect(body.draft.validationErrors.map(issue => issue.code)).toContain('PREVIEW_HAS_ERRORS');
+
+    const publishResponse = await fetch(`${baseUrl}/api/scheduler-foundation/draft-schedules/${body.draft.id}/publish`, {
+      method: 'POST',
+    });
+    const publishBody = await publishResponse.json() as { code: string };
+    expect(publishResponse.status).toBe(400);
+    expect(publishBody.code).toBe('DRAFT_NOT_PUBLISHABLE');
   });
 
   it('recomputes overlap validation instead of trusting the submitted summary', async () => {

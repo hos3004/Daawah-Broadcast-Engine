@@ -54,6 +54,7 @@ function runMigrations(db: Database.Database): void {
     { version: 4, apply: migration_004 },
     { version: 5, apply: migration_005 },
     { version: 6, apply: migration_006 },
+    { version: 7, apply: migration_007 },
   ];
 
   for (const m of migrations) {
@@ -523,5 +524,58 @@ function migration_006(db: Database.Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_scheduler_drafts_validation_status
       ON scheduler_drafts(validation_status);
+  `);
+}
+
+function migration_007(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduler_published_schedules (
+      id TEXT PRIMARY KEY,
+      source_draft_id TEXT NOT NULL REFERENCES scheduler_drafts(id),
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'published'
+        CHECK(status IN ('published')),
+      is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active = 0),
+      schedule_start_date TEXT NOT NULL,
+      schedule_end_date TEXT NOT NULL,
+      timezone TEXT NOT NULL,
+      source_excel_filename TEXT NOT NULL,
+      source_excel_sha256 TEXT NOT NULL,
+      validation_status TEXT NOT NULL
+        CHECK(validation_status IN ('draft_valid')),
+      validation_errors_json TEXT NOT NULL DEFAULT '[]',
+      validation_summary_json TEXT NOT NULL,
+      settings_json TEXT NOT NULL,
+      programs_json TEXT NOT NULL,
+      slots_json TEXT NOT NULL,
+      folder_matches_json TEXT NOT NULL,
+      issues_json TEXT NOT NULL,
+      schedule_preview_json TEXT NOT NULL,
+      published_by TEXT,
+      published_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(source_draft_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduler_published_created
+      ON scheduler_published_schedules(created_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduler_published_range
+      ON scheduler_published_schedules(schedule_start_date, schedule_end_date);
+    CREATE INDEX IF NOT EXISTS idx_scheduler_published_source_draft
+      ON scheduler_published_schedules(source_draft_id);
+    CREATE INDEX IF NOT EXISTS idx_scheduler_published_status
+      ON scheduler_published_schedules(status, is_active);
+
+    CREATE TRIGGER IF NOT EXISTS trg_scheduler_published_no_update
+      BEFORE UPDATE ON scheduler_published_schedules
+      BEGIN
+        SELECT RAISE(ABORT, 'published schedule snapshots are immutable');
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_scheduler_published_no_delete
+      BEFORE DELETE ON scheduler_published_schedules
+      BEGIN
+        SELECT RAISE(ABORT, 'published schedule snapshots are immutable');
+      END;
   `);
 }

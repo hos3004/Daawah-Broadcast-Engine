@@ -76,6 +76,9 @@ export const schedulerFoundationApi = {
   }) => api.post('/scheduler-foundation/draft-schedules', payload),
   listDraftSchedules: () => api.get('/scheduler-foundation/draft-schedules'),
   getDraftSchedule: (id: string) => api.get(`/scheduler-foundation/draft-schedules/${id}`),
+  publishDraftSchedule: (id: string) => api.post(`/scheduler-foundation/draft-schedules/${id}/publish`),
+  listPublishedSchedules: () => api.get('/scheduler-foundation/published-schedules'),
+  getPublishedSchedule: (id: string) => api.get(`/scheduler-foundation/published-schedules/${id}`),
   validationResult: () => api.get('/scheduler-foundation/validation-result'),
   monthlyPreview: () => api.get('/scheduler-foundation/monthly-schedule-preview'),
 };
