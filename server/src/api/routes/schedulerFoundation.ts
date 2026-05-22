@@ -19,9 +19,12 @@ import {
 import { SafeRootError } from '../../media/safeRoots';
 import {
   buildTickerPreview,
+  deleteLogoAsset,
   exportTickerAss,
   getOverlaySettings,
   getTodayScheduleItems,
+  listLogoAssets,
+  saveLogoAsset,
   saveOverlaySettings,
 } from '../../overlays/controlPanel';
 import {
@@ -124,6 +127,11 @@ schedulerFoundationRouter.post('/safe-naming/preview', (req: Request, res: Respo
     mode: 'preview',
     mappings: previewSafeNaming(names),
   });
+});
+
+const logoAssetUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
 schedulerFoundationRouter.get(
@@ -631,6 +639,94 @@ schedulerFoundationRouter.put(
   (req: Request, res: Response): void => {
     try {
       res.json(saveOverlaySettings(req.body as Record<string, unknown>));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/overlays/logo-assets',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      res.json({
+        mode: 'logo-asset-list',
+        assets: listLogoAssets(),
+        safety: {
+          previewOnly: true,
+          mediaWrites: false,
+          liveActivation: false,
+          restartPlayout: false,
+          ffmpegExecution: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/overlays/logo-assets',
+  requireRole('admin', 'editor'),
+  logoAssetUpload.single('file'),
+  (req: Request, res: Response): void => {
+    try {
+      if (!req.file) {
+        res.status(400).json({ error: 'Logo asset file is required', code: 'LOGO_ASSET_REQUIRED' });
+        return;
+      }
+      const asset = saveLogoAsset({
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        sizeBytes: req.file.size,
+        buffer: req.file.buffer,
+      });
+      res.status(201).json({
+        mode: 'logo-asset',
+        asset,
+        safety: {
+          previewOnly: true,
+          outputRoot: 'data/overlay-assets',
+          mediaWrites: false,
+          liveActivation: false,
+          restartPlayout: false,
+          ffmpegExecution: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.delete(
+  '/overlays/logo-assets/:id',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    try {
+      const id = req.params.id;
+      if (!id) {
+        res.status(400).json({ error: 'Logo asset id is required', code: 'LOGO_ASSET_ID_REQUIRED' });
+        return;
+      }
+      const asset = deleteLogoAsset(id);
+      if (!asset) {
+        res.status(404).json({ error: 'Logo asset not found', code: 'LOGO_ASSET_NOT_FOUND' });
+        return;
+      }
+      res.json({
+        mode: 'logo-asset-deleted',
+        asset,
+        safety: {
+          previewOnly: true,
+          mediaWrites: false,
+          liveActivation: false,
+          restartPlayout: false,
+          ffmpegExecution: false,
+        },
+      });
     } catch (err) {
       sendFoundationError(res, err);
     }

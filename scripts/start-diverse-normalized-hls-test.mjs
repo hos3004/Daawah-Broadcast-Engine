@@ -366,7 +366,7 @@ function processStats(pid) {
 }
 function errorSummary() {
   try {
-    const out = execFileSync('grep', ['-Ein', 'error|failed|invalid|corrupt|non-monoton|No such file|Permission denied|DTS|PTS|buffer', paths.ffmpegLog], { encoding: 'utf8' });
+    const out = execFileSync('grep', ['-Ein', 'error|failed|invalid|corrupt|non-monoton|No such file|Permission denied|DTS|PTS|buffer (queue|underflow|overflow)|Too many packets buffered', paths.ffmpegLog], { encoding: 'utf8' });
     const lines = out.trim().split(/\n/).filter(Boolean);
     return { count: lines.length, last: lines.at(-1) || null, first20: lines.slice(0, 20) };
   } catch {

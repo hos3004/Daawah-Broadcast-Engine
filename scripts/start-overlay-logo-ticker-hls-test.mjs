@@ -4,8 +4,10 @@ import path from 'path';
 import http from 'http';
 import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(__dirname, '..');
 const publicHost = process.env.TEST_HLS_PUBLIC_HOST || '144.91.124.112';
 const port = Number(process.env.TEST_HLS_PORT || 18081);
@@ -18,8 +20,10 @@ const sourceRunId = process.env.SOURCE_RUN_ID || findLatestSourceRun();
 const sourcePlaylistPath = path.join(projectRoot, 'generated', 'test-playout', sourceRunId, 'playlist.json');
 const sourcePlaylist = JSON.parse(fs.readFileSync(sourcePlaylistPath, 'utf8'));
 const mediaPath = process.env.TEST_OVERLAY_MEDIA_PATH || sourcePlaylist.items[0].absolutePath;
-const fontFile = process.env.TEST_OVERLAY_FONT_FILE || '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
-const fontFamily = process.env.TEST_OVERLAY_FONT_FAMILY || 'DejaVu Sans';
+const fontChoice = selectArabicFont();
+const fontFile = process.env.TEST_OVERLAY_FONT_FILE || fontChoice.file;
+const fontFamily = process.env.TEST_OVERLAY_FONT_FAMILY || fontChoice.family;
+const fontsDir = path.dirname(fontFile);
 const durationSeconds = Number(process.env.TEST_OVERLAY_SECONDS || 1800);
 const logoPath = path.join(assetsDir, 'logo.png');
 const tickerAssPath = path.join(assetsDir, 'ticker.ass');
@@ -32,11 +36,12 @@ fs.mkdirSync(assetsDir, { recursive: true });
 if (!fs.existsSync(mediaPath)) throw new Error(`Media not found: ${mediaPath}`);
 if (!fs.existsSync(fontFile)) throw new Error(`Font not found: ${fontFile}`);
 assertPortFree(port);
+const ticker = resolveTickerText();
 generateLogo();
 fs.writeFileSync(tickerAssPath, renderTickerAss(), 'utf8');
 
 const filterComplex = [
-  `[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=25,format=yuv420p,setsar=1,subtitles=${tickerAssPath}:fontsdir=/usr/share/fonts/truetype/dejavu[vbase]`,
+  `[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=25,format=yuv420p,setsar=1,subtitles=${tickerAssPath}:fontsdir=${fontsDir}[vbase]`,
   '[1:v]format=rgba,colorchannelmixer=aa=0.88,scale=170:-1[vlogo]',
   '[vbase][vlogo]overlay=W-w-35:35[vout]',
   '[0:a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]',
@@ -120,6 +125,9 @@ console.log(JSON.stringify({
   logsDir,
   logoPath,
   tickerAssPath,
+  tickerTextSource: ticker.source,
+  fontFamily,
+  fontFile,
   mediaPath,
   sourceRunId,
   port,
@@ -138,6 +146,124 @@ function findLatestSourceRun() {
     .sort((a, b) => b.mtime - a.mtime);
   if (!candidates[0]) throw new Error('No diverse realtime source run with playlist.json was found.');
   return candidates[0].name;
+}
+
+function selectArabicFont() {
+  const candidates = [
+    {
+      family: 'Noto Naskh Arabic',
+      files: [
+        '/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf',
+        '/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf',
+        '/usr/share/fonts/truetype/noto/NotoNaskhArabicUI-Regular.ttf',
+      ],
+    },
+    {
+      family: 'Amiri',
+      files: [
+        '/usr/share/fonts/truetype/amiri/Amiri-Regular.ttf',
+        '/usr/share/fonts/opentype/fonts-hosny-amiri/Amiri-Regular.ttf',
+      ],
+    },
+    {
+      family: 'Noto Sans Arabic',
+      files: [
+        '/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf',
+        '/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf',
+      ],
+    },
+    {
+      family: 'DejaVu Sans',
+      files: ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'],
+    },
+  ];
+  for (const candidate of candidates) {
+    for (const file of candidate.files) {
+      if (fs.existsSync(file)) return { family: candidate.family, file };
+    }
+  }
+  return { family: 'DejaVu Sans', file: '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' };
+}
+
+function resolveTickerText() {
+  if (process.env.TEST_OVERLAY_TICKER_TEXT) {
+    return { source: 'env', text: process.env.TEST_OVERLAY_TICKER_TEXT };
+  }
+  const activeScheduleText = loadTickerTextFromActiveSchedule();
+  if (activeScheduleText) return { source: 'active-published-schedule', text: activeScheduleText };
+  return {
+    source: 'source-playlist-fallback',
+    text: buildTickerTextFromSourcePlaylist(),
+  };
+}
+
+function loadTickerTextFromActiveSchedule() {
+  let db = null;
+  try {
+    const Database = require('better-sqlite3');
+    const dbPath = process.env.DB_PATH || path.join(projectRoot, 'data', 'daawah.db');
+    if (!fs.existsSync(dbPath)) return null;
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const active = db.prepare("SELECT published_schedule_id FROM scheduler_active_schedule_state WHERE id='active'").get();
+    if (!active?.published_schedule_id) return null;
+    const schedule = db.prepare('SELECT timezone, schedule_preview_json FROM scheduler_published_schedules WHERE id=?').get(active.published_schedule_id);
+    if (!schedule?.schedule_preview_json) return null;
+    const preview = JSON.parse(schedule.schedule_preview_json);
+    const date = process.env.TEST_OVERLAY_DATE || localDateInTimezone(new Date(), schedule.timezone || 'UTC');
+    const day = Array.isArray(preview.days) ? preview.days.find(item => item?.date === date) : null;
+    const rows = Array.isArray(day?.rows) ? day.rows : [];
+    const lookup = new Map(db.prepare('SELECT suggested_program_key, safe_slug, display_name_ar FROM program_candidates').all()
+      .flatMap(row => [
+        [row.suggested_program_key, row.display_name_ar],
+        [row.safe_slug, row.display_name_ar],
+      ]));
+    const items = rows
+      .filter(row => row?.type === 'slot')
+      .slice(0, Number(process.env.TEST_OVERLAY_TICKER_LIMIT || 8))
+      .map(row => {
+        const title = lookup.get(row.program_key) || row.title || row.program_key || 'برنامج';
+        return `${row.start_time || ''} ${title}`.trim();
+      })
+      .filter(Boolean);
+    return items.length ? `تشاهدون اليوم: ${items.join(' • ')}` : null;
+  } catch (error) {
+    fs.appendFileSync(path.join(logsDir, 'setup.log'), `[${new Date().toISOString()}] active schedule ticker unavailable: ${error.message}\n`, 'utf8');
+    return null;
+  } finally {
+    try { db?.close(); } catch {
+      // Ignore readonly DB close failures during test setup.
+    }
+  }
+}
+
+function buildTickerTextFromSourcePlaylist() {
+  const items = (sourcePlaylist.items || [])
+    .slice(0, Number(process.env.TEST_OVERLAY_TICKER_LIMIT || 8))
+    .map((item, index) => {
+      const minute = String(Math.floor(index * 30 / 60)).padStart(2, '0');
+      const title = item.title || item.displayName || path.basename(item.absolutePath || item.path || `program-${index + 1}`);
+      return `${minute}:00 ${title}`;
+    })
+    .filter(Boolean);
+  return items.length ? `تشاهدون اليوم: ${items.join(' • ')}` : 'تشاهدون اليوم';
+}
+
+function localDateInTimezone(date, timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const year = parts.find(part => part.type === 'year')?.value;
+    const month = parts.find(part => part.type === 'month')?.value;
+    const day = parts.find(part => part.type === 'day')?.value;
+    if (year && month && day) return `${year}-${month}-${day}`;
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+  return date.toISOString().slice(0, 10);
 }
 
 function assertPortFree(value) {
@@ -180,10 +306,9 @@ function generateLogo() {
 }
 
 function renderTickerAss() {
-  const tickerText = 'تشاهدون اليوم: 08:00 خطوات النبي • 09:30 أعمال الحج • 11:00 كليب أطفال • 12:30 السيرة النبوية • 14:00 تشريف الأمة';
   let events = '';
   for (let start = 0; start < durationSeconds; start += 50) {
-    events += `Dialogue: 0,${assTime(start)},${assTime(start + 45)},Ticker,,0,0,0,,{\\an4\\move(1320,675,-2850,675,0,45000)}${tickerText}\n`;
+    events += `Dialogue: 0,${assTime(start)},${assTime(start + 45)},Ticker,,0,0,0,,{\\an4\\move(1320,675,-2850,675,0,45000)}${escapeAssText(ticker.text)}\n`;
   }
   return `[Script Info]
 ScriptType: v4.00+
@@ -199,8 +324,16 @@ Style: Label,${fontFamily},34,&H00FFFFFF,&H000000FF,&H88008CD2,&H88008CD2,1,0,0,
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-Dialogue: 1,0:00:00.00,${assTime(durationSeconds)},Label,,0,0,0,,{\\an3\\pos(1240,675)}تشاهدون اليوم
+Dialogue: 1,0:00:00.00,${assTime(durationSeconds)},Label,,0,0,0,,{\\an3\\pos(1240,675)}${escapeAssText('تشاهدون اليوم')}
 ${events}`;
+}
+
+function escapeAssText(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/\{/g, '\\{')
+    .replace(/\}/g, '\\}')
+    .replace(/\r\n|\r|\n/g, '\\N');
 }
 
 function assTime(seconds) {
@@ -219,6 +352,10 @@ function writeArtifacts() {
     mediaPath,
     logoPath,
     tickerAssPath,
+    tickerTextSource: ticker.source,
+    tickerText: ticker.text,
+    fontFamily,
+    fontFile,
     sourceRunId,
     port,
     ffmpegArgs,
@@ -234,7 +371,7 @@ function writeArtifacts() {
     runId,
     publicTestUrl,
     logo: { enabled: true, path: logoPath, position: 'top-right', opacity: 0.88 },
-    ticker: { enabled: true, path: tickerAssPath, type: 'ass', language: 'ar', position: 'bottom' },
+    ticker: { enabled: true, path: tickerAssPath, type: 'ass', language: 'ar', position: 'bottom', source: ticker.source, fontFamily, fontFile },
   }, null, 2)}\n`, 'utf8');
   fs.writeFileSync(path.join(runDir, 'status.json'), `${JSON.stringify({
     runId,

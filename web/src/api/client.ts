@@ -114,6 +114,13 @@ export const schedulerFoundationApi = {
   getTestPlayoutPlan: (id: string) => api.get(`/scheduler-foundation/test-playout/plans/${id}`),
   overlaySettings: () => api.get('/scheduler-foundation/overlays/settings'),
   saveOverlaySettings: (payload: unknown) => api.put('/scheduler-foundation/overlays/settings', payload),
+  listLogoAssets: () => api.get('/scheduler-foundation/overlays/logo-assets'),
+  uploadLogoAsset: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post('/scheduler-foundation/overlays/logo-assets', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  deleteLogoAsset: (id: string) => api.delete(`/scheduler-foundation/overlays/logo-assets/${id}`),
   tickerPreview: (payload: unknown) => api.post('/scheduler-foundation/overlays/ticker/preview', payload),
   tickerExportAss: (payload: unknown) => api.post('/scheduler-foundation/overlays/ticker/export-ass', payload),
   todayScheduleOverlay: (params?: { date?: string; limit?: number }) =>

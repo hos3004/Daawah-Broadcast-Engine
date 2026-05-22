@@ -9,7 +9,9 @@ import {
   Save,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   Type,
+  Upload,
 } from 'lucide-react';
 import { schedulerFoundationApi } from '../api/client';
 
@@ -56,6 +58,17 @@ interface LogoSettings {
   scale: number;
   opacity: number;
   safeArea: number;
+}
+
+interface LogoAsset {
+  id: string;
+  originalFilename: string;
+  filename: string;
+  absolutePath: string;
+  relativePath: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
 }
 
 interface TickerSettings {
@@ -122,7 +135,7 @@ const defaultLogo: LogoSettings = {
 const defaultTicker: TickerSettings = {
   enabled: true,
   mode: 'today',
-  fontFamily: 'Noto Sans Arabic',
+  fontFamily: 'Noto Naskh Arabic',
   fontSize: 34,
   textColor: '#FFFFFF',
   backgroundColor: '#000000',
@@ -140,6 +153,7 @@ export default function OverlaysPage() {
   const [tab, setTab] = useState<TabKey>('logo');
   const [safeNaming, setSafeNaming] = useState<SafeNamingPanel | null>(null);
   const [settings, setSettings] = useState<OverlaySettings>({ logo: defaultLogo, ticker: defaultTicker, updatedAt: '' });
+  const [logoAssets, setLogoAssets] = useState<LogoAsset[]>([]);
   const [csvContent, setCsvContent] = useState('');
   const [safePreview, setSafePreview] = useState<SafeNamingPanel | null>(null);
   const [slugOverrides, setSlugOverrides] = useState<Record<string, string>>({});
@@ -160,15 +174,21 @@ export default function OverlaysPage() {
     opacity: settings.logo.opacity,
     transform: `scale(${Math.max(0.4, settings.logo.scale * 3)})`,
   }), [settings.logo.opacity, settings.logo.scale]);
+  const selectedLogoAsset = useMemo(
+    () => logoAssets.find(asset => asset.id === settings.logo.logoAssetId) ?? null,
+    [logoAssets, settings.logo.logoAssetId]
+  );
 
   async function refresh() {
     setLoading('refresh');
     try {
-      const [safe, overlay] = await Promise.all([
+      const [safe, overlay, logoAssetResponse] = await Promise.all([
         schedulerFoundationApi.safeNamingControlPanel().then(r => r.data as SafeNamingPanel),
         schedulerFoundationApi.overlaySettings().then(r => r.data as OverlaySettings),
+        schedulerFoundationApi.listLogoAssets().then(r => r.data as { assets: LogoAsset[] }),
       ]);
       setSafeNaming(safe);
+      setLogoAssets(logoAssetResponse.assets ?? []);
       setSettings({
         logo: overlay.logo ?? defaultLogo,
         ticker: overlay.ticker ?? defaultTicker,
@@ -208,6 +228,53 @@ export default function OverlaysPage() {
       const response = await schedulerFoundationApi.saveOverlaySettings(settings);
       setSettings(response.data as OverlaySettings);
       setMessage('تم حفظ إعدادات التراكب كملف إعدادات فقط.');
+    } catch (err) {
+      setMessage(errorText(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function uploadLogoAsset(file: File | null | undefined) {
+    if (!file) return;
+    setLoading('logo-upload');
+    setMessage('');
+    try {
+      const response = await schedulerFoundationApi.uploadLogoAsset(file);
+      const asset = (response.data as { asset: LogoAsset }).asset;
+      setLogoAssets(current => [asset, ...current.filter(item => item.id !== asset.id)]);
+      setSettings(current => ({
+        ...current,
+        logo: {
+          ...current.logo,
+          logoAssetId: asset.id,
+          logoPath: asset.absolutePath,
+        },
+      }));
+      setMessage('تم رفع أصل اللوجو داخل data/overlay-assets فقط.');
+    } catch (err) {
+      setMessage(errorText(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function deleteSelectedLogoAsset() {
+    if (!settings.logo.logoAssetId) return;
+    setLoading('logo-delete');
+    setMessage('');
+    try {
+      await schedulerFoundationApi.deleteLogoAsset(settings.logo.logoAssetId);
+      setLogoAssets(current => current.filter(asset => asset.id !== settings.logo.logoAssetId));
+      setSettings(current => ({
+        ...current,
+        logo: {
+          ...current.logo,
+          logoAssetId: null,
+          logoPath: null,
+        },
+      }));
+      setMessage('تم حذف أصل اللوجو التجريبي من data/overlay-assets.');
     } catch (err) {
       setMessage(errorText(err));
     } finally {
@@ -387,6 +454,55 @@ export default function OverlaysPage() {
                 style={inputStyle}
               />
             </InputRow>
+            <InputRow label="أصول اللوجو">
+              <div className="grid gap-2">
+                <label className="btn-ghost inline-flex cursor-pointer items-center justify-center gap-2">
+                  <Upload size={16} />
+                  رفع PNG / JPEG / WebP
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="hidden"
+                    disabled={loading !== null}
+                    onChange={event => {
+                      const file = event.currentTarget.files?.[0] ?? null;
+                      event.currentTarget.value = '';
+                      void uploadLogoAsset(file);
+                    }}
+                  />
+                </label>
+                <select
+                  value={settings.logo.logoAssetId ?? ''}
+                  onChange={event => {
+                    const asset = logoAssets.find(item => item.id === event.target.value) ?? null;
+                    setSettings(current => ({
+                      ...current,
+                      logo: {
+                        ...current.logo,
+                        logoAssetId: asset?.id ?? null,
+                        logoPath: asset?.absolutePath ?? current.logo.logoPath,
+                      },
+                    }));
+                  }}
+                  className="w-full rounded px-3 py-2"
+                  style={inputStyle}
+                >
+                  <option value="">بدون أصل محفوظ</option>
+                  {logoAssets.map(asset => (
+                    <option key={asset.id} value={asset.id}>{asset.originalFilename}</option>
+                  ))}
+                </select>
+                {selectedLogoAsset && (
+                  <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs" style={{ borderColor: 'var(--bg-border)' }}>
+                    <span className="ltr-text">{selectedLogoAsset.relativePath}</span>
+                    <button className="btn-ghost flex items-center gap-1" disabled={loading !== null} onClick={() => void deleteSelectedLogoAsset()}>
+                      <Trash2 size={14} />
+                      حذف
+                    </button>
+                  </div>
+                )}
+              </div>
+            </InputRow>
             <InputRow label="الموضع">
               <select
                 value={settings.logo.position}
@@ -434,6 +550,20 @@ export default function OverlaysPage() {
             className="w-full rounded px-3 py-2"
             style={inputStyle}
           />
+          <InputRow label="خط العربية">
+            <select
+              value={settings.ticker.fontFamily}
+              onChange={event => setSettings(current => ({ ...current, ticker: { ...current.ticker, fontFamily: event.target.value } }))}
+              className="w-full rounded px-3 py-2"
+              style={inputStyle}
+            >
+              <option value="Noto Naskh Arabic">Noto Naskh Arabic</option>
+              <option value="Amiri">Amiri</option>
+              <option value="Noto Sans Arabic">Noto Sans Arabic</option>
+              <option value="Arial">Arial</option>
+              <option value="DejaVu Sans">DejaVu Sans</option>
+            </select>
+          </InputRow>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <NumberInput label="حجم الخط" value={settings.ticker.fontSize} onChange={value => setSettings(current => ({ ...current, ticker: { ...current.ticker, fontSize: value } }))} />
             <NumberInput label="السرعة" value={settings.ticker.speedPixelsPerSecond} onChange={value => setSettings(current => ({ ...current, ticker: { ...current.ticker, speedPixelsPerSecond: value } }))} />

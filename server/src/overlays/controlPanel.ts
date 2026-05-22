@@ -24,6 +24,25 @@ export interface LogoOverlaySettings {
   safeArea: number;
 }
 
+export interface LogoAssetRecord {
+  id: string;
+  originalFilename: string;
+  filename: string;
+  absolutePath: string;
+  relativePath: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+  previewOnly: true;
+}
+
+export interface LogoAssetUploadInput {
+  originalFilename: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  buffer: Buffer;
+}
+
 export interface TickerSettings {
   enabled: boolean;
   mode: TickerMode;
@@ -126,10 +145,18 @@ const DEFAULT_LOGO_SETTINGS: LogoOverlaySettings = {
   safeArea: 24,
 };
 
+export const ARABIC_TICKER_FONT_FALLBACKS = [
+  'Noto Naskh Arabic',
+  'Amiri',
+  'Noto Sans Arabic',
+  'Arial',
+  'DejaVu Sans',
+];
+
 const DEFAULT_TICKER_SETTINGS: TickerSettings = {
   enabled: true,
   mode: 'today',
-  fontFamily: 'Noto Sans Arabic',
+  fontFamily: ARABIC_TICKER_FONT_FALLBACKS[0]!,
   fontSize: 34,
   textColor: '#FFFFFF',
   backgroundColor: '#000000',
@@ -141,6 +168,14 @@ const DEFAULT_TICKER_SETTINGS: TickerSettings = {
   resolutionWidth: 1280,
   resolutionHeight: 720,
   limitItems: 12,
+};
+
+const LOGO_ASSET_MAX_BYTES = 5 * 1024 * 1024;
+const LOGO_ASSET_MIME_BY_EXT: Record<string, string[]> = {
+  '.png': ['image/png'],
+  '.jpg': ['image/jpeg'],
+  '.jpeg': ['image/jpeg'],
+  '.webp': ['image/webp'],
 };
 
 export function getOverlaySettings(): OverlayControlSettings {
@@ -201,7 +236,7 @@ export function validateTickerSettings(input: Partial<TickerSettings>): TickerSe
   return {
     enabled: input.enabled !== false,
     mode,
-    fontFamily: cleanString(input.fontFamily) || DEFAULT_TICKER_SETTINGS.fontFamily,
+    fontFamily: normalizeFontFamily(input.fontFamily) || DEFAULT_TICKER_SETTINGS.fontFamily,
     fontSize: clampInt(input.fontSize ?? DEFAULT_TICKER_SETTINGS.fontSize, 12, 120),
     textColor: normalizeHexColor(input.textColor, DEFAULT_TICKER_SETTINGS.textColor),
     backgroundColor: normalizeHexColor(input.backgroundColor, DEFAULT_TICKER_SETTINGS.backgroundColor),
@@ -220,7 +255,7 @@ export function buildTickerPreview(input: TickerPreviewInput = {}): TickerPrevie
   const saved = getOverlaySettings();
   const settings = validateTickerSettings({ ...saved.ticker, ...input.settings });
   const sourceMode = input.mode ?? settings.mode;
-  const date = normalizeDate(input.date);
+  const date = normalizeDate(input.date, getActiveScheduleTimezone());
   const limit = clampInt(input.limit ?? settings.limitItems, 1, 50);
   const scheduleItems = sourceMode === 'manual'
     ? []
@@ -266,6 +301,8 @@ export function exportTickerAss(input: TickerPreviewInput = {}): TickerExport {
     tickerAssPath,
     tickerJsonPath,
     generatedAt: new Date().toISOString(),
+    fontFamily: preview.settings.fontFamily,
+    fontFallbacks: ARABIC_TICKER_FONT_FALLBACKS,
     futureFfmpegUse: {
       subtitlesFilter: `subtitles='${tickerAssPath.replace(/\\/g, '/').replace(/'/g, "\\'")}'`,
       liveActivation: false,
@@ -284,13 +321,95 @@ export function exportTickerAss(input: TickerPreviewInput = {}): TickerExport {
 }
 
 export function getTodayScheduleItems(input: { date?: string; limit?: number } = {}): TodayScheduleTickerItem[] {
-  const date = normalizeDate(input.date);
   const limit = clampInt(input.limit ?? DEFAULT_TICKER_SETTINGS.limitItems, 1, 50);
-  const activeState = getActiveScheduleState();
-  if (!activeState) return [];
-  const activeSchedule = getPublishedSchedule(activeState.publishedScheduleId);
-  if (!activeSchedule) return [];
-  return scheduleItemsFromPreview(activeSchedule.schedulePreview, date, limit, getSafeNameDisplayLookup());
+  try {
+    const activeState = getActiveScheduleState();
+    if (!activeState) return [];
+    const activeSchedule = getPublishedSchedule(activeState.publishedScheduleId);
+    if (!activeSchedule) return [];
+    const date = normalizeDate(input.date, activeSchedule.timezone);
+    return scheduleItemsFromPreview(activeSchedule.schedulePreview, date, limit, getSafeNameDisplayLookup());
+  } catch {
+    return [];
+  }
+}
+
+export function listLogoAssets(): LogoAssetRecord[] {
+  const root = getLogoAssetRoot();
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isFile() && isSupportedLogoAssetName(entry.name))
+    .map(entry => logoAssetRecordFromPath(path.join(root, entry.name)))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getLogoAsset(id: string): LogoAssetRecord | null {
+  const assetId = normalizeAssetId(id);
+  if (!assetId) return null;
+  const root = getLogoAssetRoot();
+  for (const ext of Object.keys(LOGO_ASSET_MIME_BY_EXT)) {
+    const candidate = path.join(root, `${assetId}${ext}`);
+    if (fs.existsSync(candidate)) return logoAssetRecordFromPath(candidate);
+  }
+  return null;
+}
+
+export function saveLogoAsset(input: LogoAssetUploadInput): LogoAssetRecord {
+  if (!input.buffer || input.buffer.length === 0) {
+    throw new DraftValidationError('Logo asset upload is empty', 'EMPTY_LOGO_ASSET');
+  }
+  const sizeBytes = input.sizeBytes ?? input.buffer.length;
+  if (sizeBytes <= 0 || input.buffer.length <= 0) {
+    throw new DraftValidationError('Logo asset upload is empty', 'EMPTY_LOGO_ASSET');
+  }
+  if (sizeBytes > LOGO_ASSET_MAX_BYTES || input.buffer.length > LOGO_ASSET_MAX_BYTES) {
+    throw new DraftValidationError('Logo asset is too large; maximum size is 5 MB', 'LOGO_ASSET_TOO_LARGE');
+  }
+
+  const originalFilename = path.basename(cleanString(input.originalFilename) || 'logo');
+  const ext = path.extname(originalFilename).toLowerCase();
+  const allowedMimes = LOGO_ASSET_MIME_BY_EXT[ext];
+  if (!allowedMimes) {
+    throw new DraftValidationError('Logo asset must be PNG, JPEG, or WebP', 'UNSUPPORTED_LOGO_ASSET_TYPE');
+  }
+  const mimeType = cleanString(input.mimeType || mimeTypeForLogoExtension(ext)).toLowerCase().split(';')[0] ?? '';
+  if (mimeType && !allowedMimes.includes(mimeType)) {
+    throw new DraftValidationError('Logo asset MIME type does not match the file extension', 'UNSUPPORTED_LOGO_ASSET_TYPE');
+  }
+
+  const id = uuidv4();
+  const filename = `${id}${ext}`;
+  const root = getLogoAssetRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const absolutePath = path.join(root, filename);
+  const metadataPath = logoAssetMetadataPath(id);
+  ensureProjectPath(absolutePath, root);
+  ensureProjectPath(metadataPath, root);
+
+  fs.writeFileSync(absolutePath, input.buffer);
+  fs.writeFileSync(metadataPath, `${JSON.stringify({
+    id,
+    originalFilename,
+    filename,
+    mimeType: mimeType || mimeTypeForLogoExtension(ext),
+    sizeBytes: input.buffer.length,
+    createdAt: new Date().toISOString(),
+  }, null, 2)}\n`, 'utf8');
+
+  return logoAssetRecordFromPath(absolutePath);
+}
+
+export function deleteLogoAsset(id: string): LogoAssetRecord | null {
+  const asset = getLogoAsset(id);
+  if (!asset) return null;
+  ensureProjectPath(asset.absolutePath, getLogoAssetRoot());
+  fs.unlinkSync(asset.absolutePath);
+  const metadataPath = logoAssetMetadataPath(asset.id);
+  if (fs.existsSync(metadataPath)) {
+    ensureProjectPath(metadataPath, getLogoAssetRoot());
+    fs.unlinkSync(metadataPath);
+  }
+  return asset;
 }
 
 export function scheduleItemsFromPreview(
@@ -340,29 +459,33 @@ export function buildTickerText(input: {
 
 export function renderTickerAss(text: string, settings: TickerSettings): string {
   const escaped = escapeAssText(`\u202B${text}\u202C`);
+  const fontFamily = normalizeFontFamily(settings.fontFamily) || DEFAULT_TICKER_SETTINGS.fontFamily;
   const y = settings.position === 'top'
-    ? settings.safeArea
-    : settings.resolutionHeight - settings.safeArea - settings.fontSize - 18;
+    ? settings.safeArea + Math.ceil(settings.fontSize * 0.75)
+    : settings.resolutionHeight - settings.safeArea - Math.ceil(settings.fontSize * 0.75);
   const estimatedTextWidth = Math.max(settings.resolutionWidth, Math.ceil(text.length * settings.fontSize * 0.85));
   const durationSeconds = Math.max(30, Math.ceil((settings.resolutionWidth + estimatedTextWidth) / settings.speedPixelsPerSecond));
   const endX = -estimatedTextWidth;
+  const startX = settings.resolutionWidth + 40;
   const primaryColour = assColor(settings.textColor, settings.opacity);
   const backColour = assColor(settings.backgroundColor, settings.backgroundOpacity);
 
   return [
     '[Script Info]',
     'ScriptType: v4.00+',
+    `PlayResX: ${settings.resolutionWidth}`,
+    `PlayResY: ${settings.resolutionHeight}`,
     'WrapStyle: 2',
     'ScaledBorderAndShadow: yes',
     'YCbCr Matrix: TV.709',
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Ticker,${settings.fontFamily},${settings.fontSize},${primaryColour},${primaryColour},&H00000000,${backColour},0,0,0,0,100,100,0,0,3,0,0,7,0,0,0,1`,
+    `Style: Ticker,${fontFamily},${settings.fontSize},${primaryColour},${primaryColour},&H00000000,${backColour},0,0,0,0,100,100,0,0,3,0,0,4,0,0,0,1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-    `Dialogue: 0,0:00:00.00,${formatAssTime(durationSeconds)},Ticker,,0,0,0,,{\\an7\\move(${settings.resolutionWidth},${y},${endX},${y})}${escaped}`,
+    `Dialogue: 0,0:00:00.00,${formatAssTime(durationSeconds)},Ticker,,0,0,0,,{\\an4\\move(${startX},${y},${endX},${y})}${escaped}`,
     '',
   ].join('\n');
 }
@@ -438,9 +561,38 @@ function normalizePosition(value: unknown): LogoPosition {
   return DEFAULT_LOGO_SETTINGS.position;
 }
 
-function normalizeDate(value: unknown): string {
+function getActiveScheduleTimezone(): string | undefined {
+  try {
+    const activeState = getActiveScheduleState();
+    if (!activeState) return undefined;
+    const activeSchedule = getPublishedSchedule(activeState.publishedScheduleId);
+    return activeSchedule?.timezone;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeDate(value: unknown, timezone = 'UTC'): string {
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  return new Date().toISOString().slice(0, 10);
+  return localDateInTimezone(new Date(), timezone);
+}
+
+function localDateInTimezone(date: Date, timezone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const year = parts.find(part => part.type === 'year')?.value;
+    const month = parts.find(part => part.type === 'month')?.value;
+    const day = parts.find(part => part.type === 'day')?.value;
+    if (year && month && day) return `${year}-${month}-${day}`;
+  } catch {
+    // Fall back to UTC if a stored timezone has become invalid.
+  }
+  return date.toISOString().slice(0, 10);
 }
 
 function normalizeHexColor(value: unknown, fallback: string): string {
@@ -478,6 +630,53 @@ function getLogoAssetRoot(): string {
   return path.join(config.paths.data, 'overlay-assets');
 }
 
+function logoAssetMetadataPath(id: string): string {
+  return path.join(getLogoAssetRoot(), `${id}.json`);
+}
+
+function isSupportedLogoAssetName(filename: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(LOGO_ASSET_MIME_BY_EXT, ext);
+}
+
+function logoAssetRecordFromPath(absolutePath: string): LogoAssetRecord {
+  const resolved = path.resolve(absolutePath);
+  const root = getLogoAssetRoot();
+  ensureProjectPath(resolved, root);
+  const filename = path.basename(resolved);
+  const id = path.basename(filename, path.extname(filename));
+  const stat = fs.statSync(resolved);
+  const metadata = readLogoAssetMetadata(id);
+  return {
+    id,
+    originalFilename: metadata.originalFilename ?? filename,
+    filename,
+    absolutePath: resolved,
+    relativePath: path.relative(config.paths.data, resolved).replace(/\\/g, '/'),
+    mimeType: metadata.mimeType ?? mimeTypeForLogoExtension(path.extname(filename).toLowerCase()),
+    sizeBytes: stat.size,
+    createdAt: metadata.createdAt ?? stat.birthtime.toISOString(),
+    previewOnly: true,
+  };
+}
+
+function readLogoAssetMetadata(id: string): Partial<LogoAssetRecord> {
+  const metadataPath = logoAssetMetadataPath(id);
+  if (!fs.existsSync(metadataPath)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as Partial<LogoAssetRecord>;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function mimeTypeForLogoExtension(ext: string): string {
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  return 'image/png';
+}
+
 function getSettingsPath(): string {
   return path.join(getOverlayDataRoot(), 'settings.json');
 }
@@ -501,6 +700,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function cleanString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeFontFamily(value: unknown): string {
+  return cleanString(value)
+    .replace(/[,;\r\n]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
 }
 
 function clampInt(value: number, min: number, max: number): number {

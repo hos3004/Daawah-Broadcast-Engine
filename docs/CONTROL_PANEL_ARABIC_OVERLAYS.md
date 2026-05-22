@@ -64,6 +64,16 @@ assets/overlays/
 
 Logo assets must not be written into `/srv/daawah/media`.
 
+Logo asset management is preview-only and stores uploaded PNG, JPEG, or WebP
+files under:
+
+```text
+data/overlay-assets/
+```
+
+The API validates file type, file size, path containment, and keeps the stored
+asset independent from the source media library.
+
 ## Arabic Ticker as ASS
 
 The ticker generator emits UTF-8 ASS subtitle files for FFmpeg/libass. It does
@@ -80,6 +90,8 @@ data/overlays/tickers/<runId>/overlay-manifest.json
 The ASS renderer supports:
 
 - Arabic-capable font family by configurable name
+- default Arabic font family: `Noto Naskh Arabic`
+- fallback family choices: `Amiri`, `Noto Sans Arabic`, `Arial`, `DejaVu Sans`
 - RTL Arabic text wrapping markers
 - moving ticker text
 - font size
@@ -90,12 +102,14 @@ The ASS renderer supports:
 - top/bottom position
 - safe area
 
-Font files are not bundled or shared by this feature.
+Font files are not bundled or shared by this feature. Servers should install
+or expose an Arabic-capable system font such as Noto Naskh Arabic or Amiri for
+libass/FFmpeg rendering.
 
 ## تشاهدون اليوم
 
-The “تشاهدون اليوم” mode reads the active published schedule snapshot and builds
-Arabic text in this form:
+The “تشاهدون اليوم” mode reads the active published schedule snapshot, not a
+static demo string, and builds Arabic text in this form:
 
 ```text
 تشاهدون اليوم: 08:00 برنامج كذا • 09:30 برنامج كذا • 11:00 برنامج كذا
