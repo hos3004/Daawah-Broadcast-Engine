@@ -1117,7 +1117,7 @@ describe('scheduler foundation routes', () => {
     expect(body.plan.commandPreview.args).toContain('-filter_complex');
     expect(body.plan.commandPreview.args).toContain('libx264');
     expect(body.plan.commandPreview.args).toContain('[vout]');
-    expect(body.plan.commandPreview.args).toContain('0:a?');
+    expect(body.plan.commandPreview.args).toContain('[aout]');
     expect(spawnSpy).not.toHaveBeenCalled();
     spawnSpy.mockRestore();
   });
