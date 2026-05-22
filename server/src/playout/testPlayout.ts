@@ -1180,7 +1180,15 @@ function rejectForbiddenString(value: string, keyPath: string): void {
     throw new DraftValidationError('HTTP/HTTPS live output targets are forbidden for test playout planning', 'LIVE_URL_FORBIDDEN');
   }
   if (normalized.includes('/srv/daawah/media')) {
-    throw new DraftValidationError('Media folder paths are forbidden for isolated test playout planning', 'MEDIA_PATH_FORBIDDEN');
+    const allowedRealMediaRoot =
+      normalized.startsWith('/srv/daawah/media/source/') ||
+      normalized.startsWith('/srv/daawah/media/bumpers/');
+    if (!allowedRealMediaRoot) {
+      throw new DraftValidationError(
+        'Only /srv/daawah/media/source and /srv/daawah/media/bumpers are allowed for isolated real-media test playout',
+        'MEDIA_PATH_FORBIDDEN'
+      );
+    }
   }
   if (normalized.includes('/obs') || normalized.includes('obs-studio') || normalized.includes('old-obs')) {
     throw new DraftValidationError('Old OBS paths are forbidden for test playout planning', 'OLD_OBS_PATH_FORBIDDEN');
