@@ -10,6 +10,12 @@ import {
   previewSafeNaming,
   scanMediaRegistry,
 } from '../../media/registry';
+import {
+  APPLY_CONFIRMATION_TEXT,
+  applyImportPlan,
+  previewImportPlan,
+  SafeNamingImportError,
+} from '../../media/safeNamingImport';
 import { SafeRootError } from '../../media/safeRoots';
 import {
   activatePublishedSchedule,
@@ -56,6 +62,19 @@ const upload = multer({
     }
     if (!isSafeUploadMime(file.mimetype)) {
       cb(new Error(`Unsupported MIME type: ${file.mimetype}`));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext !== '.csv') {
+      cb(new Error('Only .csv files are accepted'));
       return;
     }
     cb(null, true);
@@ -112,6 +131,142 @@ schedulerFoundationRouter.post('/safe-naming/preview', (req: Request, res: Respo
     mappings: previewSafeNaming(names),
   });
 });
+
+schedulerFoundationRouter.post(
+  '/safe-naming/import-preview',
+  requireRole('admin', 'editor'),
+  csvUpload.single('file'),
+  (req: Request, res: Response): void => {
+    try {
+      if (!req.file) {
+        res.status(400).json({ error: 'CSV file is required', code: 'CSV_REQUIRED' });
+        return;
+      }
+      const csvContent = req.file.buffer.toString('utf8');
+      const preview = previewImportPlan({ csvContent });
+      res.json(preview);
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/safe-naming/import-apply',
+  requireRole('admin'),
+  csvUpload.single('file'),
+  (req: Request, res: Response): void => {
+    try {
+      if (!req.file) {
+        res.status(400).json({ error: 'CSV file is required', code: 'CSV_REQUIRED' });
+        return;
+      }
+      const csvContent = req.file.buffer.toString('utf8');
+      const body = req.body as {
+        importReadyOnly?: string;
+        dryRun?: string;
+        confirmImport?: string;
+        confirmationText?: string;
+      };
+      const importReadyOnly = body.importReadyOnly !== 'false';
+      const dryRun = body.dryRun !== 'false';
+
+      if (!dryRun) {
+        if (body.confirmImport !== 'true') {
+          res.status(400).json({ error: 'Confirm import is required for non-dry-run apply', code: 'CONFIRM_IMPORT_REQUIRED' });
+          return;
+        }
+        if (body.confirmationText !== APPLY_CONFIRMATION_TEXT) {
+          res.status(400).json({
+            error: `Confirmation text mismatch. Expected: "${APPLY_CONFIRMATION_TEXT}"`,
+            code: 'CONFIRMATION_TEXT_MISMATCH',
+          });
+          return;
+        }
+      }
+
+      const result = applyImportPlan({
+        csvContent,
+        importReadyOnly,
+        dryRun,
+        confirmationText: dryRun ? APPLY_CONFIRMATION_TEXT : body.confirmationText,
+      });
+
+      if (dryRun) {
+        res.json(result);
+        return;
+      }
+
+      res.status(201).json({
+        ...result,
+        safety: {
+          safeNameMappingsWritten: result.safeNameMappingsWritten,
+          programCandidatesWritten: result.programCandidatesWritten,
+          schedulerActivation: false,
+          cursorUpdates: false,
+          playlistMaterialization: false,
+          ffmpeg: false,
+          playout: false,
+          broadcast: false,
+          mediaModification: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/program-candidates/import',
+  requireRole('admin'),
+  csvUpload.single('file'),
+  (req: Request, res: Response): void => {
+    try {
+      if (!req.file) {
+        res.status(400).json({ error: 'CSV file is required', code: 'CSV_REQUIRED' });
+        return;
+      }
+      const csvContent = req.file.buffer.toString('utf8');
+      const body = req.body as {
+        dryRun?: string;
+        confirmImport?: string;
+        confirmationText?: string;
+      };
+      const dryRun = body.dryRun !== 'false';
+
+      if (!dryRun) {
+        if (body.confirmImport !== 'true') {
+          res.status(400).json({ error: 'Confirm import is required for non-dry-run apply', code: 'CONFIRM_IMPORT_REQUIRED' });
+          return;
+        }
+        if (body.confirmationText !== APPLY_CONFIRMATION_TEXT) {
+          res.status(400).json({
+            error: `Confirmation text mismatch. Expected: "${APPLY_CONFIRMATION_TEXT}"`,
+            code: 'CONFIRMATION_TEXT_MISMATCH',
+          });
+          return;
+        }
+      }
+
+      const result = applyImportPlan({
+        csvContent,
+        importReadyOnly: true,
+        dryRun,
+        confirmationText: dryRun ? APPLY_CONFIRMATION_TEXT : body.confirmationText,
+      });
+
+      if (dryRun) {
+        res.json(result);
+        return;
+      }
+
+      res.status(201).json(result);
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
 
 schedulerFoundationRouter.get('/program-candidates', (_req: Request, res: Response): void => {
   res.json(generateProgramCandidatesFromIndexedFolders({ persist: false }));
