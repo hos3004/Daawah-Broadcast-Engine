@@ -191,8 +191,11 @@ function resolveTickerText() {
   }
   const activeScheduleText = loadTickerTextFromActiveSchedule();
   if (activeScheduleText) return { source: 'active-published-schedule', text: activeScheduleText };
+  if (process.env.TEST_OVERLAY_ALLOW_PLAYLIST_TICKER_FALLBACK !== 'true') {
+    throw new Error('No active published schedule is available for the Arabic ticker. Publish/activate a schedule, pass TEST_OVERLAY_TICKER_TEXT, or set TEST_OVERLAY_ALLOW_PLAYLIST_TICKER_FALLBACK=true explicitly.');
+  }
   return {
-    source: 'source-playlist-fallback',
+    source: 'source-playlist-fallback-explicit',
     text: buildTickerTextFromSourcePlaylist(),
   };
 }
