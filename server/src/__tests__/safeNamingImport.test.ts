@@ -331,6 +331,55 @@ describe('safe naming import', () => {
       ).get() as { cnt: number };
       expect(reviewCandidates.cnt).toBe(1);
     });
+
+    it('removes stale mappings when canonical path changes between applies', () => {
+      const { initDb, getDb } = require('../db/schema') as typeof import('../db/schema');
+      const { applyImportPlan } = require('../media/safeNamingImport') as typeof import('../media/safeNamingImport');
+      initDb();
+      const db = getDb();
+
+      // First CSV: slug 'برنامج-اسمعني' maps to source path (needs_review type → entity_type=unknown)
+      const csv1 = [
+        'root,original_path,original_name,normalized_name,proposed_display_name,proposed_safe_slug,candidate_type,confidence,review_status,reason,collision_group,slug_collision',
+        'source,/srv/daawah/media/source/برنامج اسمعني,برنامج اسمعني,برنامج اسمعني,برنامج اسمعني,برنامج-اسمعني,needs_review,medium,ready,,,',
+      ].join('\n');
+      const csvPath1 = path.join(tempDir, 'import-v1.csv');
+      fs.writeFileSync(csvPath1, csv1, 'utf8');
+      applyImportPlan({
+        csvPath: csvPath1,
+        dryRun: false,
+        importReadyOnly: true,
+        confirmationText: 'IMPORT SAFE NAMING',
+      });
+
+      const afterFirstRun = db.prepare(
+        "SELECT entity_id, entity_type, safe_slug FROM safe_name_mappings WHERE safe_slug='برنامج-اسمعني'"
+      ).all() as { entity_id: string; entity_type: string; safe_slug: string }[];
+      expect(afterFirstRun).toHaveLength(1);
+      expect(afterFirstRun[0]!.entity_id).toBe('/srv/daawah/media/source/برنامج اسمعني');
+      expect(afterFirstRun[0]!.entity_type).toBe('unknown');
+
+      // Second CSV: same slug now maps to original-ar path (same candidate_type → same entity_type=unknown)
+      const csv2 = [
+        'root,original_path,original_name,normalized_name,proposed_display_name,proposed_safe_slug,candidate_type,confidence,review_status,reason,collision_group,slug_collision',
+        'original-ar,/srv/daawah/media/original-ar/برنامج اسمعني,برنامج اسمعني,برنامج اسمعني,برنامج اسمعني,برنامج-اسمعني,needs_review,medium,ready,,,',
+      ].join('\n');
+      const csvPath2 = path.join(tempDir, 'import-v2.csv');
+      fs.writeFileSync(csvPath2, csv2, 'utf8');
+      applyImportPlan({
+        csvPath: csvPath2,
+        dryRun: false,
+        importReadyOnly: true,
+        confirmationText: 'IMPORT SAFE NAMING',
+      });
+
+      // After second run: old source mapping should be gone, only original-ar remains
+      const afterSecondRun = db.prepare(
+        "SELECT entity_id, safe_slug FROM safe_name_mappings WHERE safe_slug='برنامج-اسمعني'"
+      ).all() as { entity_id: string; safe_slug: string }[];
+      expect(afterSecondRun).toHaveLength(1);
+      expect(afterSecondRun[0]!.entity_id).toBe('/srv/daawah/media/original-ar/برنامج اسمعني');
+    });
   });
 
   describe('readCsvFromFile', () => {

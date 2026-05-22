@@ -480,7 +480,25 @@ export function applyImportPlan(options: {
       updated_at=datetime('now')
   `);
 
+  // Clean up stale mappings whose canonical path changed between CSV runs
+  // (e.g. source/shawwal/... → original-ar/...)
+  const cleanupStale = db.prepare(
+    `DELETE FROM safe_name_mappings
+     WHERE entity_type = ? AND safe_slug = ? AND entity_id != ?`
+  );
+  const seenSlugEntity = new Map<string, string>();
+  for (const m of mappings) {
+    seenSlugEntity.set(`${m.entityType}::${m.safeSlug}`, m.entityId);
+  }
+
   const insertTransaction = db.transaction(() => {
+    for (const [key, entityId] of seenSlugEntity) {
+      const sep = key.indexOf('::');
+      const entityType = key.substring(0, sep);
+      const safeSlug = key.substring(sep + 2);
+      cleanupStale.run(entityType, safeSlug, entityId);
+    }
+
     for (const mapping of mappings) {
       insertMapping.run(
         mapping.id,
