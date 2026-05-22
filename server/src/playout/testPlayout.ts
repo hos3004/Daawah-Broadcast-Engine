@@ -198,6 +198,7 @@ interface ValidatedTestPlayoutPlan {
   planId: string;
   sourcePlaylistPath: string;
   ffconcatInputPath: string;
+  mediaItems: SafeExpandedPlaylistItem[];
   outputMode: TestPlayoutOutputMode;
   outputPath: string;
   durationLimitSeconds: number;
@@ -238,6 +239,8 @@ interface ValidatedTickerOverlay {
 interface OverlayFfmpegGraph {
   inputArgs: string[];
   filterComplex: string;
+  audioLabel: string;
+  videoLabel: string;
 }
 
 interface TestPlayoutPlanRow {
@@ -269,6 +272,7 @@ export function validateTestPlayoutPlan(input: TestPlayoutPlanInput, planId = '_
   const outputMode = normalizeOutputMode(input.outputMode);
   const durationLimitSeconds = normalizeDurationLimit(input.durationLimitSeconds);
   const sourcePlaylistPath = validateSourcePlaylistPath(input.sourcePlaylistPath);
+  const mediaItems = readValidatedPlaylistItems(sourcePlaylistPath);
   const outputPath = validateOutputPath(input.outputPath, outputMode, planId);
   const overlay = validateControlPanelOverlayPlan(input, planId);
 
@@ -276,6 +280,7 @@ export function validateTestPlayoutPlan(input: TestPlayoutPlanInput, planId = '_
     planId,
     sourcePlaylistPath,
     ffconcatInputPath: getExpectedFfconcatPath(sourcePlaylistPath),
+    mediaItems,
     outputMode,
     outputPath,
     durationLimitSeconds,
@@ -341,7 +346,7 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
   const reportPath = path.join(runDir, 'report.md');
   const ffmpegLogPath = path.join(runDir, 'ffmpeg.log');
   const startedAt = new Date().toISOString();
-  const playlistItems = readPlaylistItems(validated.sourcePlaylistPath);
+  const playlistItems = validated.mediaItems;
   const errors: TestPlayoutError[] = [];
 
   fs.mkdirSync(runDir, { recursive: true });
@@ -545,101 +550,41 @@ export function listTestPlayoutPlans(limit = 50): TestPlayoutPlanDetail[] {
 }
 
 function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCommandPreview {
-  const ffconcatInput = validated.ffconcatInputPath;
-  const overlayGraph = buildOverlayFfmpegGraph(validated.overlay);
-  const hasOverlayGraph = overlayGraph !== null;
+  const mediaGraph = buildMediaConcatFfmpegGraph(validated.mediaItems, validated.overlay);
   const broadcastProfile = getBroadcastNormalizationProfile();
-  const videoNormVf = buildVideoNormVf(broadcastProfile);
-  const audioNormAf = buildAudioNormAf({ audioRate: broadcastProfile.audioRate });
-  const inputArgs = hasOverlayGraph
-    ? [
-        '-re',
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        ffconcatInput,
-        ...overlayGraph.inputArgs,
-      ]
-    : [
-        '-re',
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        ffconcatInput,
-      ];
-  const normalizeEncodeArgs = hasOverlayGraph
-    ? [
-        '-filter_complex',
-        overlayGraph.filterComplex,
-        '-map',
-        '[vout]',
-        '-map',
-        '0:a?',
-        '-af',
-        audioNormAf,
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-crf',
-        '21',
-        '-r',
-        String(broadcastProfile.fps),
-        '-g',
-        String(broadcastProfile.fps * 2),
-        '-keyint_min',
-        String(broadcastProfile.fps * 2),
-        '-sc_threshold',
-        '0',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        config.broadcast.audioBitrate,
-        '-ar',
-        String(broadcastProfile.audioRate),
-        '-ac',
-        '2',
-      ]
-    : [
-        '-vf',
-        videoNormVf,
-        '-af',
-        audioNormAf,
-        '-map',
-        '0:v',
-        '-map',
-        '0:a?',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-crf',
-        '21',
-        '-pix_fmt',
-        'yuv420p',
-        '-r',
-        String(broadcastProfile.fps),
-        '-g',
-        String(broadcastProfile.fps * 2),
-        '-keyint_min',
-        String(broadcastProfile.fps * 2),
-        '-sc_threshold',
-        '0',
-        '-c:a',
-        'aac',
-        '-b:a',
-        config.broadcast.audioBitrate,
-        '-ar',
-        String(broadcastProfile.audioRate),
-        '-ac',
-        '2',
-      ];
+  const inputArgs = mediaGraph.inputArgs;
+  const normalizeEncodeArgs = [
+    '-filter_complex',
+    mediaGraph.filterComplex,
+    '-map',
+    mediaGraph.videoLabel,
+    '-map',
+    mediaGraph.audioLabel,
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '21',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    String(broadcastProfile.fps),
+    '-g',
+    String(broadcastProfile.fps * 2),
+    '-keyint_min',
+    String(broadcastProfile.fps * 2),
+    '-sc_threshold',
+    '0',
+    '-c:a',
+    'aac',
+    '-b:a',
+    config.broadcast.audioBitrate,
+    '-ar',
+    String(broadcastProfile.audioRate),
+    '-ac',
+    '2',
+  ];
   const args = validated.outputMode === 'local_file'
     ? [
         '-hide_banner',
@@ -683,7 +628,7 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
     willExecute: false,
     outputMode: validated.outputMode,
     outputPath: validated.outputPath,
-    overlays: overlayCommandInfo(validated.overlay, overlayGraph?.filterComplex ?? null),
+    overlays: overlayCommandInfo(validated.overlay, mediaGraph.filterComplex),
     safety: {
       ffmpegExecution: false,
       playoutStarted: false,
@@ -697,6 +642,7 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
     notes: [
       'Plan only. This command preview is not executed by this phase.',
       'The source playlist must already be file-expanded and paired with playlist.ffconcat.',
+      'Each media item is opened as an independent FFmpeg input, normalized, then joined with concat filter to avoid mixed-media timestamp drift.',
       'Output target is constrained to generated/test-playout.',
       validated.overlay.enabled
         ? 'Control-panel overlay settings are included in the FFmpeg filter graph for isolated test playout only.'
@@ -722,7 +668,7 @@ function buildExecutableCommandPreview(
     notes: [
       'Isolated execution only. Output remains constrained to generated/test-playout.',
       'No RTMP, stream keys, DNS, production paths, OBS, or cursor mutation are allowed.',
-      'Input is the approved playlist.ffconcat paired with the expanded playlist.json.',
+      'Input is the approved expanded playlist.json; verified-playlist.ffconcat is retained as an audit artifact.',
     ],
   };
 }
@@ -823,19 +769,31 @@ function assertTickerExportHasSchedule(exported: TickerExport, planId: string): 
   );
 }
 
-function buildOverlayFfmpegGraph(overlay: ValidatedOverlayPlan): OverlayFfmpegGraph | null {
-  if (!overlay.enabled || (!overlay.logo && !overlay.ticker)) return null;
-
+function buildMediaConcatFfmpegGraph(
+  items: SafeExpandedPlaylistItem[],
+  overlay: ValidatedOverlayPlan
+): OverlayFfmpegGraph {
   const profile = getBroadcastNormalizationProfile();
   const width = overlay.ticker?.resolutionWidth ?? profile.width;
   const height = overlay.ticker?.resolutionHeight ?? profile.height;
   const fps = profile.fps;
-  const filters: string[] = [
-    `[0:v]${buildVideoNormVf({ width, height, fps })}[vbase]`,
-  ];
+  const videoNormVf = buildVideoNormVf({ width, height, fps });
+  const audioNormAf = buildAudioNormAf({ audioRate: profile.audioRate });
+  const filters: string[] = [];
   const inputArgs: string[] = [];
-  let lastLabel = '[vbase]';
-  let inputIndex = 1;
+  const concatLabels: string[] = [];
+
+  items.forEach((item, index) => {
+    inputArgs.push('-re', '-t', formatSeconds(item.durationSeconds), '-i', item.absolutePath);
+    filters.push(`[${index}:v]${videoNormVf}[v${index}]`);
+    filters.push(`[${index}:a]${audioNormAf}[a${index}]`);
+    concatLabels.push(`[v${index}][a${index}]`);
+  });
+
+  filters.push(`${concatLabels.join('')}concat=n=${items.length}:v=1:a=1[vconcat][aconcat]`);
+
+  let lastLabel = '[vconcat]';
+  let inputIndex = items.length;
 
   if (overlay.ticker) {
     const fontsDir = resolveSubtitleFontsDir();
@@ -857,9 +815,12 @@ function buildOverlayFfmpegGraph(overlay: ValidatedOverlayPlan): OverlayFfmpegGr
   }
 
   filters.push(`${lastLabel}null[vout]`);
+  filters.push('[aconcat]anull[aout]');
   return {
     inputArgs,
     filterComplex: filters.join(';'),
+    videoLabel: '[vout]',
+    audioLabel: '[aout]',
   };
 }
 
@@ -997,6 +958,11 @@ function readPlaylistArtifact(playlistPath: string): PlaylistArtifact {
   } catch {
     throw new DraftValidationError('Source playlist artifact is not valid JSON', 'SOURCE_PLAYLIST_INVALID');
   }
+}
+
+function readValidatedPlaylistItems(playlistPath: string): SafeExpandedPlaylistItem[] {
+  const artifact = readPlaylistArtifact(playlistPath);
+  return validateExpandedPlaylistItems(artifact.items);
 }
 
 function validateExpandedPlaylistItems(itemsValue: unknown): SafeExpandedPlaylistItem[] {

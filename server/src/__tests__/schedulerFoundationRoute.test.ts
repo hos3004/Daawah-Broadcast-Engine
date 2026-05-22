@@ -1258,12 +1258,11 @@ describe('scheduler foundation routes', () => {
     expect(fs.existsSync(body.run.artifacts.ffmpegLogPath)).toBe(true);
     expect(spawnSpy).toHaveBeenCalledTimes(1);
     const args = spawnSpy.mock.calls[0]?.[1] as string[];
-    const inputIndex = args.indexOf('-i');
-    expect(inputIndex).toBeGreaterThanOrEqual(0);
-    const verifiedFfconcatPath = args[inputIndex + 1];
-    if (!verifiedFfconcatPath) throw new Error('Missing verified ffconcat path in FFmpeg args');
-    expect(path.resolve(verifiedFfconcatPath)).toContain(`${path.resolve(tempDir, 'generated', 'test-playout')}${path.sep}`);
-    expect(path.basename(verifiedFfconcatPath)).toBe('verified-playlist.ffconcat');
+    expect(args).toContain('-filter_complex');
+    expect(args.join(' ')).toContain('concat=n=1:v=1:a=1');
+    expect(args.join(' ')).not.toContain('-f concat');
+    const runDir = path.dirname(body.run.artifacts.statusPath);
+    const verifiedFfconcatPath = path.join(runDir, 'verified-playlist.ffconcat');
     expect(fs.readFileSync(verifiedFfconcatPath, 'utf8')).toContain('expanded-1.mp4');
     spawnSpy.mockRestore();
   });
