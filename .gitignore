@@ -9,6 +9,7 @@ assets/overlays/tickers/
 assets/overlays/now-playing/
 /var/
 logs/
+generated/
 *.log
 .DS_Store
 Thumbs.db

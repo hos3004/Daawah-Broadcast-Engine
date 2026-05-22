@@ -30,8 +30,10 @@ import {
 import {
   listTestPlayoutPlans,
   readTestPlayoutPlan,
+  runIsolatedTestPlayout,
   writeTestPlayoutPlan,
   type TestPlayoutPlanInput,
+  type TestPlayoutRunInput,
 } from '../../playout/testPlayout';
 import {
   previewExcelImport,
@@ -449,6 +451,35 @@ schedulerFoundationRouter.get(
         broadcastStarted: false,
       },
     });
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/test-playout/runs',
+  requireRole('admin'),
+  async (req: Request, res: Response): Promise<void> => {
+    const body = req.body as TestPlayoutRunInput;
+
+    try {
+      const run = await runIsolatedTestPlayout(body);
+      res.status(run.status === 'completed' ? 201 : 500).json({
+        mode: 'test-playout-run',
+        run,
+        safety: {
+          isolated: true,
+          ffmpegExecution: true,
+          playoutStarted: true,
+          broadcastStarted: false,
+          rtmpPush: false,
+          streamKeyUsage: false,
+          cursorUpdates: false,
+          dnsChanges: false,
+          productionPaths: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
   }
 );
 

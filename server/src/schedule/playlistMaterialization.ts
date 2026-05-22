@@ -8,7 +8,12 @@ import {
   getPublishedSchedule,
   type PublishedScheduleDetail,
 } from './drafts';
-import { parseTimeToMinutes } from './excelPreview';
+import {
+  expandPublishedScheduleToFiles,
+  renderFfconcat,
+  type ExpandedPlaylistItem,
+  type PlaylistExpansionSummary as FileExpansionSummary,
+} from './playlistExpansion';
 
 export interface PlaylistMaterializationDryRunInput {
   confirmDryRun?: boolean;
@@ -48,9 +53,14 @@ export interface PlaylistMaterializationSummary {
   gapFillerItemCount: number;
   totalScheduledMinutes: number;
   totalGapMinutes: number;
-  mediaExpansionAvailable: false;
+  mediaExpansionAvailable: boolean;
   missingMediaFileCount: number;
   unknownDurationCount: number;
+  overlapCount: number;
+  negativeGapCount: number;
+  unfilledGapCount: number;
+  testPlayoutEligible: boolean;
+  ffconcatPath: string | null;
   outputPath: string;
   safety: {
     publish: false;
@@ -65,24 +75,7 @@ export interface PlaylistMaterializationSummary {
   };
 }
 
-export interface MaterializedPlaylistItem {
-  id: string;
-  date: string;
-  type: 'program' | 'gap_filler';
-  source: string;
-  programKey: string | null;
-  title: string;
-  startTime: string;
-  endTime: string;
-  durationMinutes: number;
-  durationSeconds: number;
-  absolutePath: null;
-  relativePath: null;
-  trimStartSeconds: 0;
-  trimEndSeconds: 0;
-  isTrimmed: false;
-  validationStatus: 'media_expansion_unavailable';
-}
+export type MaterializedPlaylistItem = ExpandedPlaylistItem;
 
 export interface PlaylistMaterializationRunDetail {
   id: string;
@@ -154,13 +147,30 @@ export function createPlaylistMaterializationDryRun(input: PlaylistMaterializati
   const runId = uuidv4();
   const paths = validateOutputRoot(validated.outputRoot, runId);
   const createdAt = new Date().toISOString();
-  const warnings: PlaylistMaterializationWarning[] = [{
-    code: 'MEDIA_FILE_EXPANSION_NOT_AVAILABLE',
-    message: 'Dry-run playlist foundation used the published schedule snapshot only; no media file expansion was attempted.',
-  }];
-  const errors: PlaylistMaterializationError[] = [];
-  const playlist = buildPlaylistSnapshot(validated.schedule, runId, createdAt);
-  const summary = buildSummary(validated.schedule, runId, paths.runDir, playlist.items, warnings, errors);
+  const expansion = expandPublishedScheduleToFiles(validated.schedule);
+  const warnings: PlaylistMaterializationWarning[] = expansion.warnings;
+  const errors: PlaylistMaterializationError[] = expansion.errors;
+  const ffconcatPath = expansion.summary.mediaExpansionAvailable
+    ? path.join(paths.runDir, 'playlist.ffconcat')
+    : null;
+  const playlist = buildPlaylistSnapshot(
+    validated.schedule,
+    runId,
+    createdAt,
+    expansion.items,
+    expansion.summary.mediaExpansionAvailable,
+    ffconcatPath
+  );
+  const summary = buildSummary(
+    validated.schedule,
+    runId,
+    paths.runDir,
+    playlist.items,
+    warnings,
+    errors,
+    expansion.summary,
+    ffconcatPath
+  );
   const status: 'completed' | 'failed' = errors.length === 0 ? 'completed' : 'failed';
   summary.status = status;
 
@@ -168,6 +178,9 @@ export function createPlaylistMaterializationDryRun(input: PlaylistMaterializati
   try {
     fs.mkdirSync(paths.runDir, { recursive: true });
     writeJsonWithin(paths.generatedRoot, path.join(paths.runDir, 'playlist.json'), playlist);
+    if (ffconcatPath) {
+      writeTextWithin(paths.generatedRoot, ffconcatPath, renderFfconcat(playlist.items));
+    }
     writeJsonWithin(paths.generatedRoot, path.join(paths.runDir, 'report.json'), {
       runId,
       summary,
@@ -216,6 +229,9 @@ export function createPlaylistMaterializationDryRun(input: PlaylistMaterializati
           warningCount: warnings.length,
           errorCount: errors.length,
           dryRun: true,
+          mediaExpansionAvailable: summary.mediaExpansionAvailable,
+          testPlayoutEligible: summary.testPlayoutEligible,
+          ffconcatPath,
           cursorMutation: false,
           playout: false,
           broadcast: false,
@@ -302,40 +318,25 @@ function validateOutputRoot(outputRoot?: string, runId?: string): SafeOutputPath
   };
 }
 
-function buildPlaylistSnapshot(schedule: PublishedScheduleDetail, runId: string, generatedAt: string): {
+function buildPlaylistSnapshot(
+  schedule: PublishedScheduleDetail,
+  runId: string,
+  generatedAt: string,
+  items: MaterializedPlaylistItem[],
+  mediaExpansionAvailable: boolean,
+  ffconcatPath: string | null
+): {
   runId: string;
   scheduleId: string;
   scheduleName: string;
   timezone: string;
   generatedAt: string;
   dryRun: true;
+  mediaExpansionAvailable: boolean;
+  ffconcatPath: string | null;
   days: Array<{ date: string; itemCount: number }>;
   items: MaterializedPlaylistItem[];
 } {
-  const items: MaterializedPlaylistItem[] = [];
-  for (const day of schedule.schedulePreview.days) {
-    for (const row of day.rows) {
-      const durationMinutes = normalizeDuration(row.duration_minutes, row.start_time, row.end_time);
-      items.push({
-        id: `${day.date}-${items.length + 1}`,
-        date: day.date,
-        type: row.type === 'gap' ? 'gap_filler' : 'program',
-        source: row.row === null ? `${day.date}:gap:${row.start_time}` : `excel-row:${row.row}`,
-        programKey: row.program_key,
-        title: row.title,
-        startTime: row.start_time,
-        endTime: row.end_time,
-        durationMinutes,
-        durationSeconds: durationMinutes * 60,
-        absolutePath: null,
-        relativePath: null,
-        trimStartSeconds: 0,
-        trimEndSeconds: 0,
-        isTrimmed: false,
-        validationStatus: 'media_expansion_unavailable',
-      });
-    }
-  }
   return {
     runId,
     scheduleId: schedule.id,
@@ -343,9 +344,11 @@ function buildPlaylistSnapshot(schedule: PublishedScheduleDetail, runId: string,
     timezone: schedule.timezone,
     generatedAt,
     dryRun: true,
+    mediaExpansionAvailable,
+    ffconcatPath,
     days: schedule.schedulePreview.days.map(day => ({
       date: day.date,
-      itemCount: day.rows.length,
+      itemCount: items.filter(item => item.date === day.date).length,
     })),
     items,
   };
@@ -357,10 +360,13 @@ function buildSummary(
   outputPath: string,
   items: MaterializedPlaylistItem[],
   warnings: PlaylistMaterializationWarning[],
-  errors: PlaylistMaterializationError[]
+  errors: PlaylistMaterializationError[],
+  expansionSummary: FileExpansionSummary,
+  ffconcatPath: string | null
 ): PlaylistMaterializationSummary {
   const scheduledItems = items.filter(item => item.type === 'program');
   const gapItems = items.filter(item => item.type === 'gap_filler');
+  const testPlayoutEligible = expansionSummary.mediaExpansionAvailable && ffconcatPath !== null;
   return {
     runId,
     mode: 'dry_run',
@@ -380,9 +386,14 @@ function buildSummary(
     gapFillerItemCount: gapItems.length,
     totalScheduledMinutes: sumMinutes(scheduledItems),
     totalGapMinutes: sumMinutes(gapItems),
-    mediaExpansionAvailable: false,
-    missingMediaFileCount: 0,
-    unknownDurationCount: 0,
+    mediaExpansionAvailable: expansionSummary.mediaExpansionAvailable,
+    missingMediaFileCount: expansionSummary.missingMediaFileCount,
+    unknownDurationCount: expansionSummary.unknownDurationCount,
+    overlapCount: expansionSummary.overlapCount,
+    negativeGapCount: expansionSummary.negativeGapCount,
+    unfilledGapCount: expansionSummary.unfilledGapCount,
+    testPlayoutEligible,
+    ffconcatPath,
     outputPath,
     safety: {
       publish: false,
@@ -424,6 +435,13 @@ function renderMarkdownReport(
 - Gap filler items: ${summary.gapFillerItemCount}
 - Total scheduled minutes: ${summary.totalScheduledMinutes}
 - Total gap minutes: ${summary.totalGapMinutes}
+- Media expansion available: ${summary.mediaExpansionAvailable}
+- Missing media files: ${summary.missingMediaFileCount}
+- Unknown durations: ${summary.unknownDurationCount}
+- Timeline overlaps: ${summary.overlapCount}
+- Unfilled gaps: ${summary.unfilledGapCount}
+- Test playout eligible: ${summary.testPlayoutEligible}
+- FFconcat path: ${summary.ffconcatPath ?? 'none'}
 - Status: ${summary.status}
 
 ## Safety
@@ -489,14 +507,6 @@ function isPathInside(candidatePath: string, rootPath: string): boolean {
   const root = path.resolve(rootPath);
   const candidate = path.resolve(candidatePath);
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
-}
-
-function normalizeDuration(durationMinutes: number, startTime: string, endTime: string): number {
-  if (Number.isFinite(durationMinutes) && durationMinutes > 0) return durationMinutes;
-  const start = parseTimeToMinutes(startTime);
-  const end = parseTimeToMinutes(endTime);
-  if (start === null || end === null || end <= start) return 0;
-  return end - start;
 }
 
 function sumMinutes(items: MaterializedPlaylistItem[]): number {
