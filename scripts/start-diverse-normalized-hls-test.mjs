@@ -12,7 +12,7 @@ const publicHost = process.env.TEST_HLS_PUBLIC_HOST || '144.91.124.112';
 const port = Number(process.env.TEST_HLS_PORT || 18080);
 const qcReportPath = process.env.QC_REPORT_PATH ||
   path.join(projectRoot, 'reports', 'ffprobe-qc-source-bumpers-2026-05-21T07-09-32-651Z.json');
-const runId = process.env.RUN_ID || `diverse-normalized-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+const runId = process.env.RUN_ID || `diverse-realtime-filter-normalized-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 const programClipSeconds = Number(process.env.PROGRAM_CLIP_SECONDS || 180);
 const bumperClipSeconds = Number(process.env.BUMPER_CLIP_SECONDS || 30);
 const runDir = path.join(projectRoot, 'generated', 'test-playout', runId);
@@ -40,26 +40,26 @@ const files = qc.files.filter(file =>
 );
 
 const programs = [
-  pick('source', ['Fahad Alkandari'], 'program', 90),
+  pick('source', ['Fahad Alkandari', '01 (1).mp4'], 'program', 90),
   pick('source', ['Nahla Abdallah'], 'program', 90),
-  pick('source', ['kids/kessas/'], 'program', 90),
-  pick('source', ['على الثغور'], 'program', 90),
-  pick('source', ['series/001.mp4'], 'program', 90),
+  pick('source', ['kids/CLEP ATFAAL/CLEP ATFAAL-1.mp4'], 'program', 90),
+  pick('source', ['shawwal/', '720p_25fps_H264-128kbit_AAC'], 'program', 45),
+  pick('source', ['shawwal/', '10-)', '60fps_H264-48kbit_AAC'], 'program', 300),
 ];
 
 const bumpers = [
-  pick('bumpers', ['logo-sting/k (3).mp4'], 'main', 3),
-  pick('bumpers', ['sting-hag/LOGO DA-25.mp4'], 'seasonal', 3),
-  pick('bumpers', ['general/AADAB ISLAMIA/MONAGAT SAIM-1.mp4'], 'general', 3),
-  pick('bumpers', ['logo-sting/LOGO DA-2.mp4'], 'main', 3),
-  pick('bumpers', ['general/AHADITH DAAWAH/AHADITH-12.mp4'], 'general', 3),
-  pick('bumpers', ['general/DOAA/DOOAA-1.mp4'], 'general', 3),
-  pick('bumpers', ['logo-sting/sting 01.mp4'], 'main', 3),
-  pick('bumpers', ['sting-hag/LOGO DA-3.mp4'], 'seasonal', 3),
-  pick('bumpers', ['general/CLIP DAAWAH/CLIP D-1.mp4'], 'general', 3),
-  pick('bumpers', ['logo-sting/sting 02.mp4'], 'main', 3),
-  pick('bumpers', ['general/جرافيك/ZAD-INFO003_1.mp4'], 'general', 3),
-  pick('bumpers', ['general/CLEP/CLEP-1.mp4'], 'general', 3),
+  pick('bumpers', ['sting-hag/LOGO DA-25.mp4'], 'seasonal', 8),
+  pick('bumpers', ['general/AHADITH DAAWAH/AHADITH-12.mp4'], 'general', 8),
+  pick('bumpers', ['general/DOAA/DOOAA-13.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLIP DAAWAH/CLIP D-1.mp4'], 'general', 8),
+  pick('bumpers', ['general/gazwaat/'], 'general', 8),
+  pick('bumpers', ['general/finnnal-', 'HadQud0026.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLEP/CLEP-23.mp4'], 'general', 8),
+  pick('bumpers', ['general/AHADITH DAAWAH/AHADITH-21.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLIP DAAWAH/CLIP D-4.mp4'], 'general', 8),
+  pick('bumpers', ['general/DOAA/DOOAA-82.mp4'], 'general', 8),
+  pick('bumpers', ['general/finnnal-', 'HadQud0034.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLEP/CLEP-40.mp4'], 'general', 8),
 ];
 
 const sequence = [
@@ -91,7 +91,7 @@ const ffmpegArgs = [
   '+genpts',
 ];
 for (const item of sequence) {
-  ffmpegArgs.push('-re', '-i', item.absolutePath);
+  ffmpegArgs.push('-i', item.absolutePath);
 }
 ffmpegArgs.push(
   '-filter_complex', filterComplex,
@@ -213,7 +213,9 @@ function buildFilterComplex(items) {
     );
     concatInputs.push(`[v${index}][a${index}]`);
   });
-  chains.push(`${concatInputs.join('')}concat=n=${items.length}:v=1:a=1[vout][aout]`);
+  chains.push(`${concatInputs.join('')}concat=n=${items.length}:v=1:a=1[vcat][acat]`);
+  chains.push('[vcat]realtime[vout]');
+  chains.push('[acat]arealtime[aout]');
   return chains.join(';');
 }
 
@@ -221,7 +223,7 @@ function writeArtifacts() {
   const playlist = {
     runId,
     generatedAt: new Date().toISOString(),
-    mode: 'diverse-normalized-hls-test',
+    mode: 'diverse-realtime-filter-normalized-hls-test',
     qcReportPath,
     publicTestUrl,
     totalDurationSeconds: cursor,
@@ -231,7 +233,7 @@ function writeArtifacts() {
       enabled: true,
       runtimeOnly: true,
       mediaFilesModified: false,
-      implementation: 'ffmpeg concat filter with per-input scale/fps/audio resample normalization',
+      implementation: 'ffmpeg concat filter with per-input trim/scale/fps/audio resample normalization and realtime/arealtime output pacing',
       targetProfile,
     },
     mediaRootsUsed: ['/srv/daawah/media/source', '/srv/daawah/media/bumpers'],
@@ -468,7 +470,7 @@ function startFfmpeg() {
 async function finalize() {
   const errors = errorSummary();
   const report = [
-    '# Diverse Normalized HLS Test Final Report',
+    '# Diverse Realtime Filter Normalized HLS Test Final Report',
     '',
     '- runId: ' + config.runId,
     '- status: ' + status,
@@ -535,7 +537,7 @@ function renderManifest(items) {
 }
 
 function renderReport(playlist) {
-  return `# Diverse Normalized HLS Test Start Report
+  return `# Diverse Realtime Filter Normalized HLS Test Start Report
 
 - runId: ${runId}
 - public test URL: ${publicTestUrl}
@@ -553,7 +555,7 @@ function renderReport(playlist) {
 - target fps: ${targetProfile.fps}
 - target pixel format: ${targetProfile.pixelFormat}
 - target audio: ${targetProfile.audioSampleRate} Hz stereo
-- implementation: FFmpeg concat filter, per-input trim, scale/pad/fps, aresample async
+- implementation: FFmpeg concat filter, per-input trim, scale/pad/fps, aresample async, realtime/arealtime pacing
 
 ## Sequence
 
