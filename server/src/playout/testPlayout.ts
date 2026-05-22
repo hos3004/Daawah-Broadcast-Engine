@@ -790,7 +790,9 @@ function buildMediaConcatFfmpegGraph(
     concatLabels.push(`[v${index}][a${index}]`);
   });
 
-  filters.push(`${concatLabels.join('')}concat=n=${items.length}:v=1:a=1[vconcat][aconcat]`);
+  filters.push(`${concatLabels.join('')}concat=n=${items.length}:v=1:a=1[vconcat_raw][aconcat_raw]`);
+  filters.push('[vconcat_raw]realtime[vconcat]');
+  filters.push('[aconcat_raw]arealtime[aconcat]');
 
   let lastLabel = '[vconcat]';
   let inputIndex = items.length;
