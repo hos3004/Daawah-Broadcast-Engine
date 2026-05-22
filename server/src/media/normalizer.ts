@@ -2,8 +2,8 @@
  * FFmpeg filter helpers for normalising media before playout.
  *
  * Resolution  → scale + pad to target, preserving aspect ratio
- * FPS         → fps filter + settb to enforce CFR timebase
- * Audio       → aresample to target rate, aformat to packed stereo (fltp)
+ * FPS         → fps filter + setpts/settb to enforce CFR timestamps
+ * Audio       → aresample + asetpts, aformat to packed stereo (fltp)
  *
  * Audio mapping uses -map 0:a? at call-site so missing-audio clips
  * are handled gracefully (silence gap filled by downstream mux).
@@ -34,7 +34,7 @@ export interface FilterComplexResult {
 
 /**
  * Returns a -vf string that normalises a single video stream:
- *   scale → pad → setsar → fps → settb
+ *   scale → pad → setsar → fps → setpts → settb
  */
 export function buildVideoNormVf(video: VideoNormOpts): string {
   const { width: w, height: h, fps } = video;
@@ -43,21 +43,22 @@ export function buildVideoNormVf(video: VideoNormOpts): string {
     `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`,
     'setsar=1',
     `fps=${fps}`,
+    `setpts=N/(${fps}*TB)`,
     `settb=1/${fps}`,
   ].join(',');
 }
 
 /**
- * Returns an -af string: resample to target rate, packed stereo.
+ * Returns an -af string: resample to target rate, reset audio timestamps, packed stereo.
  * Safe to apply even when source already matches target.
  */
 export function buildAudioNormAf(audio: AudioNormOpts): string {
-  return `aresample=${audio.audioRate},aformat=sample_fmts=fltp:channel_layouts=stereo`;
+  return `aresample=${audio.audioRate}:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo`;
 }
 
 /**
  * Builds a filter_complex string that:
- *   1. Normalises video (scale/pad/fps/settb)
+ *   1. Normalises video (scale/pad/fps/setpts/settb)
  *   2. Optionally overlays a logo WebM (with stream_loop -1)
  *   3. Optionally overlays a ticker WebM at tickerY
  *
