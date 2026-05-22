@@ -4,6 +4,13 @@ import childProcess from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/schema';
 import { DraftValidationError } from '../schedule/drafts';
+import {
+  exportTickerAss,
+  getLogoAsset,
+  getOverlaySettings,
+  type LogoOverlaySettings,
+  type TickerExport,
+} from '../overlays/controlPanel';
 
 export type TestPlayoutOutputMode = 'local_file' | 'localhost_hls';
 
@@ -13,6 +20,8 @@ export interface TestPlayoutPlanInput {
   outputMode?: TestPlayoutOutputMode;
   outputPath?: string;
   durationLimitSeconds?: number;
+  useControlPanelOverlays?: boolean;
+  overlayDate?: string;
   [key: string]: unknown;
 }
 
@@ -39,6 +48,7 @@ export interface TestPlayoutCommandPreview {
   willExecute: false;
   outputMode: TestPlayoutOutputMode;
   outputPath: string;
+  overlays: TestPlayoutOverlayCommandInfo;
   safety: {
     ffmpegExecution: false;
     playoutStarted: false;
@@ -50,6 +60,19 @@ export interface TestPlayoutCommandPreview {
     dnsChanges: false;
   };
   notes: string[];
+}
+
+export interface TestPlayoutOverlayCommandInfo {
+  source: 'none' | 'control-panel';
+  enabled: boolean;
+  previewOnly: boolean;
+  logoEnabled: boolean;
+  logoPath: string | null;
+  tickerEnabled: boolean;
+  tickerAssPath: string | null;
+  tickerDate: string | null;
+  tickerScheduleItemCount: number;
+  filterComplex: string | null;
 }
 
 export interface TestPlayoutPlanDetail {
@@ -84,6 +107,7 @@ export interface TestPlayoutRunDetail {
     willExecute: true;
     outputMode: TestPlayoutOutputMode;
     outputPath: string;
+    overlays: TestPlayoutOverlayCommandInfo;
     safety: {
       ffmpegExecution: boolean;
       playoutStarted: boolean;
@@ -175,6 +199,43 @@ interface ValidatedTestPlayoutPlan {
   outputMode: TestPlayoutOutputMode;
   outputPath: string;
   durationLimitSeconds: number;
+  overlay: ValidatedOverlayPlan;
+}
+
+interface ValidatedOverlayPlan {
+  source: 'none' | 'control-panel';
+  enabled: boolean;
+  previewOnly: boolean;
+  date: string | null;
+  logo: ValidatedLogoOverlay | null;
+  ticker: ValidatedTickerOverlay | null;
+}
+
+interface ValidatedLogoOverlay {
+  path: string;
+  position: LogoOverlaySettings['position'];
+  xMargin: number;
+  yMargin: number;
+  customX: number | null;
+  customY: number | null;
+  width: number | null;
+  height: number | null;
+  scale: number;
+  opacity: number;
+}
+
+interface ValidatedTickerOverlay {
+  assPath: string;
+  text: string;
+  fontFamily: string;
+  scheduleItemCount: number;
+  resolutionWidth: number;
+  resolutionHeight: number;
+}
+
+interface OverlayFfmpegGraph {
+  inputArgs: string[];
+  filterComplex: string;
 }
 
 interface TestPlayoutPlanRow {
@@ -207,6 +268,7 @@ export function validateTestPlayoutPlan(input: TestPlayoutPlanInput, planId = '_
   const durationLimitSeconds = normalizeDurationLimit(input.durationLimitSeconds);
   const sourcePlaylistPath = validateSourcePlaylistPath(input.sourcePlaylistPath);
   const outputPath = validateOutputPath(input.outputPath, outputMode, planId);
+  const overlay = validateControlPanelOverlayPlan(input, planId);
 
   return {
     planId,
@@ -215,6 +277,7 @@ export function validateTestPlayoutPlan(input: TestPlayoutPlanInput, planId = '_
     outputMode,
     outputPath,
     durationLimitSeconds,
+    overlay,
   };
 }
 
@@ -481,12 +544,10 @@ export function listTestPlayoutPlans(limit = 50): TestPlayoutPlanDetail[] {
 
 function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCommandPreview {
   const ffconcatInput = validated.ffconcatInputPath;
-  const args = validated.outputMode === 'local_file'
+  const overlayGraph = buildOverlayFfmpegGraph(validated.overlay);
+  const hasOverlayGraph = overlayGraph !== null;
+  const inputArgs = hasOverlayGraph
     ? [
-        '-hide_banner',
-        '-nostdin',
-        '-loglevel',
-        'info',
         '-re',
         '-f',
         'concat',
@@ -494,8 +555,61 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '0',
         '-i',
         ffconcatInput,
+        ...overlayGraph.inputArgs,
+      ]
+    : [
+        '-re',
+        '-f',
+        'concat',
+        '-safe',
+        '0',
+        '-i',
+        ffconcatInput,
+      ];
+  const overlayArgs = hasOverlayGraph
+    ? [
+        '-filter_complex',
+        overlayGraph.filterComplex,
+        '-map',
+        '[vout]',
+        '-map',
+        '0:a?',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-r',
+        '25',
+        '-g',
+        '150',
+        '-keyint_min',
+        '150',
+        '-sc_threshold',
+        '0',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-ar',
+        '48000',
+        '-ac',
+        '2',
+      ]
+    : [];
+  const args = validated.outputMode === 'local_file'
+    ? [
+        '-hide_banner',
+        '-nostdin',
+        '-loglevel',
+        'info',
+        ...inputArgs,
         '-t',
         String(validated.durationLimitSeconds),
+        ...overlayArgs,
         '-movflags',
         '+faststart',
         '-y',
@@ -506,15 +620,10 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '-nostdin',
         '-loglevel',
         'info',
-        '-re',
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        ffconcatInput,
+        ...inputArgs,
         '-t',
         String(validated.durationLimitSeconds),
+        ...overlayArgs,
         '-f',
         'hls',
         '-hls_time',
@@ -534,6 +643,7 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
     willExecute: false,
     outputMode: validated.outputMode,
     outputPath: validated.outputPath,
+    overlays: overlayCommandInfo(validated.overlay, overlayGraph?.filterComplex ?? null),
     safety: {
       ffmpegExecution: false,
       playoutStarted: false,
@@ -548,6 +658,9 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
       'Plan only. This command preview is not executed by this phase.',
       'The source playlist must already be file-expanded and paired with playlist.ffconcat.',
       'Output target is constrained to generated/test-playout.',
+      validated.overlay.enabled
+        ? 'Control-panel overlay settings are included in the FFmpeg filter graph for isolated test playout only.'
+        : 'Control-panel overlays are disabled for this command.',
     ],
   };
 }
@@ -572,6 +685,198 @@ function buildExecutableCommandPreview(
       'Input is the approved playlist.ffconcat paired with the expanded playlist.json.',
     ],
   };
+}
+
+function validateControlPanelOverlayPlan(input: TestPlayoutPlanInput, planId: string): ValidatedOverlayPlan {
+  if (input.useControlPanelOverlays !== true) {
+    return {
+      source: 'none',
+      enabled: false,
+      previewOnly: true,
+      date: null,
+      logo: null,
+      ticker: null,
+    };
+  }
+
+  const settings = getOverlaySettings();
+  const date = normalizeOverlayDate(input.overlayDate);
+  const logo = settings.logo.enabled ? resolveControlPanelLogoOverlay(settings.logo) : null;
+  const ticker = settings.ticker.enabled ? resolveControlPanelTickerOverlay(date, planId) : null;
+
+  if (!logo && !ticker) {
+    return {
+      source: 'control-panel',
+      enabled: false,
+      previewOnly: true,
+      date,
+      logo: null,
+      ticker: null,
+    };
+  }
+
+  return {
+    source: 'control-panel',
+    enabled: true,
+    previewOnly: true,
+    date,
+    logo,
+    ticker,
+  };
+}
+
+function resolveControlPanelLogoOverlay(settings: LogoOverlaySettings): ValidatedLogoOverlay {
+  const logoPath = settings.logoAssetId
+    ? getLogoAsset(settings.logoAssetId)?.absolutePath
+    : settings.logoPath;
+  if (!logoPath) {
+    throw new DraftValidationError('Control-panel logo overlay is enabled but no logo asset/path is configured', 'CONTROL_PANEL_LOGO_ASSET_REQUIRED');
+  }
+  const resolved = path.resolve(logoPath);
+  if (!fs.existsSync(resolved)) {
+    throw new DraftValidationError('Control-panel logo overlay asset was not found', 'CONTROL_PANEL_LOGO_ASSET_NOT_FOUND', 404);
+  }
+  const normalized = resolved.replace(/\\/g, '/').toLowerCase();
+  if (normalized.includes('/srv/daawah/media') || normalized.includes('/var/www') || normalized.includes('/srv/daawah/live')) {
+    throw new DraftValidationError('Control-panel logo overlay asset points at a forbidden path', 'CONTROL_PANEL_LOGO_ASSET_FORBIDDEN');
+  }
+
+  return {
+    path: resolved,
+    position: settings.position,
+    xMargin: settings.xMargin,
+    yMargin: settings.yMargin,
+    customX: settings.customX,
+    customY: settings.customY,
+    width: settings.width,
+    height: settings.height,
+    scale: settings.scale,
+    opacity: settings.opacity,
+  };
+}
+
+function resolveControlPanelTickerOverlay(date: string | null, planId: string): ValidatedTickerOverlay {
+  const exported = exportTickerAss({
+    mode: 'today',
+    date: date ?? undefined,
+  });
+  assertTickerExportHasSchedule(exported, planId);
+  if (!fs.existsSync(exported.tickerAssPath)) {
+    throw new DraftValidationError('Control-panel ticker ASS file was not written', 'CONTROL_PANEL_TICKER_ASS_NOT_FOUND', 404);
+  }
+
+  return {
+    assPath: exported.tickerAssPath,
+    text: exported.text,
+    fontFamily: exported.settings.fontFamily,
+    scheduleItemCount: exported.scheduleItems.length,
+    resolutionWidth: exported.settings.resolutionWidth,
+    resolutionHeight: exported.settings.resolutionHeight,
+  };
+}
+
+function assertTickerExportHasSchedule(exported: TickerExport, planId: string): void {
+  if (exported.scheduleItems.length > 0) return;
+  throw new DraftValidationError(
+    `Control-panel ticker requested for test playout ${planId}, but the active published schedule returned no items`,
+    'CONTROL_PANEL_TICKER_SCHEDULE_EMPTY'
+  );
+}
+
+function buildOverlayFfmpegGraph(overlay: ValidatedOverlayPlan): OverlayFfmpegGraph | null {
+  if (!overlay.enabled || (!overlay.logo && !overlay.ticker)) return null;
+
+  const width = overlay.ticker?.resolutionWidth ?? 1280;
+  const height = overlay.ticker?.resolutionHeight ?? 720;
+  const filters: string[] = [
+    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=25[vbase]`,
+  ];
+  const inputArgs: string[] = [];
+  let lastLabel = '[vbase]';
+  let inputIndex = 1;
+
+  if (overlay.ticker) {
+    const fontsDir = resolveSubtitleFontsDir();
+    const subtitlesFilter = fontsDir
+      ? `subtitles=${ffmpegFilterValue(overlay.ticker.assPath)}:fontsdir=${ffmpegFilterValue(fontsDir)}`
+      : `subtitles=${ffmpegFilterValue(overlay.ticker.assPath)}`;
+    filters.push(`${lastLabel}${subtitlesFilter}[vticker]`);
+    lastLabel = '[vticker]';
+  }
+
+  if (overlay.logo) {
+    inputArgs.push('-loop', '1', '-i', overlay.logo.path);
+    const logoWidth = overlay.logo.width ?? Math.max(1, Math.round(width * overlay.logo.scale));
+    const logoHeight = overlay.logo.height ?? -1;
+    filters.push(`[${inputIndex}:v]format=rgba,colorchannelmixer=aa=${formatFilterNumber(overlay.logo.opacity)},scale=${logoWidth}:${logoHeight}[vlogo]`);
+    filters.push(`${lastLabel}[vlogo]overlay=${logoOverlayExpression(overlay.logo)}:format=auto[vlogoout]`);
+    lastLabel = '[vlogoout]';
+    inputIndex++;
+  }
+
+  filters.push(`${lastLabel}null[vout]`);
+  return {
+    inputArgs,
+    filterComplex: filters.join(';'),
+  };
+}
+
+function overlayCommandInfo(
+  overlay: ValidatedOverlayPlan,
+  filterComplex: string | null
+): TestPlayoutOverlayCommandInfo {
+  return {
+    source: overlay.source,
+    enabled: overlay.enabled,
+    previewOnly: overlay.previewOnly,
+    logoEnabled: overlay.logo !== null,
+    logoPath: overlay.logo?.path ?? null,
+    tickerEnabled: overlay.ticker !== null,
+    tickerAssPath: overlay.ticker?.assPath ?? null,
+    tickerDate: overlay.date,
+    tickerScheduleItemCount: overlay.ticker?.scheduleItemCount ?? 0,
+    filterComplex,
+  };
+}
+
+function logoOverlayExpression(logo: ValidatedLogoOverlay): string {
+  if (logo.position === 'top-left') return `${logo.xMargin}:${logo.yMargin}`;
+  if (logo.position === 'bottom-right') return `W-w-${logo.xMargin}:H-h-${logo.yMargin}`;
+  if (logo.position === 'bottom-left') return `${logo.xMargin}:H-h-${logo.yMargin}`;
+  if (logo.position === 'custom') return `${logo.customX ?? logo.xMargin}:${logo.customY ?? logo.yMargin}`;
+  return `W-w-${logo.xMargin}:${logo.yMargin}`;
+}
+
+function resolveSubtitleFontsDir(): string | null {
+  const candidates = [
+    '/usr/share/fonts/truetype/noto',
+    '/usr/share/fonts/truetype/fonts-hosny-amiri',
+    '/usr/share/fonts/opentype/fonts-hosny-amiri',
+    '/usr/share/fonts/truetype',
+  ];
+  return candidates.find(candidate => fs.existsSync(candidate)) ?? null;
+}
+
+function ffmpegFilterValue(value: string): string {
+  return path.resolve(value)
+    .replace(/\\/g, '/')
+    .replace(/:/g, '\\:')
+    .replace(/,/g, '\\,')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/'/g, "\\'")
+    .replace(/ /g, '\\ ');
+}
+
+function normalizeOverlayDate(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const raw = cleanString(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  throw new DraftValidationError('Overlay date must use YYYY-MM-DD', 'CONTROL_PANEL_OVERLAY_DATE_INVALID');
+}
+
+function formatFilterNumber(value: number): string {
+  return Number(value.toFixed(3)).toString();
 }
 
 function validateTestPlayoutExecution(input: TestPlayoutRunInput, runId: string): ValidatedTestPlayoutPlan {

@@ -1026,6 +1026,102 @@ describe('scheduler foundation routes', () => {
     spawnSpy.mockRestore();
   });
 
+  it('includes preview-only control panel logo and ticker overlays in the test playout FFmpeg command', async () => {
+    const childProcess = require('child_process') as typeof import('child_process');
+    const spawnSpy = jest.spyOn(childProcess, 'spawn');
+    const {
+      saveLogoAsset,
+      saveOverlaySettings,
+    } = require('../overlays/controlPanel') as typeof import('../overlays/controlPanel');
+    const published = await saveAndPublishValidDraft(baseUrl, 'Overlay playout schedule', 'overlay-playout.xlsx');
+    await activatePublishedScheduleForTest(baseUrl, published.publishedId);
+    const logoAsset = saveLogoAsset({
+      originalFilename: 'channel-logo.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from('test logo asset'),
+    });
+    saveOverlaySettings({
+      logo: {
+        enabled: true,
+        logoAssetId: logoAsset.id,
+        position: 'top-right',
+        width: 160,
+        opacity: 0.75,
+      },
+      ticker: {
+        enabled: true,
+        mode: 'today',
+        fontFamily: 'Noto Naskh Arabic',
+        limitItems: 4,
+        resolutionWidth: 1280,
+        resolutionHeight: 720,
+      },
+    });
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'localhost_hls',
+        durationLimitSeconds: 60,
+        useControlPanelOverlays: true,
+        overlayDate: '2026-06-06',
+      }),
+    });
+    const body = await response.json() as {
+      plan: {
+        commandPreview: {
+          args: string[];
+          overlays: {
+            source: string;
+            enabled: boolean;
+            previewOnly: boolean;
+            logoEnabled: boolean;
+            logoPath: string | null;
+            tickerEnabled: boolean;
+            tickerAssPath: string | null;
+            tickerScheduleItemCount: number;
+            filterComplex: string | null;
+          };
+          safety: {
+            ffmpegExecution: boolean;
+            playoutStarted: boolean;
+            broadcastStarted: boolean;
+          };
+        };
+      };
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.plan.commandPreview.safety).toMatchObject({
+      ffmpegExecution: false,
+      playoutStarted: false,
+      broadcastStarted: false,
+    });
+    expect(body.plan.commandPreview.overlays).toMatchObject({
+      source: 'control-panel',
+      enabled: true,
+      previewOnly: true,
+      logoEnabled: true,
+      logoPath: logoAsset.absolutePath,
+      tickerEnabled: true,
+      tickerScheduleItemCount: 1,
+    });
+    expect(body.plan.commandPreview.overlays.tickerAssPath).toEqual(expect.stringContaining(`${path.sep}ticker.ass`));
+    expect(fs.existsSync(body.plan.commandPreview.overlays.tickerAssPath!)).toBe(true);
+    expect(body.plan.commandPreview.overlays.filterComplex).toContain('subtitles=');
+    expect(body.plan.commandPreview.overlays.filterComplex).toContain('overlay=W-w-32:32:format=auto');
+    expect(body.plan.commandPreview.args).toContain('-filter_complex');
+    expect(body.plan.commandPreview.args).toContain('libx264');
+    expect(body.plan.commandPreview.args).toContain('[vout]');
+    expect(body.plan.commandPreview.args).toContain('0:a?');
+    expect(spawnSpy).not.toHaveBeenCalled();
+    spawnSpy.mockRestore();
+  });
+
   it('lists and reads test playout plans', async () => {
     const playlistPath = createDryRunPlaylistArtifact(tempDir);
 
