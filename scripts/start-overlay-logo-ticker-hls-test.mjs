@@ -183,7 +183,7 @@ function renderTickerAss() {
   const tickerText = 'تشاهدون اليوم: 08:00 خطوات النبي • 09:30 أعمال الحج • 11:00 كليب أطفال • 12:30 السيرة النبوية • 14:00 تشريف الأمة';
   let events = '';
   for (let start = 0; start < durationSeconds; start += 50) {
-    events += `Dialogue: 0,${assTime(start)},${assTime(start + 45)},Ticker,,0,0,0,,{\\an6\\move(1320,675,-2850,675,0,45000)}${tickerText}\n`;
+    events += `Dialogue: 0,${assTime(start)},${assTime(start + 45)},Ticker,,0,0,0,,{\\an4\\move(1320,675,-2850,675,0,45000)}${tickerText}\n`;
   }
   return `[Script Info]
 ScriptType: v4.00+
