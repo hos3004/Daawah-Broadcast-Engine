@@ -122,6 +122,24 @@ timezone.
 
 ## Future FFmpeg Integration
 
+The isolated direct-file test playout command can now opt into the saved
+control panel overlay settings while remaining test-only. A test playout plan
+may request:
+
+```json
+{
+  "useControlPanelOverlays": true,
+  "overlayDate": "YYYY-MM-DD"
+}
+```
+
+When enabled, the command preview resolves the logo asset from
+`data/overlay-assets/`, exports a real schedule-backed `ticker.ass`, and injects
+both into the FFmpeg `filter_complex` using `subtitles`/libass and `overlay`.
+The output is still constrained to `generated/test-playout/`, and the API
+continues to report `previewOnly: true` for the overlay command metadata. This
+does not restart or mutate live playout.
+
 Future direct file-based playout can use the generated artifacts like this:
 
 Logo overlay:
