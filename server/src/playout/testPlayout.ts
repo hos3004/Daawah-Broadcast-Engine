@@ -820,8 +820,8 @@ function rejectForbiddenString(value: string, keyPath: string): void {
   if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
     throw new DraftValidationError('HTTP/HTTPS live output targets are forbidden for test playout planning', 'LIVE_URL_FORBIDDEN');
   }
-  if (normalized.includes('/srv/daawah/media') && normalizedKey.includes('output')) {
-    throw new DraftValidationError('Media folder paths are forbidden for test playout output planning', 'MEDIA_PATH_FORBIDDEN');
+  if (normalized.includes('/srv/daawah/media')) {
+    throw new DraftValidationError('Media folder paths are forbidden for isolated test playout planning', 'MEDIA_PATH_FORBIDDEN');
   }
   if (normalized.includes('/obs') || normalized.includes('obs-studio') || normalized.includes('old-obs')) {
     throw new DraftValidationError('Old OBS paths are forbidden for test playout planning', 'OLD_OBS_PATH_FORBIDDEN');

@@ -894,6 +894,31 @@ describe('scheduler foundation routes', () => {
     expect(body.code).toBe('SOURCE_PLAYLIST_MEDIA_PATH_UNSAFE');
   });
 
+  it('rejects production media roots in expanded test playout media paths', async () => {
+    const playlistPath = createDryRunPlaylistArtifact(tempDir);
+    const playlist = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as {
+      items: Array<{ absolutePath: string }>;
+    };
+    const item = playlist.items[0];
+    if (!item) throw new Error('Expected test playlist item');
+    item.absolutePath = '/srv/daawah/media/programs/unsafe.mp4';
+    fs.writeFileSync(playlistPath, JSON.stringify(playlist), 'utf8');
+
+    const response = await fetch(`${baseUrl}/api/scheduler-foundation/test-playout/plans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmPrepareOnly: true,
+        sourcePlaylistPath: playlistPath,
+        outputMode: 'local_file',
+      }),
+    });
+    const body = await response.json() as { code: string };
+
+    expect(response.status).toBe(400);
+    expect(body.code).toBe('MEDIA_PATH_FORBIDDEN');
+  });
+
   it('rejects unsafe control characters in materialized ffconcat media paths', async () => {
     const { renderFfconcat } = require('../schedule/playlistExpansion') as typeof import('../schedule/playlistExpansion');
 
