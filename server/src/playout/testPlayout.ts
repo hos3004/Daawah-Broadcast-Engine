@@ -4,6 +4,8 @@ import childProcess from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/schema';
 import { DraftValidationError } from '../schedule/drafts';
+import { config } from '../config';
+import { buildVideoNormVf, buildAudioNormAf } from '../media/normalizer';
 
 export type TestPlayoutOutputMode = 'local_file' | 'localhost_hls';
 
@@ -481,40 +483,68 @@ export function listTestPlayoutPlans(limit = 50): TestPlayoutPlanDetail[] {
 
 function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCommandPreview {
   const ffconcatInput = validated.ffconcatInputPath;
+  const broadcastRes = config.broadcast.resolution.split('x');
+  const width = parseInt(broadcastRes[0] ?? '1280', 10);
+  const height = parseInt(broadcastRes[1] ?? '720', 10);
+  const fps = config.broadcast.fps;
+  const audioRate = config.broadcast.audioRate;
+  const vf = buildVideoNormVf({ width, height, fps });
+  const af = buildAudioNormAf({ audioRate });
+
+  const commonArgs = [
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'info',
+    '-re',
+    '-f',
+    'concat',
+    '-safe',
+    '0',
+    '-i',
+    ffconcatInput,
+    '-t',
+    String(validated.durationLimitSeconds),
+    '-vf',
+    vf,
+    '-af',
+    af,
+    '-map',
+    '0:v',
+    '-map',
+    '0:a?',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '21',
+    '-pix_fmt',
+    'yuv420p',
+    '-g',
+    String(fps * 2),
+    '-sc_threshold',
+    '0',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '192k',
+    '-ar',
+    String(audioRate),
+    '-ac',
+    '2',
+  ];
+
   const args = validated.outputMode === 'local_file'
     ? [
-        '-hide_banner',
-        '-nostdin',
-        '-loglevel',
-        'info',
-        '-re',
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        ffconcatInput,
-        '-t',
-        String(validated.durationLimitSeconds),
+        ...commonArgs,
         '-movflags',
         '+faststart',
         '-y',
         validated.outputPath,
       ]
     : [
-        '-hide_banner',
-        '-nostdin',
-        '-loglevel',
-        'info',
-        '-re',
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        ffconcatInput,
-        '-t',
-        String(validated.durationLimitSeconds),
+        ...commonArgs,
         '-f',
         'hls',
         '-hls_time',
