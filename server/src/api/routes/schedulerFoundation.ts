@@ -10,7 +10,20 @@ import {
   previewSafeNaming,
   scanMediaRegistry,
 } from '../../media/registry';
+import {
+  applySafeNamingImport,
+  getSafeNamingControlPanel,
+  previewSafeNamingImport,
+  SafeNamingControlError,
+} from '../../media/safeNamingControl';
 import { SafeRootError } from '../../media/safeRoots';
+import {
+  buildTickerPreview,
+  exportTickerAss,
+  getOverlaySettings,
+  getTodayScheduleItems,
+  saveOverlaySettings,
+} from '../../overlays/controlPanel';
 import {
   activatePublishedSchedule,
   DraftValidationError,
@@ -112,6 +125,66 @@ schedulerFoundationRouter.post('/safe-naming/preview', (req: Request, res: Respo
     mappings: previewSafeNaming(names),
   });
 });
+
+schedulerFoundationRouter.get(
+  '/safe-naming/control-panel',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      res.json(getSafeNamingControlPanel());
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/safe-naming/import-preview',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    const body = req.body as {
+      csvContent?: string;
+      csvPath?: string;
+      manualSlugOverrides?: Record<string, string>;
+    };
+
+    try {
+      res.json(previewSafeNamingImport({
+        csvContent: body.csvContent,
+        csvPath: body.csvPath,
+        manualSlugOverrides: body.manualSlugOverrides,
+      }));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/safe-naming/import-apply',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    const body = req.body as {
+      csvContent?: string;
+      csvPath?: string;
+      manualSlugOverrides?: Record<string, string>;
+      confirmationText?: string;
+      dryRun?: boolean;
+    };
+
+    try {
+      res.json(applySafeNamingImport({
+        csvContent: body.csvContent,
+        csvPath: body.csvPath,
+        manualSlugOverrides: body.manualSlugOverrides,
+        confirmationText: body.confirmationText,
+        dryRun: body.dryRun,
+      }));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
 
 schedulerFoundationRouter.get('/program-candidates', (_req: Request, res: Response): void => {
   res.json(generateProgramCandidatesFromIndexedFolders({ persist: false }));
@@ -540,6 +613,80 @@ schedulerFoundationRouter.get(
   }
 );
 
+schedulerFoundationRouter.get(
+  '/overlays/settings',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      res.json(getOverlaySettings());
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.put(
+  '/overlays/settings',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json(saveOverlaySettings(req.body as Record<string, unknown>));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/overlays/ticker/preview',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json(buildTickerPreview(req.body as Record<string, unknown>));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/overlays/ticker/export-ass',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    try {
+      res.status(201).json(exportTickerAss(req.body as Record<string, unknown>));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/overlays/today-schedule',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json({
+        mode: 'today-schedule',
+        date: typeof req.query['date'] === 'string' ? req.query['date'] : undefined,
+        items: getTodayScheduleItems({
+          date: typeof req.query['date'] === 'string' ? req.query['date'] : undefined,
+          limit: Number(req.query['limit'] ?? 12),
+        }),
+        safety: {
+          readOnly: true,
+          liveActivation: false,
+          restartPlayout: false,
+          ffmpegExecution: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
 schedulerFoundationRouter.get('/validation-result', (_req: Request, res: Response): void => {
   res.json({
     mode: 'preview',
@@ -560,6 +707,10 @@ function sendFoundationError(res: Response, err: unknown): void {
   }
   if (err instanceof SafeRootError) {
     res.status(400).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SafeNamingControlError) {
+    res.status(err.statusCode).json({ error: err.message, code: err.code });
     return;
   }
   res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

@@ -63,6 +63,19 @@ export const schedulerFoundationApi = {
     api.post('/scheduler-foundation/media-registry/scan-preview', payload ?? {}),
   safeNamingPreview: (names: string[]) =>
     api.post('/scheduler-foundation/safe-naming/preview', { names }),
+  safeNamingControlPanel: () => api.get('/scheduler-foundation/safe-naming/control-panel'),
+  safeNamingImportPreview: (payload: {
+    csvContent?: string;
+    csvPath?: string;
+    manualSlugOverrides?: Record<string, string>;
+  }) => api.post('/scheduler-foundation/safe-naming/import-preview', payload),
+  safeNamingImportApply: (payload: {
+    csvContent?: string;
+    csvPath?: string;
+    manualSlugOverrides?: Record<string, string>;
+    confirmationText?: string;
+    dryRun?: boolean;
+  }) => api.post('/scheduler-foundation/safe-naming/import-apply', payload),
   programCandidates: () => api.get('/scheduler-foundation/program-candidates'),
   excelImportPreview: (file: File) => {
     const fd = new FormData();
@@ -99,6 +112,12 @@ export const schedulerFoundationApi = {
   }) => api.post('/scheduler-foundation/test-playout/plans', payload),
   listTestPlayoutPlans: () => api.get('/scheduler-foundation/test-playout/plans'),
   getTestPlayoutPlan: (id: string) => api.get(`/scheduler-foundation/test-playout/plans/${id}`),
+  overlaySettings: () => api.get('/scheduler-foundation/overlays/settings'),
+  saveOverlaySettings: (payload: unknown) => api.put('/scheduler-foundation/overlays/settings', payload),
+  tickerPreview: (payload: unknown) => api.post('/scheduler-foundation/overlays/ticker/preview', payload),
+  tickerExportAss: (payload: unknown) => api.post('/scheduler-foundation/overlays/ticker/export-ass', payload),
+  todayScheduleOverlay: (params?: { date?: string; limit?: number }) =>
+    api.get('/scheduler-foundation/overlays/today-schedule', { params }),
   validationResult: () => api.get('/scheduler-foundation/validation-result'),
   monthlyPreview: () => api.get('/scheduler-foundation/monthly-schedule-preview'),
 };
