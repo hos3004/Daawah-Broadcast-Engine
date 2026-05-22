@@ -275,9 +275,17 @@ function lookupFolderId(rootKey: string, originalPath: string): string | null {
       .relative(root.absolute_path, originalPath)
       .replace(/\\/g, '/');
 
-    const folder = db.prepare(
+    // Try exact match first
+    let folder = db.prepare(
       'SELECT id FROM media_folders WHERE root_id=? AND original_relative_path=?'
     ).get(root.id, relativePath) as { id: string } | undefined;
+
+    // Fallback: match by TRIM to handle trailing/leading whitespace differences
+    if (!folder) {
+      folder = db.prepare(
+        'SELECT id FROM media_folders WHERE root_id=? AND TRIM(original_relative_path)=TRIM(?)'
+      ).get(root.id, relativePath) as { id: string } | undefined;
+    }
 
     return folder?.id ?? null;
   } catch {
