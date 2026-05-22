@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import childProcess from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
+import { config } from '../config';
 import { getDb } from '../db/schema';
+import { buildAudioNormAf, buildVideoNormVf } from '../media/normalizer';
 import { DraftValidationError } from '../schedule/drafts';
 import {
   exportTickerAss,
@@ -546,6 +548,9 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
   const ffconcatInput = validated.ffconcatInputPath;
   const overlayGraph = buildOverlayFfmpegGraph(validated.overlay);
   const hasOverlayGraph = overlayGraph !== null;
+  const broadcastProfile = getBroadcastNormalizationProfile();
+  const videoNormVf = buildVideoNormVf(broadcastProfile);
+  const audioNormAf = buildAudioNormAf({ audioRate: broadcastProfile.audioRate });
   const inputArgs = hasOverlayGraph
     ? [
         '-re',
@@ -566,7 +571,7 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '-i',
         ffconcatInput,
       ];
-  const overlayArgs = hasOverlayGraph
+  const normalizeEncodeArgs = hasOverlayGraph
     ? [
         '-filter_complex',
         overlayGraph.filterComplex,
@@ -574,18 +579,20 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '[vout]',
         '-map',
         '0:a?',
+        '-af',
+        audioNormAf,
         '-c:v',
         'libx264',
         '-preset',
         'veryfast',
         '-crf',
-        '23',
+        '21',
         '-r',
-        '25',
+        String(broadcastProfile.fps),
         '-g',
-        '150',
+        String(broadcastProfile.fps * 2),
         '-keyint_min',
-        '150',
+        String(broadcastProfile.fps * 2),
         '-sc_threshold',
         '0',
         '-pix_fmt',
@@ -593,13 +600,46 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         '-c:a',
         'aac',
         '-b:a',
-        '128k',
+        config.broadcast.audioBitrate,
         '-ar',
-        '48000',
+        String(broadcastProfile.audioRate),
         '-ac',
         '2',
       ]
-    : [];
+    : [
+        '-vf',
+        videoNormVf,
+        '-af',
+        audioNormAf,
+        '-map',
+        '0:v',
+        '-map',
+        '0:a?',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '21',
+        '-pix_fmt',
+        'yuv420p',
+        '-r',
+        String(broadcastProfile.fps),
+        '-g',
+        String(broadcastProfile.fps * 2),
+        '-keyint_min',
+        String(broadcastProfile.fps * 2),
+        '-sc_threshold',
+        '0',
+        '-c:a',
+        'aac',
+        '-b:a',
+        config.broadcast.audioBitrate,
+        '-ar',
+        String(broadcastProfile.audioRate),
+        '-ac',
+        '2',
+      ];
   const args = validated.outputMode === 'local_file'
     ? [
         '-hide_banner',
@@ -609,7 +649,7 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         ...inputArgs,
         '-t',
         String(validated.durationLimitSeconds),
-        ...overlayArgs,
+        ...normalizeEncodeArgs,
         '-movflags',
         '+faststart',
         '-y',
@@ -623,7 +663,7 @@ function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCo
         ...inputArgs,
         '-t',
         String(validated.durationLimitSeconds),
-        ...overlayArgs,
+        ...normalizeEncodeArgs,
         '-f',
         'hls',
         '-hls_time',
@@ -786,10 +826,12 @@ function assertTickerExportHasSchedule(exported: TickerExport, planId: string): 
 function buildOverlayFfmpegGraph(overlay: ValidatedOverlayPlan): OverlayFfmpegGraph | null {
   if (!overlay.enabled || (!overlay.logo && !overlay.ticker)) return null;
 
-  const width = overlay.ticker?.resolutionWidth ?? 1280;
-  const height = overlay.ticker?.resolutionHeight ?? 720;
+  const profile = getBroadcastNormalizationProfile();
+  const width = overlay.ticker?.resolutionWidth ?? profile.width;
+  const height = overlay.ticker?.resolutionHeight ?? profile.height;
+  const fps = profile.fps;
   const filters: string[] = [
-    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=25[vbase]`,
+    `[0:v]${buildVideoNormVf({ width, height, fps })}[vbase]`,
   ];
   const inputArgs: string[] = [];
   let lastLabel = '[vbase]';
@@ -836,6 +878,18 @@ function overlayCommandInfo(
     tickerDate: overlay.date,
     tickerScheduleItemCount: overlay.ticker?.scheduleItemCount ?? 0,
     filterComplex,
+  };
+}
+
+function getBroadcastNormalizationProfile(): { width: number; height: number; fps: number; audioRate: number } {
+  const [rawWidth, rawHeight] = config.broadcast.resolution.split('x');
+  const width = Number.parseInt(rawWidth ?? '', 10);
+  const height = Number.parseInt(rawHeight ?? '', 10);
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : 1280,
+    height: Number.isFinite(height) && height > 0 ? height : 720,
+    fps: config.broadcast.fps,
+    audioRate: config.broadcast.audioRate,
   };
 }
 

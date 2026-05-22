@@ -358,7 +358,7 @@ function buildBroadcastCommand(date: string, current: PlaylistItem | null): { ar
     '-re', '-f', 'concat', '-safe', '0', '-i', concatListPath,
   ];
 
-  let filterComplex = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps}[base]`;
+  let filterComplex = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},settb=1/${config.broadcast.fps}[base]`;
   let lastLabel = '[base]';
   let inputIdx = 1;
 
@@ -447,7 +447,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
       '-y',
       '-stream_loop', '-1',
       '-re', '-f', 'concat', '-safe', '0', '-i', concatPath,
-      '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps}`,
+      '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},settb=1/${config.broadcast.fps}`,
       '-c:v', 'libx264', '-preset', 'veryfast',
       '-b:v', config.broadcast.videoBitrate,
       '-pix_fmt', 'yuv420p',
