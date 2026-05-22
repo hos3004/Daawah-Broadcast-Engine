@@ -13,8 +13,6 @@ const port = Number(process.env.TEST_HLS_PORT || 18080);
 const qcReportPath = process.env.QC_REPORT_PATH ||
   path.join(projectRoot, 'reports', 'ffprobe-qc-source-bumpers-2026-05-21T07-09-32-651Z.json');
 const runId = process.env.RUN_ID || `diverse-ffconcat-normalized-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-const programClipSeconds = Number(process.env.PROGRAM_CLIP_SECONDS || 180);
-const bumperClipSeconds = Number(process.env.BUMPER_CLIP_SECONDS || 30);
 const runDir = path.join(projectRoot, 'generated', 'test-playout', runId);
 const hlsDir = path.join(runDir, 'hls');
 const logsDir = path.join(runDir, 'logs');
@@ -41,25 +39,25 @@ const files = qc.files.filter(file =>
 );
 
 const programs = [
-  pick('source', ['Fahad Alkandari'], 'program', 90),
+  pick('source', ['Fahad Alkandari', '01 (1).mp4'], 'program', 90),
   pick('source', ['Nahla Abdallah'], 'program', 90),
-  pick('source', ['kids/kessas/'], 'program', 90),
-  pick('source', ['على الثغور'], 'program', 90),
-  pick('source', ['series/001.mp4'], 'program', 90),
+  pick('source', ['kids/CLEP ATFAAL/CLEP ATFAAL-1.mp4'], 'program', 90),
+  pick('source', ['shawwal/', '720p_25fps_H264-128kbit_AAC'], 'program', 45),
+  pick('source', ['shawwal/', '10-)', '60fps_H264-48kbit_AAC'], 'program', 300),
 ];
 const bumpers = [
-  pick('bumpers', ['logo-sting/k (3).mp4'], 'main', 3),
-  pick('bumpers', ['sting-hag/LOGO DA-25.mp4'], 'seasonal', 3),
-  pick('bumpers', ['general/AADAB ISLAMIA/MONAGAT SAIM-1.mp4'], 'general', 3),
-  pick('bumpers', ['logo-sting/LOGO DA-2.mp4'], 'main', 3),
-  pick('bumpers', ['general/AHADITH DAAWAH/AHADITH-12.mp4'], 'general', 3),
-  pick('bumpers', ['general/DOAA/DOOAA-1.mp4'], 'general', 3),
-  pick('bumpers', ['logo-sting/sting 01.mp4'], 'main', 3),
-  pick('bumpers', ['sting-hag/LOGO DA-3.mp4'], 'seasonal', 3),
-  pick('bumpers', ['general/CLIP DAAWAH/CLIP D-1.mp4'], 'general', 3),
-  pick('bumpers', ['logo-sting/sting 02.mp4'], 'main', 3),
-  pick('bumpers', ['general/جرافيك/ZAD-INFO003_1.mp4'], 'general', 3),
-  pick('bumpers', ['general/CLEP/CLEP-1.mp4'], 'general', 3),
+  pick('bumpers', ['logo-sting/sting 01.mp4'], 'main', 8),
+  pick('bumpers', ['sting-hag/LOGO DA-25.mp4'], 'seasonal', 8),
+  pick('bumpers', ['general/AHADITH DAAWAH/AHADITH-12.mp4'], 'general', 8),
+  pick('bumpers', ['logo-sting/sting 02.mp4'], 'main', 8),
+  pick('bumpers', ['general/DOAA/DOOAA-13.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLIP DAAWAH/CLIP D-1.mp4'], 'general', 8),
+  pick('bumpers', ['general/gazwaat/'], 'general', 8),
+  pick('bumpers', ['general/finnnal-', 'HadQud0026.mp4'], 'general', 8),
+  pick('bumpers', ['general/finnnal-', 'HadQud0034.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLEP/CLEP-23.mp4'], 'general', 8),
+  pick('bumpers', ['general/AHADITH DAAWAH/AHADITH-21.mp4'], 'general', 8),
+  pick('bumpers', ['general/CLIP DAAWAH/CLIP D-4.mp4'], 'general', 8),
 ];
 
 const sequence = [
@@ -188,11 +186,11 @@ function pick(root, includes, role, minDurationSeconds) {
 }
 
 function programItem(file, number) {
-  return baseItem(file, 'program', 'program', `program-${number}`, Math.min(file.durationSeconds, programClipSeconds));
+  return baseItem(file, 'program', 'program', `program-${number}`, file.durationSeconds);
 }
 
 function bumperItem(file, number) {
-  return baseItem(file, 'bumper', sourceRoleFromPath(file.relativePath), `bumper-${number}`, Math.min(file.durationSeconds, bumperClipSeconds));
+  return baseItem(file, 'bumper', sourceRoleFromPath(file.relativePath), `bumper-${number}`, file.durationSeconds);
 }
 
 function baseItem(file, type, sourceRole, id, playDurationSeconds) {
@@ -222,7 +220,7 @@ function writeArtifacts() {
   const playlist = {
     runId,
     generatedAt: new Date().toISOString(),
-    mode: 'diverse-ffconcat-normalized-hls-test',
+    mode: 'diverse-full-file-ffconcat-normalized-hls-test',
     qcReportPath,
     publicTestUrl,
     totalDurationSeconds: cursor,
@@ -232,7 +230,7 @@ function writeArtifacts() {
       enabled: true,
       runtimeOnly: true,
       mediaFilesModified: false,
-      implementation: 'ffconcat demuxer with outpoint/duration plus single FFmpeg video/audio normalization filter',
+      implementation: 'full-file ffconcat demuxer plus single FFmpeg video/audio normalization filter; no per-item outpoint trimming',
       targetProfile,
       videoFilter,
       audioFilter,
@@ -511,7 +509,7 @@ startFfmpeg();
 }
 
 function renderFfconcat(items) {
-  return `ffconcat version 1.0\n${items.map(item => `file '${item.absolutePath.replace(/'/g, `'\\''`)}'\noutpoint ${item.playDurationSeconds.toFixed(3)}\nduration ${item.playDurationSeconds.toFixed(3)}`).join('\n')}\n`;
+  return `ffconcat version 1.0\n${items.map(item => `file '${item.absolutePath.replace(/'/g, `'\\''`)}'`).join('\n')}\n`;
 }
 
 function renderManifest(items) {
@@ -535,7 +533,7 @@ function renderManifest(items) {
 }
 
 function renderReport(playlist) {
-  return `# Diverse FFconcat Normalized HLS Test Start Report
+  return `# Diverse Full-File FFconcat Normalized HLS Test Start Report
 
 - runId: ${runId}
 - public test URL: ${publicTestUrl}
@@ -553,7 +551,8 @@ function renderReport(playlist) {
 - target fps: ${targetProfile.fps}
 - target pixel format: ${targetProfile.pixelFormat}
 - target audio: ${targetProfile.audioSampleRate} Hz stereo
-- implementation: single FFmpeg ffconcat demuxer with video/audio normalization filters
+- implementation: single FFmpeg full-file ffconcat demuxer with video/audio normalization filters
+- per-item trimming: disabled
 
 ## Sequence
 
