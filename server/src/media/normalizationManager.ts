@@ -1974,6 +1974,7 @@ function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath
       windowsHide: true,
     });
     const scriptName = path.basename(scriptPath);
+    const hasProcessGroup = pgid !== null || pid !== null;
     return output
       .split(/\r?\n/)
       .map(parseProcessLine)
@@ -1982,7 +1983,7 @@ function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath
         (pgid !== null && processInfo.pgid === pgid)
         || (pid !== null && (processInfo.pid === pid || processInfo.ppid === pid))
         || processInfo.command.includes(scriptName)
-        || isLikelyNormalizationFfmpeg(processInfo.command, scriptName)
+        || (hasProcessGroup && isLikelyNormalizationFfmpeg(processInfo.command, scriptName))
       ))
       .slice(0, 40);
   } catch {
@@ -2118,7 +2119,7 @@ function parseNormalizationReportCounts(reportPath: string): ServerNormalization
   const lines = text.split(/\r?\n/).filter(Boolean);
   for (const line of lines.slice(1)) {
     const columns = splitCsvLine(line);
-    const status = columns.slice(1, 5).join(' ').toLowerCase();
+    const status = columns.slice(1, 4).join(' ').toLowerCase();
     if (status.includes('failed') || status.includes('fail') || status.includes('error')) counts.failed += 1;
     else if (status.includes('fix') || status.includes('fixed') || status.includes('rewrite')) counts.fix += 1;
     else if (status.includes('remux')) counts.remux += 1;
