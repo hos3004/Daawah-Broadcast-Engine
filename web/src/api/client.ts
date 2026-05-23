@@ -69,6 +69,11 @@ export const schedulerFoundationApi = {
     csvPath?: string;
     manualSlugOverrides?: Record<string, string>;
   }) => api.post('/scheduler-foundation/safe-naming/import-preview', payload),
+  safeNamingImportPreviewFile: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post('/scheduler-foundation/safe-naming/import-preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   safeNamingImportApply: (payload: {
     csvContent?: string;
     csvPath?: string;
@@ -76,6 +81,16 @@ export const schedulerFoundationApi = {
     confirmationText?: string;
     dryRun?: boolean;
   }) => api.post('/scheduler-foundation/safe-naming/import-apply', payload),
+  safeNamingImportApplyFile: (file: File, confirmationText: string, dryRun: boolean) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('dryRun', String(dryRun));
+    if (!dryRun) {
+      fd.append('confirmImport', 'true');
+      fd.append('confirmationText', confirmationText);
+    }
+    return api.post('/scheduler-foundation/safe-naming/import-apply', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   programCandidates: () => api.get('/scheduler-foundation/program-candidates'),
   excelImportPreview: (file: File) => {
     const fd = new FormData();

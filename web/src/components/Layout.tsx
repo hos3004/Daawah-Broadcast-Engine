@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Film, FolderTree, Calendar, CalendarClock, Layers, Radio, ScrollText, LogOut, Wifi, WifiOff } from 'lucide-react';
+import { LayoutDashboard, Film, FolderTree, Calendar, CalendarClock, Layers, Radio, ScrollText, LogOut, Wifi, WifiOff, Tag } from 'lucide-react';
 import { useState, useCallback } from 'react';
 import { authApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -18,6 +18,7 @@ const navItems = [
   { to: '/media-browser', label: 'متصفح الوسائط', icon: FolderTree },
   { to: '/schedule',  label: 'الجدول',        icon: Calendar },
   { to: '/scheduler-foundation', label: 'تأسيس الجدولة', icon: CalendarClock },
+  { to: '/safe-naming', label: 'التسمية الآمنة', icon: Tag },
   { to: '/overlays',  label: 'الطبقات',       icon: Layers },
   { to: '/broadcast', label: 'التحكم بالبث',  icon: Radio },
   { to: '/logs',      label: 'السجلات',       icon: ScrollText },
