@@ -29,6 +29,60 @@ systemRouter.get('/disk', (_req: Request, res: Response): void => {
   });
 });
 
+systemRouter.get('/status', (_req: Request, res: Response): void => {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  const load = os.loadavg();
+  const cpus = os.cpus();
+  const cpuCount = Math.max(1, cpus.length);
+  const load1 = load[0] ?? 0;
+  const load5 = load[1] ?? 0;
+  const load15 = load[2] ?? 0;
+  const loadPercent = Math.min(100, Math.round((load1 / cpuCount) * 100));
+  const mediaDisk = diskUsage(config.paths.mediaLibrary);
+  const hlsDisk = diskUsage(config.paths.hlsOutput);
+
+  res.json({
+    ok: true,
+    timestamp: new Date().toISOString(),
+    host: {
+      hostname: os.hostname(),
+      platform: os.platform(),
+      arch: os.arch(),
+      uptimeSeconds: Math.round(os.uptime()),
+    },
+    process: {
+      pid: process.pid,
+      uptimeSeconds: Math.round(process.uptime()),
+      nodeVersion: process.version,
+      memory: process.memoryUsage(),
+    },
+    cpu: {
+      count: cpuCount,
+      model: cpus[0]?.model ?? 'unknown',
+      load1: Number(load1.toFixed(2)),
+      load5: Number(load5.toFixed(2)),
+      load15: Number(load15.toFixed(2)),
+      loadPercent,
+    },
+    memory: {
+      total: totalMem,
+      free: freeMem,
+      used: usedMem,
+      percent: Math.round((usedMem / totalMem) * 100),
+      totalStr: formatBytes(totalMem),
+      usedStr: formatBytes(usedMem),
+      freeStr: formatBytes(freeMem),
+    },
+    disks: {
+      media: { ...mediaDisk, usedStr: formatBytes(mediaDisk.used), totalStr: formatBytes(mediaDisk.total) },
+      hls: { ...hlsDisk, usedStr: formatBytes(hlsDisk.used), totalStr: formatBytes(hlsDisk.total) },
+    },
+    wsClients: getWsClientCount(),
+  });
+});
+
 systemRouter.get('/logs', requireRole('admin', 'operator'), (req: Request, res: Response): void => {
   const { type = 'app', lines = '100' } = req.query as Record<string, string>;
   const logDir = config.paths.logs;

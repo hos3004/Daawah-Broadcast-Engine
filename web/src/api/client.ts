@@ -220,6 +220,7 @@ export const overlaysApi = {
 // System
 export const systemApi = {
   health: () => api.get('/system/health'),
+  status: () => api.get('/system/status'),
   disk:   () => api.get('/system/disk'),
   logs:   (type?: string, lines?: number) => api.get('/system/logs', { params: { type, lines } }),
   audit:  (params?: Record<string, string>) => api.get('/system/audit', { params }),

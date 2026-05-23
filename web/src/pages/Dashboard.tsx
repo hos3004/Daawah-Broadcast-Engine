@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { broadcastApi, schedulerFoundationApi, systemApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { Radio, HardDrive, Cpu, AlertTriangle, Play, Clock, FileCog, ListChecks } from 'lucide-react';
+import { Radio, HardDrive, Cpu, AlertTriangle, Play, Clock, FileCog, ListChecks, Server, Wifi } from 'lucide-react';
 import dayjs from 'dayjs';
 
 interface PlaylistItem {
@@ -23,6 +23,41 @@ interface BroadcastStatus {
   nextItem: PlaylistItem | null;
   isEmergency: boolean;
   hls?: { ok: boolean; ageSeconds: number };
+}
+
+interface ServerStatus {
+  ok: boolean;
+  timestamp: string;
+  host: {
+    hostname: string;
+    platform: string;
+    arch: string;
+    uptimeSeconds: number;
+  };
+  process: {
+    pid: number;
+    uptimeSeconds: number;
+    nodeVersion: string;
+  };
+  cpu: {
+    count: number;
+    model: string;
+    load1: number;
+    load5: number;
+    load15: number;
+    loadPercent: number;
+  };
+  memory: {
+    percent: number;
+    usedStr: string;
+    totalStr: string;
+    freeStr: string;
+  };
+  disks: {
+    media: { percent: number; usedStr: string; totalStr: string };
+    hls: { percent: number; usedStr: string; totalStr: string };
+  };
+  wsClients: number;
 }
 
 interface NormalizationRunSummary {
@@ -54,10 +89,10 @@ export default function DashboardPage() {
   const [broadcastState, setBroadcastState] = useState<BroadcastStatus | null>(null);
   const [nowPlaying, setNowPlaying] = useState<{ current: PlaylistItem | null; next: PlaylistItem | null }>({ current: null, next: null });
 
-  const { data: diskData } = useQuery({
-    queryKey: ['disk'],
-    queryFn: () => systemApi.disk().then(r => r.data as { mem: { percent: number }; cpu: number[]; media: { percent: number; usedStr: string; totalStr: string }; hls: { percent: number } }),
-    refetchInterval: 30000,
+  const { data: serverStatus } = useQuery({
+    queryKey: ['server-status'],
+    queryFn: () => systemApi.status().then(r => r.data as ServerStatus),
+    refetchInterval: 10000,
   });
 
   useQuery({
@@ -116,6 +151,60 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <h2 className="text-xl font-bold">لوحة التحكم</h2>
 
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Server size={18} style={{ color: 'var(--accent)' }} />
+            <h3 className="font-bold text-base">حالة السيرفر الآن</h3>
+          </div>
+          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+            آخر تحديث: {serverStatus ? dayjs(serverStatus.timestamp).format('HH:mm:ss') : '—'}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+          <StatCard
+            icon={<Server size={20} />}
+            label="الخدمة"
+            value={serverStatus?.ok ? 'online' : '—'}
+            valueColor={serverStatus?.ok ? '#22c55e' : undefined}
+            sub={serverStatus ? `${serverStatus.host.hostname} · PID ${serverStatus.process.pid}` : undefined}
+          />
+          <StatCard
+            icon={<Cpu size={20} />}
+            label="المعالج"
+            value={serverStatus ? `${serverStatus.cpu.loadPercent}%` : '—'}
+            valueColor={serverStatus && serverStatus.cpu.loadPercent > 85 ? '#ef4444' : undefined}
+            sub={serverStatus ? `load ${serverStatus.cpu.load1} / ${serverStatus.cpu.count} cores` : undefined}
+          />
+          <StatCard
+            icon={<Cpu size={20} />}
+            label="الذاكرة"
+            value={serverStatus ? `${serverStatus.memory.percent}%` : '—'}
+            valueColor={serverStatus && serverStatus.memory.percent > 90 ? '#ef4444' : undefined}
+            sub={serverStatus ? `${serverStatus.memory.usedStr} / ${serverStatus.memory.totalStr}` : undefined}
+          />
+          <StatCard
+            icon={<HardDrive size={20} />}
+            label="قرص الوسائط"
+            value={serverStatus ? `${serverStatus.disks.media.percent}%` : '—'}
+            valueColor={serverStatus && serverStatus.disks.media.percent > 85 ? '#ef4444' : undefined}
+            sub={serverStatus ? `${serverStatus.disks.media.usedStr} / ${serverStatus.disks.media.totalStr}` : undefined}
+          />
+          <StatCard
+            icon={<Wifi size={20} />}
+            label="اتصالات اللوحة"
+            value={serverStatus ? String(serverStatus.wsClients) : '—'}
+            sub="WebSocket"
+          />
+          <StatCard
+            icon={<Clock size={20} />}
+            label="مدة التشغيل"
+            value={serverStatus ? formatDurationSeconds(serverStatus.process.uptimeSeconds) : '—'}
+            sub={serverStatus ? serverStatus.process.nodeVersion : undefined}
+          />
+        </div>
+      </div>
+
       {/* Now Playing + Next */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="card">
@@ -167,15 +256,15 @@ export default function DashboardPage() {
         <StatCard
           icon={<HardDrive size={20} />}
           label="التخزين"
-          value={diskData ? `${diskData.media.percent}%` : '—'}
-          valueColor={diskData && diskData.media.percent > 85 ? '#ef4444' : undefined}
-          sub={diskData ? `${diskData.media.usedStr} / ${diskData.media.totalStr}` : undefined}
+          value={serverStatus ? `${serverStatus.disks.media.percent}%` : '—'}
+          valueColor={serverStatus && serverStatus.disks.media.percent > 85 ? '#ef4444' : undefined}
+          sub={serverStatus ? `${serverStatus.disks.media.usedStr} / ${serverStatus.disks.media.totalStr}` : undefined}
         />
         <StatCard
           icon={<Cpu size={20} />}
           label="الذاكرة"
-          value={diskData ? `${diskData.mem.percent}%` : '—'}
-          valueColor={diskData && diskData.mem.percent > 90 ? '#ef4444' : undefined}
+          value={serverStatus ? `${serverStatus.memory.percent}%` : '—'}
+          valueColor={serverStatus && serverStatus.memory.percent > 90 ? '#ef4444' : undefined}
         />
         <StatCard
           icon={broadcastState?.hls?.ok ? <Radio size={20} style={{ color: '#22c55e' }} /> : <AlertTriangle size={20} style={{ color: '#ef4444' }} />}
@@ -281,6 +370,16 @@ function testPlayoutOutputTone(run: TestPlayoutRunSummary): 'ready' | 'warning' 
   if (output.hlsStale) return 'error';
   if (output.hlsHealthy === true || output.exists) return 'ready';
   return 'warning';
+}
+
+function formatDurationSeconds(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 
 function NowPlayingProgress({ item }: { item: PlaylistItem }) {
