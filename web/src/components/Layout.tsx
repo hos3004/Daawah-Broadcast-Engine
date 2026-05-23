@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Film, FolderTree, Calendar, CalendarClock, FileCog, PlaySquare, Tag, Layers, Radio, ScrollText, LogOut, Wifi, WifiOff } from 'lucide-react';
+import { LayoutDashboard, Film, FolderTree, Calendar, CalendarClock, FileCog, PlaySquare, Tag, Layers, Radio, ScrollText, Trash2, LogOut, Wifi, WifiOff } from 'lucide-react';
 import { useState, useCallback } from 'react';
 import { authApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -23,6 +23,7 @@ const navItems = [
   { to: '/safe-naming', label: 'التسمية الآمنة', icon: Tag },
   { to: '/overlays',  label: 'الطبقات',       icon: Layers },
   { to: '/broadcast', label: 'التحكم بالبث',  icon: Radio },
+  { to: '/trash',     label: 'سلة المحذوفات', icon: Trash2 },
   { to: '/logs',      label: 'السجلات',       icon: ScrollText },
 ];
 

@@ -36,6 +36,14 @@ export const mediaApi = {
   browserList: (params: Record<string, string>) => api.get('/media/browser/list', { params }),
   scanBrowserFolder: (rootId: string, pathValue: string) =>
     api.post('/media/browser/scan', { rootId, path: pathValue }),
+  programFolders: () => api.get('/media/program-folders'),
+  programFolderEpisodes: (folderId: string) => api.get(`/media/program-folders/${folderId}/episodes`),
+  trash: () => api.get('/media/trash'),
+  trashFile: (mediaFileId: string, reason?: string) => api.post(`/media/files/${mediaFileId}/trash`, { reason }),
+  trashProgramFolder: (folderId: string, reason?: string) => api.post(`/media/program-folders/${folderId}/trash`, { reason }),
+  restoreTrashItem: (kind: 'file' | 'folder', id: string) => api.post(`/media/trash/${kind}/${id}/restore`),
+  deleteTrashItem: (kind: 'file' | 'folder', id: string, adminPassword: string) =>
+    api.delete(`/media/trash/${kind}/${id}`, { data: { adminPassword } }),
   programs:  () => api.get('/media/programs'),
   episodes:  (programId?: string) => api.get('/media/episodes', { params: programId ? { program_id: programId } : {} }),
   transcode: (mediaFileId: string) => api.post('/media/transcode', { media_file_id: mediaFileId }),

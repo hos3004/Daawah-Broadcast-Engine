@@ -61,6 +61,7 @@ function runMigrations(db: Database.Database): void {
     { version: 11, apply: migration_011 },
     { version: 12, apply: migration_012 },
     { version: 13, apply: migration_013 },
+    { version: 14, apply: migration_014 },
   ];
 
   for (const m of migrations) {
@@ -747,5 +748,34 @@ function migration_013(db: Database.Database): void {
       ON normalized_sets(run_id);
     CREATE INDEX IF NOT EXISTS idx_normalized_sets_status
       ON normalized_sets(status);
+  `);
+}
+
+function migration_014(db: Database.Database): void {
+  addColumnIfMissing(
+    db,
+    'media_files',
+    'trash_status',
+    "trash_status TEXT NOT NULL DEFAULT 'active' CHECK(trash_status IN ('active','trashed'))"
+  );
+  addColumnIfMissing(db, 'media_files', 'trashed_at', 'trashed_at TEXT');
+  addColumnIfMissing(db, 'media_files', 'trashed_by', 'trashed_by TEXT REFERENCES users(id)');
+  addColumnIfMissing(db, 'media_files', 'trash_reason', 'trash_reason TEXT');
+
+  addColumnIfMissing(
+    db,
+    'media_folders',
+    'trash_status',
+    "trash_status TEXT NOT NULL DEFAULT 'active' CHECK(trash_status IN ('active','trashed'))"
+  );
+  addColumnIfMissing(db, 'media_folders', 'trashed_at', 'trashed_at TEXT');
+  addColumnIfMissing(db, 'media_folders', 'trashed_by', 'trashed_by TEXT REFERENCES users(id)');
+  addColumnIfMissing(db, 'media_folders', 'trash_reason', 'trash_reason TEXT');
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_media_files_trash_status
+      ON media_files(trash_status, trashed_at);
+    CREATE INDEX IF NOT EXISTS idx_media_folders_trash_status
+      ON media_folders(trash_status, trashed_at);
   `);
 }

@@ -16,6 +16,7 @@ import OverlaysPage from './pages/Overlays';
 import SafeNamingPage from './pages/SafeNaming';
 import BroadcastPage from './pages/BroadcastControl';
 import LogsPage from './pages/Logs';
+import TrashPage from './pages/Trash';
 
 interface User { id: string; email: string; role: string; }
 
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="/overlays" element={<OverlaysPage />} />
         <Route path="/safe-naming" element={<SafeNamingPage />} />
         <Route path="/broadcast" element={<BroadcastPage />} />
+        <Route path="/trash" element={<TrashPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
