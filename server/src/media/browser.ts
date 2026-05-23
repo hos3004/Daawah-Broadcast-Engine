@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../config';
 import { logger } from '../utils/logger';
+import { getDb } from '../db/schema';
 
 export type MediaBrowserEntryType = 'directory' | 'file';
 
@@ -9,6 +10,8 @@ export interface MediaBrowserStats {
   fileCount: number;
   mp4Count: number;
   sizeBytes: number;
+  durationMs: number | null;
+  longestFileDurationMs: number | null;
   truncated: boolean;
 }
 
@@ -156,7 +159,14 @@ function makeRootId(relativePath: string, usedIds: Set<string>): string {
 }
 
 function collectDirectoryStats(dirPath: string, rootPath: string, fileLimit: number): MediaBrowserStats {
-  const stats: MediaBrowserStats = { fileCount: 0, mp4Count: 0, sizeBytes: 0, truncated: false };
+  const stats: MediaBrowserStats = {
+    fileCount: 0,
+    mp4Count: 0,
+    sizeBytes: 0,
+    durationMs: null,
+    longestFileDurationMs: null,
+    truncated: false,
+  };
   const stack = [dirPath];
   const visitedDirs = new Set<string>();
 
@@ -196,6 +206,11 @@ function collectDirectoryStats(dirPath: string, rootPath: string, fileLimit: num
       stats.fileCount++;
       if (isMp4(realPath)) stats.mp4Count++;
       stats.sizeBytes += stat.size;
+      const durationMs = lookupMediaDurationMs(realPath);
+      if (durationMs !== null) {
+        stats.durationMs = (stats.durationMs ?? 0) + durationMs;
+        stats.longestFileDurationMs = Math.max(stats.longestFileDurationMs ?? 0, durationMs);
+      }
 
       if (stats.fileCount >= fileLimit) {
         stats.truncated = true;
@@ -233,7 +248,7 @@ export function getMediaBrowserRoots(options?: MediaBrowserOptions & { includeSt
     const exists = fs.existsSync(rootRealPath);
     const dirStats = exists && includeStats
       ? collectDirectoryStats(rootRealPath, rootRealPath, fileLimit)
-      : { fileCount: 0, mp4Count: 0, sizeBytes: 0, truncated: false };
+      : { fileCount: 0, mp4Count: 0, sizeBytes: 0, durationMs: null, longestFileDurationMs: null, truncated: false };
 
     roots.push({
       id: makeRootId(relativePath, usedIds),
@@ -326,6 +341,8 @@ export function listMediaBrowserDirectory(args: {
             fileCount: 1,
             mp4Count: isMp4(realPath) ? 1 : 0,
             sizeBytes: entryStat.size,
+            durationMs: lookupMediaDurationMs(realPath),
+            longestFileDurationMs: lookupMediaDurationMs(realPath),
             truncated: false,
           };
 
@@ -382,4 +399,22 @@ function buildBreadcrumbs(relativePath: string): MediaBrowserBreadcrumb[] {
 function toPositiveInt(value: number | undefined, fallback: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(1, Math.floor(value)));
+}
+
+function lookupMediaDurationMs(filePath: string): number | null {
+  try {
+    const db = getDb();
+    const row = db.prepare(`
+      SELECT duration_ms, duration_sec
+      FROM media_files
+      WHERE path=? AND COALESCE(trash_status, 'active') = 'active'
+    `).get(filePath) as { duration_ms: number | null; duration_sec: number | null } | undefined;
+
+    if (!row) return null;
+    if (row.duration_ms !== null && row.duration_ms !== undefined) return row.duration_ms;
+    if (row.duration_sec !== null && row.duration_sec !== undefined) return Math.round(row.duration_sec * 1000);
+    return null;
+  } catch {
+    return null;
+  }
 }

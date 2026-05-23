@@ -4,6 +4,7 @@ import {
   Check,
   ChevronLeft,
   Copy,
+  Eye,
   FileVideo,
   Files,
   Folder,
@@ -12,6 +13,7 @@ import {
   Home,
   RefreshCw,
   Search,
+  X,
 } from 'lucide-react';
 import { mediaApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -25,6 +27,8 @@ interface BrowserRoot {
   fileCount: number;
   mp4Count: number;
   sizeBytes: number;
+  durationMs: number | null;
+  longestFileDurationMs: number | null;
   truncated: boolean;
 }
 
@@ -38,6 +42,8 @@ interface BrowserEntry {
   fileCount: number;
   mp4Count: number;
   sizeBytes: number;
+  durationMs: number | null;
+  longestFileDurationMs: number | null;
   truncated: boolean;
 }
 
@@ -73,6 +79,7 @@ export default function MediaBrowserPage() {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [copiedPath, setCopiedPath] = useState('');
+  const [previewEntry, setPreviewEntry] = useState<BrowserEntry | null>(null);
 
   const { data: rootsData } = useQuery({
     queryKey: ['media-browser-roots'],
@@ -227,6 +234,9 @@ export default function MediaBrowserPage() {
             <span className="block text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
               {formatBytes(root.sizeBytes)} · {root.fileCount}{root.truncated ? '+' : ''} ملف · {root.mp4Count} MP4
             </span>
+            <span className="block text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              المدة: {formatDurationMs(root.durationMs)}
+            </span>
           </button>
         ))}
       </div>
@@ -275,7 +285,7 @@ export default function MediaBrowserPage() {
         <table className="w-full text-sm">
           <thead>
             <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
-              {['الاسم', 'النوع', 'الحجم', 'عدد الملفات', 'MP4', 'آخر تعديل', 'المسار'].map(header => (
+              {['الاسم', 'النوع', 'المدة', 'الحجم', 'عدد الملفات', 'MP4', 'آخر تعديل', 'المسار', 'المعاينة'].map(header => (
                 <th key={header} className="text-right px-4 py-3 font-medium text-xs" style={{ color: 'var(--text-muted)' }}>
                   {header}
                 </th>
@@ -301,6 +311,18 @@ export default function MediaBrowserPage() {
                 <td className="px-4 py-2.5">
                   <span className="badge badge-info">{entry.type === 'directory' ? 'مجلد' : entry.extension || 'ملف'}</span>
                 </td>
+                <td className="px-4 py-2.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {entry.type === 'directory'
+                    ? (
+                      <span>
+                        {formatDurationMs(entry.durationMs)}
+                        {entry.longestFileDurationMs !== null && (
+                          <span className="block">أطول: {formatDurationMs(entry.longestFileDurationMs)}</span>
+                        )}
+                      </span>
+                    )
+                    : formatDurationMs(entry.durationMs)}
+                </td>
                 <td className="px-4 py-2.5 text-xs" style={{ color: 'var(--text-muted)' }}>{formatBytes(entry.sizeBytes)}</td>
                 <td className="px-4 py-2.5 text-xs" style={{ color: 'var(--text-muted)' }}>
                   <span className="inline-flex items-center gap-1">
@@ -320,21 +342,35 @@ export default function MediaBrowserPage() {
                     <span className="truncate ltr-text">{entry.fullPath}</span>
                   </button>
                 </td>
+                <td className="px-4 py-2.5">
+                  {entry.type === 'file' && isPreviewableFile(entry) ? (
+                    <button
+                      onClick={() => setPreviewEntry(entry)}
+                      className="btn-ghost px-2 py-1 flex items-center gap-1 text-xs"
+                      title="معاينة الفيديو"
+                    >
+                      <Eye size={12} />
+                      معاينة
+                    </button>
+                  ) : (
+                    <span className="text-xs" style={{ color: 'var(--text-muted)' }}>—</span>
+                  )}
+                </td>
               </tr>
             ))}
             {!isFetching && data?.entries.length === 0 && (
               <tr>
-                <td colSpan={7} className="text-center py-8" style={{ color: 'var(--text-muted)' }}>لا توجد عناصر</td>
+                <td colSpan={9} className="text-center py-8" style={{ color: 'var(--text-muted)' }}>لا توجد عناصر</td>
               </tr>
             )}
             {isFetching && (
               <tr>
-                <td colSpan={7} className="text-center py-8" style={{ color: 'var(--text-muted)' }}>جارٍ التحميل...</td>
+                <td colSpan={9} className="text-center py-8" style={{ color: 'var(--text-muted)' }}>جارٍ التحميل...</td>
               </tr>
             )}
             {error && (
               <tr>
-                <td colSpan={7} className="text-center py-8" style={{ color: 'var(--danger)' }}>تعذر تحميل هذا المسار</td>
+                <td colSpan={9} className="text-center py-8" style={{ color: 'var(--danger)' }}>تعذر تحميل هذا المسار</td>
               </tr>
             )}
           </tbody>
@@ -354,6 +390,47 @@ export default function MediaBrowserPage() {
             التالي
           </button>
         </div>
+      </div>
+
+      {previewEntry && (
+        <BrowserVideoPreview
+          entry={previewEntry}
+          rootId={rootId}
+          onClose={() => setPreviewEntry(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function BrowserVideoPreview(props: {
+  entry: BrowserEntry;
+  rootId: string;
+  onClose: () => void;
+}) {
+  const streamUrl = `/api/media/browser/stream?rootId=${encodeURIComponent(props.rootId)}&path=${encodeURIComponent(props.entry.relativePath)}`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-5" style={{ background: 'rgba(0,0,0,0.72)' }}>
+      <div className="w-full max-w-4xl rounded-lg overflow-hidden" style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
+        <div className="flex items-center justify-between gap-3 px-4 py-3" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+          <div className="min-w-0">
+            <div className="font-medium truncate">{props.entry.name}</div>
+            <div className="text-xs ltr-text truncate" style={{ color: 'var(--text-muted)' }}>
+              {formatDurationMs(props.entry.durationMs)} · {props.entry.fullPath}
+            </div>
+          </div>
+          <button className="btn-ghost px-2 py-2" onClick={props.onClose} title="إغلاق">
+            <X size={16} />
+          </button>
+        </div>
+        <video
+          controls
+          autoPlay
+          className="w-full bg-black"
+          style={{ maxHeight: '70vh', direction: 'ltr' }}
+          src={streamUrl}
+        />
       </div>
     </div>
   );
@@ -385,4 +462,18 @@ function formatBytes(bytes: number): string {
 function formatDate(value: string | null): string {
   if (!value) return '—';
   return new Date(value).toLocaleString('ar');
+}
+
+function formatDurationMs(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return '—';
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function isPreviewableFile(entry: BrowserEntry): boolean {
+  const ext = (entry.extension ?? '').toLowerCase();
+  return ['.mp4', '.webm', '.mov', '.mkv', '.ts'].includes(ext);
 }

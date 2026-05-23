@@ -77,6 +77,26 @@ mediaRouter.get('/browser/list', (req: Request, res: Response): void => {
   }
 });
 
+mediaRouter.get('/browser/stream', (req: Request, res: Response): void => {
+  const { rootId, path: relativePath } = req.query as Record<string, string | undefined>;
+
+  if (!rootId) {
+    res.status(400).json({ error: 'rootId is required' });
+    return;
+  }
+
+  try {
+    const resolved = resolveMediaBrowserPath(rootId, relativePath);
+    if (!fs.statSync(resolved.fullPath).isFile()) {
+      res.status(400).json({ error: 'Selected path is not a file' });
+      return;
+    }
+    streamMediaFile(req, res, resolved.fullPath, path.basename(resolved.fullPath));
+  } catch (err) {
+    sendMediaBrowserError(res, err);
+  }
+});
+
 mediaRouter.post('/browser/scan', requireRole('admin', 'editor', 'operator'), async (req: Request, res: Response): Promise<void> => {
   if (scanInProgress) {
     res.status(409).json({ error: 'Scan already in progress' });
@@ -236,35 +256,7 @@ mediaRouter.get('/files/:fileId/stream', (req: Request, res: Response): void => 
     return;
   }
 
-  const stat = fs.statSync(file.path);
-  const contentType = videoContentType(file.path);
-  const range = req.headers.range;
-
-  if (range) {
-    const parsed = parseByteRange(range, stat.size);
-    if (!parsed) {
-      res.status(416).setHeader('Content-Range', `bytes */${stat.size}`).end();
-      return;
-    }
-
-    res.writeHead(206, {
-      'Content-Range': `bytes ${parsed.start}-${parsed.end}/${stat.size}`,
-      'Accept-Ranges': 'bytes',
-      'Content-Length': parsed.end - parsed.start + 1,
-      'Content-Type': contentType,
-      'Content-Disposition': `inline; filename="${encodeURIComponent(file.filename)}"`,
-    });
-    fs.createReadStream(file.path, parsed).pipe(res);
-    return;
-  }
-
-  res.writeHead(200, {
-    'Accept-Ranges': 'bytes',
-    'Content-Length': stat.size,
-    'Content-Type': contentType,
-    'Content-Disposition': `inline; filename="${encodeURIComponent(file.filename)}"`,
-  });
-  fs.createReadStream(file.path).pipe(res);
+  streamMediaFile(req, res, file.path, file.filename);
 });
 
 mediaRouter.get('/files', (req: Request, res: Response): void => {
@@ -675,6 +667,38 @@ function parseByteRange(rangeHeader: string, fileSize: number): ByteRange | null
   if (start < 0 || end < start || start >= fileSize) return null;
 
   return { start, end: Math.min(end, fileSize - 1) };
+}
+
+function streamMediaFile(req: Request, res: Response, filePath: string, filename: string): void {
+  const stat = fs.statSync(filePath);
+  const contentType = videoContentType(filePath);
+  const range = req.headers.range;
+
+  if (range) {
+    const parsed = parseByteRange(range, stat.size);
+    if (!parsed) {
+      res.status(416).setHeader('Content-Range', `bytes */${stat.size}`).end();
+      return;
+    }
+
+    res.writeHead(206, {
+      'Content-Range': `bytes ${parsed.start}-${parsed.end}/${stat.size}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': parsed.end - parsed.start + 1,
+      'Content-Type': contentType,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(filename)}"`,
+    });
+    fs.createReadStream(filePath, parsed).pipe(res);
+    return;
+  }
+
+  res.writeHead(200, {
+    'Accept-Ranges': 'bytes',
+    'Content-Length': stat.size,
+    'Content-Type': contentType,
+    'Content-Disposition': `inline; filename="${encodeURIComponent(filename)}"`,
+  });
+  fs.createReadStream(filePath).pipe(res);
 }
 
 function videoContentType(filePath: string): string {
