@@ -2004,7 +2004,9 @@ function inferMainProcess(
 }
 
 function readThrottleProcess(): ServerNormalizationProcessInfo | null {
-  return inferMainProcess(readProcessesForJob(null, null, '/tmp/throttle_fix_normalized_ar.sh'), '/tmp/throttle_fix_normalized_ar.sh');
+  const processes = readProcessesForJob(null, null, '/tmp/throttle_fix_normalized_ar.sh');
+  return processes.find(processInfo => /\bbash\s+\/tmp\/throttle_fix_normalized_ar\.sh\b/.test(processInfo.command))
+    ?? inferMainProcess(processes, '/tmp/throttle_fix_normalized_ar.sh');
 }
 
 function isLikelyNormalizationFfmpeg(command: string, scriptName: string): boolean {
