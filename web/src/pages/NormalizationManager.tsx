@@ -483,6 +483,7 @@ export default function NormalizationManagerPage() {
 
   const topItems = preflight?.items.slice(0, 80) ?? [];
   const currentServerJob = serverStatus?.continueJob.running ? serverStatus.continueJob : serverStatus?.fixJob;
+  const summaryCards = buildSummaryCards(currentServerJob, preflight, status);
 
   return (
     <div className="space-y-5">
@@ -505,12 +506,9 @@ export default function NormalizationManagerPage() {
       </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-        <SummaryCard label="total" value={preflight?.summary.total ?? status?.latestPlan?.summary.total ?? 0} />
-        <SummaryCard label="ok" value={preflight?.summary.ok ?? status?.latestPlan?.summary.ok ?? 0} tone="ready" />
-        <SummaryCard label="remux" value={preflight?.summary.remux ?? status?.latestPlan?.summary.remux ?? 0} />
-        <SummaryCard label="audio-only" value={preflight?.summary.audioOnly ?? status?.latestPlan?.summary.audioOnly ?? 0} tone="warning" />
-        <SummaryCard label="full-transcode" value={preflight?.summary.fullTranscode ?? status?.latestPlan?.summary.fullTranscode ?? 0} tone="warning" />
-        <SummaryCard label="failed" value={preflight?.summary.failed ?? status?.latestPlan?.summary.failed ?? 0} tone="error" />
+        {summaryCards.map(card => (
+          <SummaryCard key={card.label} label={card.label} value={card.value} tone={card.tone} />
+        ))}
       </section>
 
       <section className="card space-y-4">
@@ -929,7 +927,61 @@ export default function NormalizationManagerPage() {
   );
 }
 
-function SummaryCard({ label, value, tone }: { label: string; value: number; tone?: 'ready' | 'warning' | 'error' }) {
+interface SummaryCardMetric {
+  label: string;
+  value: string | number;
+  tone?: 'ready' | 'warning' | 'error';
+}
+
+function buildSummaryCards(
+  currentServerJob: ServerNormalizationJobStatus | undefined,
+  preflight: NormalizationPreflight | null,
+  status: NormalizationStatus | null
+): SummaryCardMetric[] {
+  if (currentServerJob && isLiveJobSummaryAvailable(currentServerJob)) {
+    const checked = currentServerJob.progress.current ?? jobProcessedCount(currentServerJob);
+    const total = currentServerJob.progress.total ?? checked;
+    return [
+      { label: 'total', value: total },
+      { label: 'checked', value: checked },
+      { label: 'ok', value: jobOkCount(currentServerJob), tone: 'ready' },
+      { label: 'fix', value: currentServerJob.counts.fix, tone: 'warning' },
+      { label: 'failed', value: currentServerJob.counts.failed, tone: 'error' },
+      { label: 'cpu', value: `${currentServerJob.cpuPercent.toFixed(1)}%` },
+    ];
+  }
+
+  const summary = preflight?.summary ?? status?.latestPlan?.summary;
+  return [
+    { label: 'total', value: summary?.total ?? 0 },
+    { label: 'ok', value: summary?.ok ?? 0, tone: 'ready' },
+    { label: 'remux', value: summary?.remux ?? 0 },
+    { label: 'audio-only', value: summary?.audioOnly ?? 0, tone: 'warning' },
+    { label: 'full-transcode', value: summary?.fullTranscode ?? 0, tone: 'warning' },
+    { label: 'failed', value: summary?.failed ?? 0, tone: 'error' },
+  ];
+}
+
+function isLiveJobSummaryAvailable(job: ServerNormalizationJobStatus): boolean {
+  return job.running || job.done || job.progress.current !== null || jobProcessedCount(job) > 0;
+}
+
+function jobProcessedCount(job: ServerNormalizationJobStatus): number {
+  return job.counts.ok
+    + job.counts.noAction
+    + job.counts.fix
+    + job.counts.failed
+    + job.counts.remux
+    + job.counts.audioOnly
+    + job.counts.fullTranscode
+    + job.counts.other;
+}
+
+function jobOkCount(job: ServerNormalizationJobStatus): number {
+  return job.counts.ok + job.counts.noAction;
+}
+
+function SummaryCard({ label, value, tone }: SummaryCardMetric) {
   const color = tone === 'ready' ? 'var(--success)' : tone === 'warning' ? 'var(--warning)' : tone === 'error' ? 'var(--danger)' : 'var(--text-primary)';
   return (
     <div className="card">
@@ -986,7 +1038,7 @@ function ServerJobPanel({ job }: { job: ServerNormalizationJobStatus }) {
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Info label="progress" value={progressText} />
-        <Info label="ok / failed" value={`${job.counts.ok} / ${job.counts.failed}`} />
+        <Info label="ok / failed" value={`${jobOkCount(job)} / ${job.counts.failed}`} />
         <Info label="fix / no action" value={`${job.counts.fix} / ${job.counts.noAction}`} />
         <Info label="cpu" value={`${job.cpuPercent.toFixed(1)}%`} />
         <Info label="pid" value={job.pid ?? '-'} />
