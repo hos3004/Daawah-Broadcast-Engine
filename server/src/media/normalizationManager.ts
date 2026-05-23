@@ -1,9 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import childProcess from 'child_process';
+import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { config } from '../config';
 import { getDb } from '../db/schema';
+import { diskUsage, formatBytes } from '../utils/fileUtils';
 import { buildAudioNormAf, buildVideoNormVf } from './normalizer';
 import {
   getActiveScheduleState,
@@ -25,6 +27,7 @@ export type NormalizationReason =
   | 'resolution'
   | 'pix_fmt'
   | 'video_codec'
+  | 'bitrate'
   | 'container'
   | 'unscanned';
 
@@ -37,6 +40,11 @@ export interface NormalizationTargetProfile {
   audioCodec: 'aac';
   audioRate: number;
   audioChannels: 2;
+  audioBitrate: '192k';
+  videoBitrate: '2500k';
+  videoMaxrate: '3500k';
+  videoBufsize: '7000k';
+  maxVideoBitrate: 3500000;
   container: 'mp4';
 }
 
@@ -69,6 +77,7 @@ export interface NormalizationProbeSnapshot {
   videoCodec: string | null;
   audioCodec: string | null;
   pixelFormat: string | null;
+  bitrate: number | null;
   audioRate: number | null;
 }
 
@@ -100,7 +109,7 @@ export interface NormalizationSummary {
     failedMustBe: 0;
     durationKnown: true;
     video: '1280x720 25fps h264 yuv420p';
-    audio: 'AAC 48k stereo';
+    audio: 'AAC 48k stereo 192k';
     timestamps: 'reset by normalization filtergraph';
   };
 }
@@ -234,6 +243,119 @@ export interface NormalizationStatus {
   };
 }
 
+export interface ServerNormalizationProcessInfo {
+  pid: number;
+  ppid: number | null;
+  pgid: number | null;
+  nice: number | null;
+  cpuPercent: number;
+  stat: string | null;
+  command: string;
+}
+
+export interface ServerNormalizationJobStatus {
+  key: 'fix_existing_normalized' | 'continue_original_ar';
+  label: string;
+  scriptPath: string;
+  pidPath: string;
+  outputPath: string;
+  reportPath: string | null;
+  pid: number | null;
+  pgid: number | null;
+  running: boolean;
+  done: boolean;
+  progress: {
+    current: number | null;
+    total: number | null;
+    percent: number | null;
+  };
+  counts: {
+    ok: number;
+    failed: number;
+    fix: number;
+    noAction: number;
+    remux: number;
+    audioOnly: number;
+    fullTranscode: number;
+    other: number;
+  };
+  cpuPercent: number;
+  lastLines: string[];
+  processes: ServerNormalizationProcessInfo[];
+}
+
+export interface ServerNormalizationStatus {
+  mode: 'server-normalization-status';
+  phase: 'fix_running' | 'continue_running' | 'ready_for_continue' | 'idle';
+  generatedAt: string;
+  server: {
+    hostname: string;
+    platform: string;
+    cpuCount: number;
+    loadAverage: [number, number, number];
+  };
+  paths: {
+    originalRoot: string;
+    normalizedRoot: string;
+    originalSize: string;
+    normalizedSize: string;
+  };
+  disk: {
+    path: string;
+    usedBytes: number;
+    totalBytes: number;
+    freeBytes: number;
+    percent: number;
+    usedLabel: string;
+    totalLabel: string;
+    freeLabel: string;
+  };
+  throttle: {
+    pidPath: string;
+    logPath: string;
+    pid: number | null;
+    running: boolean;
+    lastLines: string[];
+  };
+  fixJob: ServerNormalizationJobStatus;
+  continueJob: ServerNormalizationJobStatus;
+  guidance: {
+    canStartContinue: boolean;
+    reason: string;
+  };
+}
+
+export interface ServerNormalizationNextTaskConfig {
+  sourceRoot: string;
+  outputRoot: string;
+  maxParallel: number;
+  nice: number;
+  ioniceClass: 2 | 3;
+  ioniceLevel: number;
+  maxVideoBitrate: number;
+  videoBitrate: string;
+  videoMaxrate: string;
+  videoBufsize: string;
+  audioBitrate: string;
+  deleteOriginalAfterValidation: boolean;
+  requireFixDoneBeforeContinue: boolean;
+}
+
+export interface ServerNormalizationNextTask {
+  mode: 'server-normalization-next-task';
+  config: ServerNormalizationNextTaskConfig;
+  envPreview: Record<string, string>;
+  commandPreview: string;
+  safety: {
+    startsAutomatically: false;
+    scriptPath: '/tmp/continue_normalize_ar_server.sh';
+    pidPath: '/tmp/continue_normalize_ar_server.pid';
+    outputPath: '/tmp/continue_normalize_ar_server.out';
+    deletesOriginalOnlyAfterValidation: boolean;
+    requiresFixDoneBeforeContinue: boolean;
+  };
+}
+
 export interface NormalizationSafety {
   readOnlyScan: true;
   dryRun: true;
@@ -264,6 +386,7 @@ interface MediaFileRow {
   video_codec: string | null;
   audio_codec: string | null;
   pixel_format: string | null;
+  bitrate: number | null;
   audio_rate: number | null;
   root_key: string | null;
   root_absolute_path: string | null;
@@ -333,7 +456,18 @@ interface ActiveNormalizationRun {
   stopRequested: boolean;
 }
 
-const DEFAULT_ROOT_KEYS = ['source', 'bumpers'];
+const DEFAULT_ROOT_KEYS = ['original-ar'];
+const ORIGINAL_MEDIA_ROOT = '/srv/daawah/media/original-ar';
+const NORMALIZED_MEDIA_ROOT = '/srv/daawah/media/normalized-ar';
+const FIX_NORMALIZED_SCRIPT_PATH = '/tmp/fix_normalized_ar_server.sh';
+const FIX_NORMALIZED_PID_PATH = '/tmp/fix_normalized_ar_server.pid';
+const FIX_NORMALIZED_OUTPUT_PATH = '/tmp/fix_normalized_ar_server.out';
+const CONTINUE_NORMALIZE_SCRIPT_PATH = '/tmp/continue_normalize_ar_server.sh';
+const CONTINUE_NORMALIZE_PID_PATH = '/tmp/continue_normalize_ar_server.pid';
+const CONTINUE_NORMALIZE_OUTPUT_PATH = '/tmp/continue_normalize_ar_server.out';
+const FIX_THROTTLE_PID_PATH = '/tmp/fix_normalized_ar_throttle.pid';
+const FIX_THROTTLE_LOG_PATH = '/tmp/fix_normalized_ar_throttle.out';
+const NORMALIZATION_NEXT_TASK_SETTING_KEY = 'normalization_next_task_config';
 const DECISIONS: NormalizationDecision[] = ['ok', 'remux', 'audio-only', 'full-transcode', 'failed'];
 const REASONS: NormalizationReason[] = [
   'missing',
@@ -344,6 +478,7 @@ const REASONS: NormalizationReason[] = [
   'resolution',
   'pix_fmt',
   'video_codec',
+  'bitrate',
   'container',
   'unscanned',
 ];
@@ -354,12 +489,13 @@ export function getNormalizationStatus(): NormalizationStatus {
   const roots = db.prepare(`
     SELECT root_key, absolute_path, is_readonly, is_original_library
     FROM media_roots
-    WHERE root_key IN ('source','bumpers','normalized-ar')
+    WHERE root_key IN ('original-ar','source','bumpers','normalized-ar')
     ORDER BY CASE root_key
-      WHEN 'source' THEN 0
-      WHEN 'bumpers' THEN 1
-      WHEN 'normalized-ar' THEN 2
-      ELSE 3
+      WHEN 'original-ar' THEN 0
+      WHEN 'source' THEN 1
+      WHEN 'bumpers' THEN 2
+      WHEN 'normalized-ar' THEN 3
+      ELSE 4
     END
   `).all() as Array<{
     root_key: string;
@@ -386,6 +522,101 @@ export function getNormalizationStatus(): NormalizationStatus {
       broadcast: false,
     },
   };
+}
+
+export function getServerNormalizationStatus(): ServerNormalizationStatus {
+  const fixJob = readServerNormalizationJob({
+    key: 'fix_existing_normalized',
+    label: 'Fix existing normalized-ar',
+    scriptPath: FIX_NORMALIZED_SCRIPT_PATH,
+    pidPath: FIX_NORMALIZED_PID_PATH,
+    outputPath: FIX_NORMALIZED_OUTPUT_PATH,
+    reportPattern: /^fix_existing_normalized_.*\.csv$/,
+  });
+  const continueJob = readServerNormalizationJob({
+    key: 'continue_original_ar',
+    label: 'Continue original-ar normalize',
+    scriptPath: CONTINUE_NORMALIZE_SCRIPT_PATH,
+    pidPath: CONTINUE_NORMALIZE_PID_PATH,
+    outputPath: CONTINUE_NORMALIZE_OUTPUT_PATH,
+    reportPattern: /^(continue|normalize).*\.csv$/,
+  });
+  const throttlePid = readPidFile(FIX_THROTTLE_PID_PATH);
+  const throttleRunning = throttlePid !== null && isPidRunning(throttlePid);
+  const rawDisk = diskUsage('/srv');
+  const freeBytes = Math.max(0, rawDisk.total - rawDisk.used);
+  const phase: ServerNormalizationStatus['phase'] = continueJob.running
+    ? 'continue_running'
+    : fixJob.running
+      ? 'fix_running'
+      : fixJob.done
+        ? 'ready_for_continue'
+        : 'idle';
+  const canStartContinue = phase === 'ready_for_continue' && fixJob.counts.failed === 0;
+
+  return {
+    mode: 'server-normalization-status',
+    phase,
+    generatedAt: new Date().toISOString(),
+    server: {
+      hostname: os.hostname(),
+      platform: os.platform(),
+      cpuCount: os.cpus().length,
+      loadAverage: os.loadavg() as [number, number, number],
+    },
+    paths: {
+      originalRoot: ORIGINAL_MEDIA_ROOT,
+      normalizedRoot: getNormalizedOutputRoot(),
+      originalSize: directorySizeLabel(ORIGINAL_MEDIA_ROOT),
+      normalizedSize: directorySizeLabel(getNormalizedOutputRoot()),
+    },
+    disk: {
+      path: '/srv',
+      usedBytes: rawDisk.used,
+      totalBytes: rawDisk.total,
+      freeBytes,
+      percent: rawDisk.percent,
+      usedLabel: formatBytes(rawDisk.used),
+      totalLabel: formatBytes(rawDisk.total),
+      freeLabel: formatBytes(freeBytes),
+    },
+    throttle: {
+      pidPath: FIX_THROTTLE_PID_PATH,
+      logPath: FIX_THROTTLE_LOG_PATH,
+      pid: throttlePid,
+      running: throttleRunning,
+      lastLines: tailLines(FIX_THROTTLE_LOG_PATH, 12),
+    },
+    fixJob,
+    continueJob,
+    guidance: {
+      canStartContinue,
+      reason: continueJob.running
+        ? 'Continue normalize is already running.'
+        : fixJob.running
+          ? 'Wait for the fix_existing_normalized job to print DONE.'
+          : !fixJob.done
+            ? 'No completed fix_existing_normalized DONE marker was found yet.'
+            : fixJob.counts.failed > 0
+              ? 'Fix job is done but has failed rows. Resolve them before continue normalize.'
+              : 'Fix job is done with failed=0. Continue normalize can be prepared for the next step.',
+    },
+  };
+}
+
+export function getServerNormalizationNextTask(): ServerNormalizationNextTask {
+  return buildServerNormalizationNextTask(readServerNormalizationNextTaskConfig());
+}
+
+export function saveServerNormalizationNextTask(
+  input: Partial<ServerNormalizationNextTaskConfig>
+): ServerNormalizationNextTask {
+  const configValue = sanitizeServerNormalizationNextTaskConfig(input, readServerNormalizationNextTaskConfig());
+  getDb().prepare(`
+    INSERT OR REPLACE INTO settings (key, value, updated_at, updated_by)
+    VALUES (?, ?, datetime('now'), NULL)
+  `).run(NORMALIZATION_NEXT_TASK_SETTING_KEY, JSON.stringify(configValue));
+  return buildServerNormalizationNextTask(configValue);
 }
 
 export function createNormalizationPreflight(input: NormalizationPreflightInput = {}): NormalizationPreflightResult {
@@ -892,6 +1123,7 @@ function buildExecutionArgs(task: NormalizationPlanTask): string[] {
       '-map', '0:a?',
       '-c:v', 'copy',
       '-c:a', target.audioCodec,
+      '-b:a', target.audioBitrate,
       '-ar', String(target.audioRate),
       '-ac', String(target.audioChannels),
       '-movflags', '+faststart',
@@ -911,10 +1143,13 @@ function buildExecutionArgs(task: NormalizationPlanTask): string[] {
     '-af', buildAudioNormAf({ audioRate: target.audioRate }),
     '-c:v', 'libx264',
     '-preset', 'veryfast',
-    '-crf', '20',
+    '-b:v', target.videoBitrate,
+    '-maxrate', target.videoMaxrate,
+    '-bufsize', target.videoBufsize,
     '-pix_fmt', target.pixelFormat,
     '-r', String(target.fps),
     '-c:a', target.audioCodec,
+    '-b:a', target.audioBitrate,
     '-ar', String(target.audioRate),
     '-ac', String(target.audioChannels),
     '-movflags', '+faststart',
@@ -1046,6 +1281,7 @@ export function classifyNormalizationDecision(row: {
   video_codec?: string | null;
   audio_codec?: string | null;
   pixel_format?: string | null;
+  bitrate?: number | null;
   audio_rate?: number | null;
 }, exists: boolean, target: NormalizationTargetProfile = getTargetProfile()): { decision: NormalizationDecision; reasons: NormalizationReason[] } {
   const reasons = new Set<NormalizationReason>();
@@ -1057,6 +1293,9 @@ export function classifyNormalizationDecision(row: {
   if (row.width !== target.width || row.height !== target.height) reasons.add('resolution');
   if (!fpsMatches(row.fps ?? null, target.fps)) reasons.add('fps');
   if ((row.pixel_format ?? '').toLowerCase() !== target.pixelFormat) reasons.add('pix_fmt');
+  if (typeof row.bitrate === 'number' && Number.isFinite(row.bitrate) && row.bitrate > target.maxVideoBitrate) {
+    reasons.add('bitrate');
+  }
   if ((row.audio_codec ?? '').toLowerCase() !== target.audioCodec) reasons.add('audio_codec');
   if (row.audio_rate !== target.audioRate) reasons.add('sample_rate');
   if (path.extname(row.path).toLowerCase() !== '.mp4') reasons.add('container');
@@ -1066,7 +1305,7 @@ export function classifyNormalizationDecision(row: {
     return { decision: 'failed', reasons: reasonList };
   }
 
-  if (hasAnyReason(reasons, ['video_codec', 'resolution', 'fps', 'pix_fmt', 'unscanned'])) {
+  if (hasAnyReason(reasons, ['video_codec', 'resolution', 'fps', 'pix_fmt', 'bitrate', 'unscanned'])) {
     return { decision: 'full-transcode', reasons: reasonList };
   }
 
@@ -1150,6 +1389,7 @@ function readMediaRowsForRoots(rootKeys?: string[], limit?: number): MediaFileRo
       mf.video_codec,
       mf.audio_codec,
       mf.pixel_format,
+      mf.bitrate,
       mf.audio_rate,
       mr.root_key,
       mr.absolute_path as root_absolute_path
@@ -1183,6 +1423,7 @@ function readMediaRowsByIds(ids: string[]): MediaFileRow[] {
       mf.video_codec,
       mf.audio_codec,
       mf.pixel_format,
+      mf.bitrate,
       mf.audio_rate,
       mr.root_key,
       mr.absolute_path as root_absolute_path
@@ -1216,6 +1457,7 @@ function buildPreflightItem(row: MediaFileRow, index: number): NormalizationPref
       videoCodec: row.video_codec,
       audioCodec: row.audio_codec,
       pixelFormat: row.pixel_format,
+      bitrate: row.bitrate,
       audioRate: row.audio_rate,
     },
   };
@@ -1255,7 +1497,7 @@ function buildSummary(items: NormalizationPreflightItem[]): NormalizationSummary
       failedMustBe: 0,
       durationKnown: true,
       video: '1280x720 25fps h264 yuv420p',
-      audio: 'AAC 48k stereo',
+      audio: 'AAC 48k stereo 192k',
       timestamps: 'reset by normalization filtergraph',
     },
   };
@@ -1280,6 +1522,46 @@ function buildPlanTasks(planId: string, items: NormalizationPreflightItem[]): No
 
 function buildCommandPreview(item: NormalizationPreflightItem): string {
   const target = getTargetProfile();
+  if (item.decision === 'remux') {
+    return [
+      config.ffmpeg.ffmpegPath,
+      '-i',
+      quoteArg(item.absolutePath),
+      '-map',
+      '0',
+      '-c',
+      'copy',
+      '-movflags',
+      '+faststart',
+      quoteArg(item.normalizedPath),
+    ].join(' ');
+  }
+
+  if (item.decision === 'audio-only') {
+    return [
+      config.ffmpeg.ffmpegPath,
+      '-i',
+      quoteArg(item.absolutePath),
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a?',
+      '-c:v',
+      'copy',
+      '-c:a',
+      target.audioCodec,
+      '-b:a',
+      target.audioBitrate,
+      '-ar',
+      String(target.audioRate),
+      '-ac',
+      String(target.audioChannels),
+      '-movflags',
+      '+faststart',
+      quoteArg(item.normalizedPath),
+    ].join(' ');
+  }
+
   return [
     config.ffmpeg.ffmpegPath,
     '-i',
@@ -1288,10 +1570,18 @@ function buildCommandPreview(item: NormalizationPreflightItem): string {
     quoteArg(`scale=${target.width}:${target.height}:force_original_aspect_ratio=decrease,pad=${target.width}:${target.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${target.fps},setpts=N/(${target.fps}*TB),settb=1/${target.fps}`),
     '-c:v',
     'libx264',
+    '-b:v',
+    target.videoBitrate,
+    '-maxrate',
+    target.videoMaxrate,
+    '-bufsize',
+    target.videoBufsize,
     '-pix_fmt',
     target.pixelFormat,
     '-c:a',
     target.audioCodec,
+    '-b:a',
+    target.audioBitrate,
     '-ar',
     String(target.audioRate),
     '-ac',
@@ -1313,12 +1603,17 @@ function getTargetProfile(): NormalizationTargetProfile {
     audioCodec: 'aac',
     audioRate: config.broadcast.audioRate,
     audioChannels: 2,
+    audioBitrate: '192k',
+    videoBitrate: '2500k',
+    videoMaxrate: '3500k',
+    videoBufsize: '7000k',
+    maxVideoBitrate: 3500000,
     container: 'mp4',
   };
 }
 
 function getNormalizedOutputRoot(): string {
-  const configured = process.env['NORMALIZED_MEDIA_PATH'] ?? '/srv/daawah/media/normalized-ar';
+  const configured = process.env['NORMALIZED_MEDIA_PATH'] ?? NORMALIZED_MEDIA_ROOT;
   if (configured.startsWith('/')) {
     return path.posix.normalize(configured);
   }
@@ -1357,7 +1652,7 @@ function getDryRunSafety(): NormalizationSafety {
 }
 
 function normalizeRootKeys(rootKeys?: string[]): string[] {
-  const allowed = new Set(['source', 'bumpers']);
+  const allowed = new Set(['original-ar', 'source', 'bumpers']);
   const keys = (rootKeys && rootKeys.length > 0 ? rootKeys : DEFAULT_ROOT_KEYS)
     .map(key => key.trim())
     .filter(key => allowed.has(key));
@@ -1470,6 +1765,402 @@ function isPathInside(rootPath: string, candidatePath: string): boolean {
   const root = path.resolve(rootPath);
   const candidate = path.resolve(candidatePath);
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+interface ServerNormalizationJobDescriptor {
+  key: ServerNormalizationJobStatus['key'];
+  label: string;
+  scriptPath: string;
+  pidPath: string;
+  outputPath: string;
+  reportPattern: RegExp;
+}
+
+function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor): ServerNormalizationJobStatus {
+  const pid = readPidFile(descriptor.pidPath);
+  const running = pid !== null && isPidRunning(pid);
+  const pgid = pid ? getProcessGroupId(pid) : null;
+  const outputText = readTextTail(descriptor.outputPath, 1024 * 1024);
+  const reportPath = latestReportPath(descriptor.reportPattern);
+  const logProgress = parseNormalizationProgress(outputText);
+  const logCounts = parseNormalizationCounts(outputText);
+  const reportCounts = reportPath ? parseNormalizationReportCounts(reportPath) : null;
+  const counts = reportCounts ?? logCounts;
+  const progress = inferNormalizationProgress(logProgress, counts, descriptor.key);
+  const processes = readProcessesForJob(pgid, pid, descriptor.scriptPath);
+  const cpuPercent = processes.reduce((sum, processInfo) => sum + processInfo.cpuPercent, 0);
+
+  return {
+    key: descriptor.key,
+    label: descriptor.label,
+    scriptPath: descriptor.scriptPath,
+    pidPath: descriptor.pidPath,
+    outputPath: descriptor.outputPath,
+    reportPath,
+    pid,
+    pgid,
+    running,
+    done: /\bDONE\b/i.test(outputText),
+    progress,
+    counts,
+    cpuPercent: Number(cpuPercent.toFixed(2)),
+    lastLines: tailLinesFromText(outputText, 24),
+    processes,
+  };
+}
+
+function readServerNormalizationNextTaskConfig(): ServerNormalizationNextTaskConfig {
+  const defaults = defaultServerNormalizationNextTaskConfig();
+  try {
+    const row = getDb().prepare('SELECT value FROM settings WHERE key=?').get(NORMALIZATION_NEXT_TASK_SETTING_KEY) as { value: string } | undefined;
+    if (!row) return defaults;
+    return sanitizeServerNormalizationNextTaskConfig(parseJson<Partial<ServerNormalizationNextTaskConfig>>(row.value), defaults);
+  } catch {
+    return defaults;
+  }
+}
+
+function buildServerNormalizationNextTask(configValue: ServerNormalizationNextTaskConfig): ServerNormalizationNextTask {
+  const ioniceArgs = configValue.ioniceClass === 3
+    ? `ionice -c3`
+    : `ionice -c2 -n${configValue.ioniceLevel}`;
+  const envPreview = {
+    NORMALIZE_SOURCE_ROOT: configValue.sourceRoot,
+    NORMALIZE_OUTPUT_ROOT: configValue.outputRoot,
+    NORMALIZE_MAX_PARALLEL: String(configValue.maxParallel),
+    NORMALIZE_MAX_VIDEO_BITRATE: String(configValue.maxVideoBitrate),
+    NORMALIZE_VIDEO_BITRATE: configValue.videoBitrate,
+    NORMALIZE_VIDEO_MAXRATE: configValue.videoMaxrate,
+    NORMALIZE_VIDEO_BUFSIZE: configValue.videoBufsize,
+    NORMALIZE_AUDIO_BITRATE: configValue.audioBitrate,
+    DELETE_ORIGINAL_AFTER_VALIDATION: configValue.deleteOriginalAfterValidation ? '1' : '0',
+    REQUIRE_FIX_DONE_BEFORE_CONTINUE: configValue.requireFixDoneBeforeContinue ? '1' : '0',
+  };
+  const envPrefix = Object.entries(envPreview)
+    .map(([key, value]) => `${key}=${quoteArg(value)}`)
+    .join(' ');
+
+  return {
+    mode: 'server-normalization-next-task',
+    config: configValue,
+    envPreview,
+    commandPreview: `${envPrefix} nohup nice -n ${configValue.nice} ${ioniceArgs} ${CONTINUE_NORMALIZE_SCRIPT_PATH} > ${CONTINUE_NORMALIZE_OUTPUT_PATH} 2>&1 & echo $! > ${CONTINUE_NORMALIZE_PID_PATH}`,
+    safety: {
+      startsAutomatically: false,
+      scriptPath: CONTINUE_NORMALIZE_SCRIPT_PATH,
+      pidPath: CONTINUE_NORMALIZE_PID_PATH,
+      outputPath: CONTINUE_NORMALIZE_OUTPUT_PATH,
+      deletesOriginalOnlyAfterValidation: configValue.deleteOriginalAfterValidation,
+      requiresFixDoneBeforeContinue: configValue.requireFixDoneBeforeContinue,
+    },
+  };
+}
+
+function defaultServerNormalizationNextTaskConfig(): ServerNormalizationNextTaskConfig {
+  const target = getTargetProfile();
+  return {
+    sourceRoot: ORIGINAL_MEDIA_ROOT,
+    outputRoot: getNormalizedOutputRoot(),
+    maxParallel: 5,
+    nice: 10,
+    ioniceClass: 2,
+    ioniceLevel: 7,
+    maxVideoBitrate: target.maxVideoBitrate,
+    videoBitrate: target.videoBitrate,
+    videoMaxrate: target.videoMaxrate,
+    videoBufsize: target.videoBufsize,
+    audioBitrate: target.audioBitrate,
+    deleteOriginalAfterValidation: true,
+    requireFixDoneBeforeContinue: true,
+  };
+}
+
+function sanitizeServerNormalizationNextTaskConfig(
+  input: Partial<ServerNormalizationNextTaskConfig>,
+  fallback: ServerNormalizationNextTaskConfig
+): ServerNormalizationNextTaskConfig {
+  const ioniceClass = Number(input.ioniceClass);
+  return {
+    sourceRoot: sanitizeServerMediaPath(input.sourceRoot, fallback.sourceRoot),
+    outputRoot: sanitizeServerMediaPath(input.outputRoot, fallback.outputRoot),
+    maxParallel: clampInteger(input.maxParallel, 1, 10, fallback.maxParallel),
+    nice: clampInteger(input.nice, 0, 19, fallback.nice),
+    ioniceClass: ioniceClass === 3 ? 3 : 2,
+    ioniceLevel: clampInteger(input.ioniceLevel, 0, 7, fallback.ioniceLevel),
+    maxVideoBitrate: clampInteger(input.maxVideoBitrate, 500000, 20000000, fallback.maxVideoBitrate),
+    videoBitrate: sanitizeBitrateLabel(input.videoBitrate, fallback.videoBitrate),
+    videoMaxrate: sanitizeBitrateLabel(input.videoMaxrate, fallback.videoMaxrate),
+    videoBufsize: sanitizeBitrateLabel(input.videoBufsize, fallback.videoBufsize),
+    audioBitrate: sanitizeBitrateLabel(input.audioBitrate, fallback.audioBitrate),
+    deleteOriginalAfterValidation: input.deleteOriginalAfterValidation ?? fallback.deleteOriginalAfterValidation,
+    requireFixDoneBeforeContinue: input.requireFixDoneBeforeContinue ?? fallback.requireFixDoneBeforeContinue,
+  };
+}
+
+function sanitizeServerMediaPath(value: unknown, fallback: string): string {
+  const cleaned = cleanString(value);
+  if (!cleaned.startsWith('/srv/daawah/media/')) return fallback;
+  return path.posix.normalize(cleaned);
+}
+
+function sanitizeBitrateLabel(value: unknown, fallback: string): string {
+  const cleaned = cleanString(value);
+  return /^\d+[kKmM]?$/.test(cleaned) ? cleaned.toLowerCase() : fallback;
+}
+
+function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function readPidFile(pidPath: string): number | null {
+  try {
+    const pid = Number.parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPidRunning(pid: number): boolean {
+  if (fs.existsSync(`/proc/${pid}`)) return true;
+  try {
+    const output = childProcess.execFileSync('ps', ['-p', String(pid), '-o', 'pid='], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+    }).trim();
+    if (output === String(pid)) return true;
+  } catch {
+    // Fall through to process.kill for platforms without ps.
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return true;
+    return false;
+  }
+}
+
+function getProcessGroupId(pid: number): number | null {
+  try {
+    const output = childProcess.execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+    }).trim();
+    const pgid = Number.parseInt(output, 10);
+    return Number.isFinite(pgid) ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
+function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath: string): ServerNormalizationProcessInfo[] {
+  try {
+    const output = childProcess.execFileSync('ps', ['-eo', 'pid=,ppid=,pgid=,ni=,pcpu=,stat=,args='], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+    });
+    const scriptName = path.basename(scriptPath);
+    return output
+      .split(/\r?\n/)
+      .map(parseProcessLine)
+      .filter((processInfo): processInfo is ServerNormalizationProcessInfo => Boolean(processInfo))
+      .filter(processInfo => (
+        (pgid !== null && processInfo.pgid === pgid)
+        || (pid !== null && (processInfo.pid === pid || processInfo.ppid === pid))
+        || processInfo.command.includes(scriptName)
+      ))
+      .slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+function parseProcessLine(line: string): ServerNormalizationProcessInfo | null {
+  const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+([\d.]+)\s+(\S+)\s+(.*)$/);
+  if (!match) return null;
+  const [, pid, ppid, pgid, nice, cpuPercent, stat, command] = match;
+  if (!pid || !ppid || !pgid || !nice || !cpuPercent || !stat || !command) return null;
+  return {
+    pid: Number.parseInt(pid, 10),
+    ppid: Number.parseInt(ppid, 10),
+    pgid: Number.parseInt(pgid, 10),
+    nice: Number.parseInt(nice, 10),
+    cpuPercent: Number.parseFloat(cpuPercent),
+    stat,
+    command,
+  };
+}
+
+function readTextTail(filePath: string, maxBytes: number): string {
+  try {
+    const stat = fs.statSync(filePath);
+    const bytesToRead = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(bytesToRead);
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function tailLines(filePath: string, lines: number): string[] {
+  return tailLinesFromText(readTextTail(filePath, 128 * 1024), lines);
+}
+
+function tailLinesFromText(text: string, lines: number): string[] {
+  if (!text.trim()) return [];
+  return text.replace(/\r\n/g, '\n').trimEnd().split('\n').slice(-lines);
+}
+
+function parseNormalizationProgress(text: string): ServerNormalizationJobStatus['progress'] {
+  let current: number | null = null;
+  let total: number | null = null;
+  for (const match of text.matchAll(/\bCHECK\b[^\d]*(\d+)\s*\/\s*(\d+)/gi)) {
+    const rawCurrent = match[1];
+    const rawTotal = match[2];
+    if (!rawCurrent || !rawTotal) continue;
+    current = Number.parseInt(rawCurrent, 10);
+    total = Number.parseInt(rawTotal, 10);
+  }
+  const percent = current !== null && total !== null && total > 0
+    ? Number(((current / total) * 100).toFixed(1))
+    : null;
+  return { current, total, percent };
+}
+
+function inferNormalizationProgress(
+  progress: ServerNormalizationJobStatus['progress'],
+  counts: ServerNormalizationJobStatus['counts'],
+  jobKey: ServerNormalizationJobStatus['key']
+): ServerNormalizationJobStatus['progress'] {
+  if (progress.current !== null || progress.total !== null) return progress;
+  const processed = counts.ok
+    + counts.failed
+    + counts.fix
+    + counts.noAction
+    + counts.remux
+    + counts.audioOnly
+    + counts.fullTranscode
+    + counts.other;
+  if (processed === 0) return progress;
+  const total = jobKey === 'fix_existing_normalized' ? 178 : null;
+  const percent = total !== null && total > 0 ? Number(((processed / total) * 100).toFixed(1)) : null;
+  return {
+    current: processed,
+    total,
+    percent,
+  };
+}
+
+function parseNormalizationCounts(text: string): ServerNormalizationJobStatus['counts'] {
+  const counts = emptyNormalizationCounts();
+  for (const line of text.split(/\r?\n/)) {
+    const normalized = line.trim().toLowerCase();
+    if (!normalized) continue;
+    if (/^(ok|pass|valid)\b/.test(normalized)) counts.ok += 1;
+    else if (/^(failed|fail|error)\b/.test(normalized)) counts.failed += 1;
+    else if (/^(fix|fixed|rewrite|recompress)\b/.test(normalized)) counts.fix += 1;
+    else if (/remux/.test(normalized)) counts.remux += 1;
+    else if (/audio[-_ ]only/.test(normalized)) counts.audioOnly += 1;
+    else if (/full[-_ ]transcode|transcode/.test(normalized)) counts.fullTranscode += 1;
+    else if (/no[-_ ]?action|skip/.test(normalized)) counts.noAction += 1;
+  }
+  return counts;
+}
+
+function parseNormalizationReportCounts(reportPath: string): ServerNormalizationJobStatus['counts'] | null {
+  const text = readTextTail(reportPath, 8 * 1024 * 1024);
+  if (!text.trim()) return null;
+  const counts = emptyNormalizationCounts();
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  for (const line of lines.slice(1)) {
+    const columns = splitCsvLine(line);
+    const status = columns.slice(1, 5).join(' ').toLowerCase();
+    if (status.includes('failed') || status.includes('fail') || status.includes('error')) counts.failed += 1;
+    else if (status.includes('fix') || status.includes('fixed') || status.includes('rewrite')) counts.fix += 1;
+    else if (status.includes('remux')) counts.remux += 1;
+    else if (status.includes('audio')) counts.audioOnly += 1;
+    else if (status.includes('transcode')) counts.fullTranscode += 1;
+    else if (status.includes('skip') || status.includes('no_action') || status.includes('no action')) counts.noAction += 1;
+    else if (status.includes('ok') || status.includes('valid') || status.includes('pass')) counts.ok += 1;
+    else counts.other += 1;
+  }
+  return counts;
+}
+
+function emptyNormalizationCounts(): ServerNormalizationJobStatus['counts'] {
+  return {
+    ok: 0,
+    failed: 0,
+    fix: 0,
+    noAction: 0,
+    remux: 0,
+    audioOnly: 0,
+    fullTranscode: 0,
+    other: 0,
+  };
+}
+
+function splitCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  result.push(current);
+  return result.map(value => value.trim());
+}
+
+function latestReportPath(pattern: RegExp): string | null {
+  const reportDir = path.posix.join(getNormalizedOutputRoot(), 'reports');
+  try {
+    const candidates = fs.readdirSync(reportDir)
+      .filter(name => pattern.test(name))
+      .map(name => path.posix.join(reportDir, name))
+      .filter(filePath => fs.statSync(filePath).isFile())
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    return candidates[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function directorySizeLabel(dirPath: string): string {
+  if (!fs.existsSync(dirPath)) return 'missing';
+  try {
+    const output = childProcess.execFileSync('du', ['-sh', dirPath], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+    }).trim();
+    return output.split(/\s+/)[0] ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 function renderPlanMarkdown(detail: NormalizationPlanDetail): string {

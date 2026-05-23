@@ -78,6 +78,25 @@ describe('normalization manager', () => {
     expect(failed.reasons).toEqual(expect.arrayContaining(['missing', 'duration']));
   });
 
+  it('requires full transcode when broadcast-profile video bitrate is too high', () => {
+    const decision = classifyNormalizationDecision({
+      path: '/srv/daawah/media/original-ar/high-bitrate.mp4',
+      status: 'ready',
+      duration_sec: 600,
+      width: 1280,
+      height: 720,
+      fps: 25,
+      video_codec: 'h264',
+      audio_codec: 'aac',
+      pixel_format: 'yuv420p',
+      bitrate: 17000000,
+      audio_rate: 48000,
+    }, true);
+
+    expect(decision.decision).toBe('full-transcode');
+    expect(decision.reasons).toContain('bitrate');
+  });
+
   it('requires explicit smart normalization confirmation text before execution can proceed', () => {
     expect(() => rejectNormalizationExecution({
       planId: 'plan-1',

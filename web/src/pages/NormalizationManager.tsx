@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   CheckCircle2,
+  Cpu,
   FileCog,
+  HardDrive,
   ListChecks,
   Play,
   RefreshCw,
+  Save,
+  Settings2,
   ShieldCheck,
   XCircle,
 } from 'lucide-react';
@@ -25,6 +30,11 @@ interface NormalizationStatus {
     audioCodec: string;
     audioRate: number;
     audioChannels: number;
+    audioBitrate: string;
+    videoBitrate: string;
+    videoMaxrate: string;
+    videoBufsize: string;
+    maxVideoBitrate: number;
   };
   roots: Array<{
     rootKey: string;
@@ -54,7 +64,119 @@ interface NormalizationItem {
     videoCodec: string | null;
     audioCodec: string | null;
     pixelFormat: string | null;
+    bitrate: number | null;
     audioRate: number | null;
+  };
+}
+
+interface ServerNormalizationProcessInfo {
+  pid: number;
+  ppid: number | null;
+  pgid: number | null;
+  nice: number | null;
+  cpuPercent: number;
+  stat: string | null;
+  command: string;
+}
+
+interface ServerNormalizationJobStatus {
+  key: 'fix_existing_normalized' | 'continue_original_ar';
+  label: string;
+  scriptPath: string;
+  pidPath: string;
+  outputPath: string;
+  reportPath: string | null;
+  pid: number | null;
+  pgid: number | null;
+  running: boolean;
+  done: boolean;
+  progress: {
+    current: number | null;
+    total: number | null;
+    percent: number | null;
+  };
+  counts: {
+    ok: number;
+    failed: number;
+    fix: number;
+    noAction: number;
+    remux: number;
+    audioOnly: number;
+    fullTranscode: number;
+    other: number;
+  };
+  cpuPercent: number;
+  lastLines: string[];
+  processes: ServerNormalizationProcessInfo[];
+}
+
+interface ServerNormalizationStatus {
+  phase: 'fix_running' | 'continue_running' | 'ready_for_continue' | 'idle';
+  generatedAt: string;
+  server: {
+    hostname: string;
+    platform: string;
+    cpuCount: number;
+    loadAverage: [number, number, number];
+  };
+  paths: {
+    originalRoot: string;
+    normalizedRoot: string;
+    originalSize: string;
+    normalizedSize: string;
+  };
+  disk: {
+    path: string;
+    usedBytes: number;
+    totalBytes: number;
+    freeBytes: number;
+    percent: number;
+    usedLabel: string;
+    totalLabel: string;
+    freeLabel: string;
+  };
+  throttle: {
+    pidPath: string;
+    logPath: string;
+    pid: number | null;
+    running: boolean;
+    lastLines: string[];
+  };
+  fixJob: ServerNormalizationJobStatus;
+  continueJob: ServerNormalizationJobStatus;
+  guidance: {
+    canStartContinue: boolean;
+    reason: string;
+  };
+}
+
+interface ServerNormalizationNextTaskConfig {
+  sourceRoot: string;
+  outputRoot: string;
+  maxParallel: number;
+  nice: number;
+  ioniceClass: 2 | 3;
+  ioniceLevel: number;
+  maxVideoBitrate: number;
+  videoBitrate: string;
+  videoMaxrate: string;
+  videoBufsize: string;
+  audioBitrate: string;
+  deleteOriginalAfterValidation: boolean;
+  requireFixDoneBeforeContinue: boolean;
+}
+
+interface ServerNormalizationNextTask {
+  config: ServerNormalizationNextTaskConfig;
+  envPreview: Record<string, string>;
+  commandPreview: string;
+  safety: {
+    startsAutomatically: false;
+    scriptPath: string;
+    pidPath: string;
+    outputPath: string;
+    deletesOriginalOnlyAfterValidation: boolean;
+    requiresFixDoneBeforeContinue: boolean;
   };
 }
 
@@ -142,12 +264,32 @@ const decisionLabels: Record<NormalizationDecision, string> = {
   failed: 'failed',
 };
 
+const defaultNextTaskConfig: ServerNormalizationNextTaskConfig = {
+  sourceRoot: '/srv/daawah/media/original-ar',
+  outputRoot: '/srv/daawah/media/normalized-ar',
+  maxParallel: 5,
+  nice: 10,
+  ioniceClass: 2,
+  ioniceLevel: 7,
+  maxVideoBitrate: 3500000,
+  videoBitrate: '2500k',
+  videoMaxrate: '3500k',
+  videoBufsize: '7000k',
+  audioBitrate: '192k',
+  deleteOriginalAfterValidation: true,
+  requireFixDoneBeforeContinue: true,
+};
+
 export default function NormalizationManagerPage() {
   const [status, setStatus] = useState<NormalizationStatus | null>(null);
+  const [serverStatus, setServerStatus] = useState<ServerNormalizationStatus | null>(null);
+  const [nextTask, setNextTask] = useState<ServerNormalizationNextTask | null>(null);
+  const [nextConfig, setNextConfig] = useState<ServerNormalizationNextTaskConfig>(defaultNextTaskConfig);
   const [scope, setScope] = useState<NormalizationScope>('media_roots');
   const [publishedScheduleId, setPublishedScheduleId] = useState('');
-  const [includeSource, setIncludeSource] = useState(true);
-  const [includeBumpers, setIncludeBumpers] = useState(true);
+  const [includeOriginalAr, setIncludeOriginalAr] = useState(true);
+  const [includeSource, setIncludeSource] = useState(false);
+  const [includeBumpers, setIncludeBumpers] = useState(false);
   const [limit, setLimit] = useState(500);
   const [preflight, setPreflight] = useState<NormalizationPreflight | null>(null);
   const [plans, setPlans] = useState<NormalizationPlan[]>([]);
@@ -155,6 +297,7 @@ export default function NormalizationManagerPage() {
   const [sets, setSets] = useState<NormalizedSet[]>([]);
   const [loading, setLoading] = useState(false);
   const [planning, setPlanning] = useState(false);
+  const [savingNextTask, setSavingNextTask] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null);
   const [publishingSetRunId, setPublishingSetRunId] = useState<string | null>(null);
@@ -168,10 +311,11 @@ export default function NormalizationManagerPage() {
 
   const rootKeys = useMemo(() => {
     const keys: string[] = [];
+    if (includeOriginalAr) keys.push('original-ar');
     if (includeSource) keys.push('source');
     if (includeBumpers) keys.push('bumpers');
     return keys;
-  }, [includeBumpers, includeSource]);
+  }, [includeBumpers, includeOriginalAr, includeSource]);
 
   useEffect(() => {
     void refresh();
@@ -180,17 +324,24 @@ export default function NormalizationManagerPage() {
   const refresh = async () => {
     setError('');
     try {
-      const [statusResponse, plansResponse] = await Promise.all([
+      const [statusResponse, serverStatusResponse, nextTaskResponse, plansResponse, runsResponse, setsResponse] = await Promise.all([
         schedulerFoundationApi.normalizationStatus(),
+        schedulerFoundationApi.serverNormalizationStatus(),
+        schedulerFoundationApi.getNormalizationNextTask(),
         schedulerFoundationApi.listNormalizationPlans(),
+        schedulerFoundationApi.listNormalizationRuns(),
+        schedulerFoundationApi.listNormalizedSets(),
       ]);
-      const runsResponse = await schedulerFoundationApi.listNormalizationRuns();
-      const setsResponse = await schedulerFoundationApi.listNormalizedSets();
       const statusBody = statusResponse.data as NormalizationStatus;
+      const serverStatusBody = serverStatusResponse.data as ServerNormalizationStatus;
+      const nextTaskBody = nextTaskResponse.data as ServerNormalizationNextTask;
       const plansBody = plansResponse.data as { plans: NormalizationPlan[] };
       const runsBody = runsResponse.data as { runs: NormalizationRun[] };
       const setsBody = setsResponse.data as { sets: NormalizedSet[] };
       setStatus(statusBody);
+      setServerStatus(serverStatusBody);
+      setNextTask(nextTaskBody);
+      setNextConfig(nextTaskBody.config);
       setPlans(plansBody.plans);
       setRuns(runsBody.runs);
       setSets(setsBody.sets);
@@ -306,7 +457,32 @@ export default function NormalizationManagerPage() {
     }
   };
 
+  const updateNextConfig = <Key extends keyof ServerNormalizationNextTaskConfig>(
+    key: Key,
+    value: ServerNormalizationNextTaskConfig[Key]
+  ) => {
+    setNextConfig(current => ({ ...current, [key]: value }));
+  };
+
+  const saveNextTask = async () => {
+    setSavingNextTask(true);
+    setMessage('');
+    setError('');
+    try {
+      const response = await schedulerFoundationApi.saveNormalizationNextTask(nextConfig);
+      const body = response.data as ServerNormalizationNextTask;
+      setNextTask(body);
+      setNextConfig(body.config);
+      setMessage('تم حفظ إعدادات مهمة الإكمال القادمة.');
+    } catch {
+      setError('Could not save the next normalization task settings.');
+    } finally {
+      setSavingNextTask(false);
+    }
+  };
+
   const topItems = preflight?.items.slice(0, 80) ?? [];
+  const currentServerJob = serverStatus?.continueJob.running ? serverStatus.continueJob : serverStatus?.fixJob;
 
   return (
     <div className="space-y-5">
@@ -337,6 +513,146 @@ export default function NormalizationManagerPage() {
         <SummaryCard label="failed" value={preflight?.summary.failed ?? status?.latestPlan?.summary.failed ?? 0} tone="error" />
       </section>
 
+      <section className="card space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Activity size={18} style={{ color: 'var(--accent)' }} />
+              <h3 className="font-semibold">العمل الحالي على السيرفر</h3>
+              <span className={serverStatus?.phase === 'ready_for_continue' ? 'badge badge-ready' : serverStatus?.phase === 'idle' ? 'badge badge-warning' : 'badge badge-info'}>
+                {serverStatus ? phaseLabel(serverStatus.phase) : 'loading'}
+              </span>
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              متابعة مباشرة لسكريبتات /tmp على VPS: إصلاح normalized-ar الحالي ثم تجهيز إكمال original-ar.
+            </p>
+          </div>
+          <span className="text-xs ltr-text" style={{ color: 'var(--text-muted)' }}>
+            {serverStatus?.generatedAt ? new Date(serverStatus.generatedAt).toLocaleString() : '-'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
+          <Info label="server" value={serverStatus ? `${serverStatus.server.hostname} / ${serverStatus.server.cpuCount} cores` : '-'} />
+          <Info label="load avg" value={serverStatus ? serverStatus.server.loadAverage.map(value => value.toFixed(2)).join(' / ') : '-'} />
+          <Info label="original-ar" value={serverStatus?.paths.originalSize ?? 'unknown'} />
+          <Info label="normalized-ar" value={serverStatus?.paths.normalizedSize ?? 'unknown'} />
+          <Info label="disk free" value={serverStatus ? `${serverStatus.disk.freeLabel} free / ${serverStatus.disk.percent}% used` : '-'} />
+          <Info label="throttle watcher" value={serverStatus ? `${serverStatus.throttle.running ? 'running' : 'stopped'}${serverStatus.throttle.pid ? ` pid ${serverStatus.throttle.pid}` : ''}` : '-'} />
+          <Info label="current cpu" value={currentServerJob ? `${currentServerJob.cpuPercent.toFixed(1)}%` : '-'} />
+          <Info label="next gate" value={serverStatus?.guidance.canStartContinue ? 'ready after DONE' : serverStatus?.guidance.reason ?? '-'} />
+        </div>
+
+        {serverStatus && (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            <ServerJobPanel job={serverStatus.fixJob} />
+            <ServerJobPanel job={serverStatus.continueJob} />
+          </div>
+        )}
+
+        {currentServerJob && (
+          <div className="rounded-md border p-3 text-xs space-y-3" style={{ borderColor: 'var(--bg-border)' }}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Cpu size={15} style={{ color: 'var(--accent)' }} />
+              <span className="font-medium">عمليات المهمة الحالية</span>
+              <span className="badge badge-info">{currentServerJob.processes.length} processes</span>
+            </div>
+            <DataTable
+              empty="No matching processes right now."
+              headers={['PID', 'PGID', 'Nice', 'CPU', 'Stat', 'Command']}
+              rows={currentServerJob.processes.slice(0, 8).map(processInfo => [
+                processInfo.pid,
+                processInfo.pgid ?? '-',
+                processInfo.nice ?? '-',
+                `${processInfo.cpuPercent.toFixed(1)}%`,
+                processInfo.stat ?? '-',
+                <span key="cmd" className="ltr-text break-all">{processInfo.command}</span>,
+              ])}
+            />
+            {currentServerJob.lastLines.length > 0 && (
+              <pre className="rounded-md border p-3 overflow-x-auto max-h-72 ltr-text" style={{ borderColor: 'var(--bg-border)', color: 'var(--text-muted)' }}>
+                {currentServerJob.lastLines.join('\n')}
+              </pre>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="card space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Settings2 size={18} style={{ color: 'var(--accent)' }} />
+              <h3 className="font-semibold">ضبط المهمة القادمة</h3>
+              <span className="badge badge-warning">prepare only</span>
+              <span className="badge badge-info">no auto start</span>
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              هذه الإعدادات تحفظ خطة إكمال Normalize من original-ar إلى normalized-ar بعد انتهاء مرحلة الإصلاح.
+            </p>
+          </div>
+          <button className="btn-primary inline-flex items-center gap-2 text-sm" disabled={savingNextTask} onClick={() => void saveNextTask()}>
+            <Save size={14} />
+            {savingNextTask ? 'Saving...' : 'Save settings'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          <Field label="Source root" value={nextConfig.sourceRoot} onChange={value => updateNextConfig('sourceRoot', value)} className="xl:col-span-2" />
+          <Field label="Output root" value={nextConfig.outputRoot} onChange={value => updateNextConfig('outputRoot', value)} className="xl:col-span-2" />
+          <NumberField label="Parallel files" value={nextConfig.maxParallel} min={1} max={10} onChange={value => updateNextConfig('maxParallel', value)} />
+          <NumberField label="nice" value={nextConfig.nice} min={0} max={19} onChange={value => updateNextConfig('nice', value)} />
+          <label className="text-xs space-y-1">
+            <span style={{ color: 'var(--text-muted)' }}>ionice class</span>
+            <select
+              className="w-full rounded-md border px-3 py-2 bg-transparent"
+              style={{ borderColor: 'var(--bg-border)' }}
+              value={nextConfig.ioniceClass}
+              onChange={event => updateNextConfig('ioniceClass', Number(event.target.value) as 2 | 3)}
+            >
+              <option value={2}>best-effort low</option>
+              <option value={3}>idle</option>
+            </select>
+          </label>
+          <NumberField label="ionice level" value={nextConfig.ioniceLevel} min={0} max={7} onChange={value => updateNextConfig('ioniceLevel', value)} />
+          <NumberField label="max video bitrate" value={nextConfig.maxVideoBitrate} min={500000} max={20000000} onChange={value => updateNextConfig('maxVideoBitrate', value)} />
+          <Field label="video bitrate" value={nextConfig.videoBitrate} onChange={value => updateNextConfig('videoBitrate', value)} />
+          <Field label="video maxrate" value={nextConfig.videoMaxrate} onChange={value => updateNextConfig('videoMaxrate', value)} />
+          <Field label="video bufsize" value={nextConfig.videoBufsize} onChange={value => updateNextConfig('videoBufsize', value)} />
+          <Field label="audio bitrate" value={nextConfig.audioBitrate} onChange={value => updateNextConfig('audioBitrate', value)} />
+        </div>
+
+        <div className="flex flex-wrap gap-4 text-sm">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={nextConfig.requireFixDoneBeforeContinue}
+              onChange={event => updateNextConfig('requireFixDoneBeforeContinue', event.target.checked)}
+            />
+            require DONE before continue
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={nextConfig.deleteOriginalAfterValidation}
+              onChange={event => updateNextConfig('deleteOriginalAfterValidation', event.target.checked)}
+            />
+            delete original only after validation
+          </label>
+        </div>
+
+        <div className="rounded-md border p-3 text-xs space-y-2" style={{ borderColor: 'var(--bg-border)' }}>
+          <div className="flex flex-wrap items-center gap-2">
+            <HardDrive size={15} style={{ color: 'var(--accent)' }} />
+            <span className="font-medium">Command preview</span>
+            <span className="badge badge-info">{nextTask?.safety.scriptPath ?? '/tmp/continue_normalize_ar_server.sh'}</span>
+          </div>
+          <pre className="overflow-x-auto ltr-text" style={{ color: 'var(--text-muted)' }}>
+            {nextTask?.commandPreview ?? 'Save settings to generate a command preview.'}
+          </pre>
+        </div>
+      </section>
+
       <section className="card">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -346,10 +662,10 @@ export default function NormalizationManagerPage() {
               <span className="badge badge-info">read-only</span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4 text-xs">
-              <Info label="target video" value={status ? `${status.target.width}x${status.target.height} ${status.target.fps}fps ${status.target.videoCodec} ${status.target.pixelFormat}` : '-'} />
-              <Info label="target audio" value={status ? `${status.target.audioCodec} ${status.target.audioRate / 1000}k stereo` : '-'} />
+              <Info label="target video" value={status ? `${status.target.width}x${status.target.height} ${status.target.fps}fps ${status.target.videoCodec} ${status.target.pixelFormat} ${status.target.videoBitrate}` : '-'} />
+              <Info label="target audio" value={status ? `${status.target.audioCodec} ${status.target.audioRate / 1000}k stereo ${status.target.audioBitrate}` : '-'} />
               <Info label="output root" value={status?.outputRoot ?? '/srv/daawah/media/normalized-ar'} />
-              <Info label="acceptance" value="failed: 0" />
+              <Info label="bitrate gate" value={status ? `<= ${formatBitrate(status.target.maxVideoBitrate)}` : '<= 3.5 Mbps'} />
             </div>
           </div>
         </div>
@@ -383,6 +699,10 @@ export default function NormalizationManagerPage() {
             <div className="lg:col-span-2 rounded-md border px-3 py-2" style={{ borderColor: 'var(--bg-border)' }}>
               <div className="text-xs mb-2" style={{ color: 'var(--text-muted)' }}>Roots</div>
               <div className="flex flex-wrap gap-4 text-sm">
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={includeOriginalAr} onChange={event => setIncludeOriginalAr(event.target.checked)} />
+                  original-ar
+                </label>
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeSource} onChange={event => setIncludeSource(event.target.checked)} />
                   source
@@ -439,7 +759,7 @@ export default function NormalizationManagerPage() {
               <span key="file" className="ltr-text break-all">{item.relativePath ?? item.title}</span>,
               <span key="decision" className={decisionBadge(item.decision)}>{decisionLabels[item.decision]}</span>,
               item.reasons.length ? item.reasons.join(', ') : '-',
-              `${item.probe.width ?? '?'}x${item.probe.height ?? '?'} ${item.probe.fps ?? '?'}fps ${item.probe.videoCodec ?? '?'} / ${item.probe.audioCodec ?? '?'} ${item.probe.audioRate ?? '?'}Hz`,
+              `${item.probe.width ?? '?'}x${item.probe.height ?? '?'} ${item.probe.fps ?? '?'}fps ${item.probe.videoCodec ?? '?'} ${formatBitrate(item.probe.bitrate)} / ${item.probe.audioCodec ?? '?'} ${item.probe.audioRate ?? '?'}Hz`,
               <span key="out" className="ltr-text break-all">{item.normalizedPath}</span>,
             ])}
           />
@@ -652,6 +972,92 @@ function DataTable({ headers, rows, empty }: { headers: string[]; rows: unknown[
   );
 }
 
+function ServerJobPanel({ job }: { job: ServerNormalizationJobStatus }) {
+  const progressText = job.progress.current !== null && job.progress.total !== null
+    ? `${job.progress.current}/${job.progress.total}${job.progress.percent !== null ? ` (${job.progress.percent}%)` : ''}`
+    : '-';
+  return (
+    <div className="rounded-md border p-3 text-xs space-y-3" style={{ borderColor: 'var(--bg-border)' }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium">{job.label}</div>
+        <span className={job.running ? 'badge badge-info' : job.done ? 'badge badge-ready' : 'badge badge-warning'}>
+          {job.running ? 'running' : job.done ? 'DONE' : 'idle'}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Info label="progress" value={progressText} />
+        <Info label="ok / failed" value={`${job.counts.ok} / ${job.counts.failed}`} />
+        <Info label="fix / no action" value={`${job.counts.fix} / ${job.counts.noAction}`} />
+        <Info label="cpu" value={`${job.cpuPercent.toFixed(1)}%`} />
+        <Info label="pid" value={job.pid ?? '-'} />
+        <Info label="pgid" value={job.pgid ?? '-'} />
+        <Info label="report" value={job.reportPath ?? '-'} />
+        <Info label="output" value={job.outputPath} />
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  className,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  return (
+    <label className={`text-xs space-y-1 ${className ?? ''}`}>
+      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
+      <input
+        className="w-full rounded-md border px-3 py-2 bg-transparent ltr-text"
+        style={{ borderColor: 'var(--bg-border)' }}
+        value={value}
+        onChange={event => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="text-xs space-y-1">
+      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
+      <input
+        className="w-full rounded-md border px-3 py-2 bg-transparent ltr-text"
+        style={{ borderColor: 'var(--bg-border)' }}
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={event => onChange(Number(event.target.value))}
+      />
+    </label>
+  );
+}
+
+function phaseLabel(phase: ServerNormalizationStatus['phase']): string {
+  if (phase === 'fix_running') return 'fix running';
+  if (phase === 'continue_running') return 'continue running';
+  if (phase === 'ready_for_continue') return 'ready for continue';
+  return 'idle';
+}
+
 function decisionBadge(decision: NormalizationDecision): string {
   if (decision === 'ok') return 'badge badge-ready';
   if (decision === 'failed') return 'badge badge-warning';
@@ -669,4 +1075,10 @@ function formatBytes(value: number): string {
     index++;
   }
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatBitrate(value: number | null | undefined): string {
+  if (!value || !Number.isFinite(value)) return '? bitrate';
+  if (value >= 1000000) return `${(value / 1000000).toFixed(1)} Mbps`;
+  return `${Math.round(value / 1000)} kbps`;
 }

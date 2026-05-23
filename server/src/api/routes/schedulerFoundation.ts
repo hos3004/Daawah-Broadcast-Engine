@@ -29,14 +29,18 @@ import {
   getNormalizationPlan,
   getNormalizationRun,
   getNormalizationStatus,
+  getServerNormalizationNextTask,
+  getServerNormalizationStatus,
   listNormalizationPlans,
   listNormalizationRuns,
   listNormalizedSets,
   NormalizationManagerError,
   publishNormalizedSet,
   readNormalizationRunLog,
+  saveServerNormalizationNextTask,
   startNormalizationRun,
   stopNormalizationRun,
+  type ServerNormalizationNextTaskConfig,
   type NormalizationPlanInput,
   type NormalizationPreflightInput,
   type NormalizationRunInput,
@@ -859,6 +863,42 @@ schedulerFoundationRouter.get(
   (_req: Request, res: Response): void => {
     try {
       res.json(getNormalizationStatus());
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/server-status',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      res.json(getServerNormalizationStatus());
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/next-task',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      res.json(getServerNormalizationNextTask());
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.put(
+  '/normalization/next-task',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json(saveServerNormalizationNextTask(req.body as Partial<ServerNormalizationNextTaskConfig>));
     } catch (err) {
       sendFoundationError(res, err);
     }

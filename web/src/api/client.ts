@@ -179,6 +179,9 @@ export const schedulerFoundationApi = {
   getNormalizationRunLogs: (id: string, lines?: number) =>
     api.get(`/scheduler-foundation/normalization/runs/${id}/logs`, { params: { lines } }),
   stopNormalizationRun: (id: string) => api.post(`/scheduler-foundation/normalization/runs/${id}/stop`),
+  serverNormalizationStatus: () => api.get('/scheduler-foundation/normalization/server-status'),
+  getNormalizationNextTask: () => api.get('/scheduler-foundation/normalization/next-task'),
+  saveNormalizationNextTask: (payload: unknown) => api.put('/scheduler-foundation/normalization/next-task', payload),
   publishNormalizedSet: (payload: { runId: string; confirmPublish: boolean }) =>
     api.post('/scheduler-foundation/normalization/sets', payload),
   listNormalizedSets: () => api.get('/scheduler-foundation/normalization/sets'),
