@@ -542,7 +542,7 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     reportPattern: /^(continue|normalize).*\.csv$/,
   });
   const throttleProcess = readThrottleProcess();
-  const throttlePid = readPidFile(FIX_THROTTLE_PID_PATH) ?? throttleProcess?.pid ?? null;
+  const throttlePid = throttleProcess?.pid ?? readPidFile(FIX_THROTTLE_PID_PATH);
   const throttleRunning = (throttlePid !== null && isPidRunning(throttlePid)) || throttleProcess !== null;
   const rawDisk = diskUsage('/srv');
   const freeBytes = Math.max(0, rawDisk.total - rawDisk.used);
