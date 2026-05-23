@@ -37,7 +37,7 @@ authRouter.post('/login', loginLimiter, (req: Request, res: Response): void => {
 
   res.cookie('auth_token', token, {
     httpOnly: true,
-    secure: config.env === 'production',
+    secure: config.security.cookieSecure,
     sameSite: 'strict',
     maxAge: 24 * 60 * 60 * 1000,
   });

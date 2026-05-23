@@ -14,6 +14,7 @@ import {
   type ExpandedPlaylistItem,
   type PlaylistExpansionSummary as FileExpansionSummary,
 } from './playlistExpansion';
+import { listNormalizedSets, type NormalizedSetDiffItem } from '../media/normalizationManager';
 
 export interface PlaylistMaterializationDryRunInput {
   confirmDryRun?: boolean;
@@ -56,6 +57,13 @@ export interface PlaylistMaterializationSummary {
   mediaExpansionAvailable: boolean;
   missingMediaFileCount: number;
   unknownDurationCount: number;
+  normalizedSetId: string | null;
+  normalizedSetApplied: boolean;
+  normalizedMediaCount: number;
+  originalSafeFallbackCount: number;
+  missingNormalizedCount: number;
+  originalNotNormalizedCount: number;
+  concatRiskCount: number;
   overlapCount: number;
   negativeGapCount: number;
   unfilledGapCount: number;
@@ -116,6 +124,16 @@ interface SafeOutputPaths {
   runDir: string;
 }
 
+interface NormalizedApplicationSummary {
+  normalizedSetId: string | null;
+  normalizedSetApplied: boolean;
+  normalizedMediaCount: number;
+  originalSafeFallbackCount: number;
+  missingNormalizedCount: number;
+  originalNotNormalizedCount: number;
+  concatRiskCount: number;
+}
+
 export function validateMaterializationDryRunInput(input: PlaylistMaterializationDryRunInput): ValidatedDryRunInput {
   if (input.confirmDryRun !== true) {
     throw new DraftValidationError('Playlist materialization dry-run requires confirmDryRun=true', 'DRY_RUN_CONFIRMATION_REQUIRED');
@@ -150,15 +168,20 @@ export function createPlaylistMaterializationDryRun(input: PlaylistMaterializati
   const expansion = expandPublishedScheduleToFiles(validated.schedule);
   const warnings: PlaylistMaterializationWarning[] = expansion.warnings;
   const errors: PlaylistMaterializationError[] = expansion.errors;
-  const ffconcatPath = expansion.summary.mediaExpansionAvailable
+  const normalized = applyLatestNormalizedSet(expansion.items, warnings, errors);
+  const expansionSummary = {
+    ...expansion.summary,
+    mediaExpansionAvailable: expansion.summary.mediaExpansionAvailable && normalized.summary.concatRiskCount === 0,
+  };
+  const ffconcatPath = expansionSummary.mediaExpansionAvailable
     ? path.join(paths.runDir, 'playlist.ffconcat')
     : null;
   const playlist = buildPlaylistSnapshot(
     validated.schedule,
     runId,
     createdAt,
-    expansion.items,
-    expansion.summary.mediaExpansionAvailable,
+    normalized.items,
+    expansionSummary.mediaExpansionAvailable,
     ffconcatPath
   );
   const summary = buildSummary(
@@ -168,8 +191,9 @@ export function createPlaylistMaterializationDryRun(input: PlaylistMaterializati
     playlist.items,
     warnings,
     errors,
-    expansion.summary,
-    ffconcatPath
+    expansionSummary,
+    ffconcatPath,
+    normalized.summary
   );
   const status: 'completed' | 'failed' = errors.length === 0 ? 'completed' : 'failed';
   summary.status = status;
@@ -318,6 +342,104 @@ function validateOutputRoot(outputRoot?: string, runId?: string): SafeOutputPath
   };
 }
 
+function applyLatestNormalizedSet(
+  items: MaterializedPlaylistItem[],
+  warnings: PlaylistMaterializationWarning[],
+  errors: PlaylistMaterializationError[]
+): { items: MaterializedPlaylistItem[]; summary: NormalizedApplicationSummary } {
+  const normalizedSet = listNormalizedSets(1).find(set => set.status === 'ready' && set.summary.canUseForPlaylist);
+  if (!normalizedSet) {
+    return {
+      items,
+      summary: {
+        normalizedSetId: null,
+        normalizedSetApplied: false,
+        normalizedMediaCount: 0,
+        originalSafeFallbackCount: 0,
+        missingNormalizedCount: 0,
+        originalNotNormalizedCount: 0,
+        concatRiskCount: 0,
+      },
+    };
+  }
+
+  const byMediaId = new Map(
+    normalizedSet.diff
+      .filter(item => item.mediaFileId)
+      .map(item => [item.mediaFileId as string, item])
+  );
+  const byOriginalPath = new Map(normalizedSet.diff.map(item => [path.resolve(item.originalPath), item]));
+  let normalizedMediaCount = 0;
+  let originalSafeFallbackCount = 0;
+  let missingNormalizedCount = 0;
+  let originalNotNormalizedCount = 0;
+
+  const nextItems = items.map(item => {
+    if (!item.absolutePath || item.validationStatus !== 'ready') return item;
+    const match = findNormalizedMatch(item, byMediaId, byOriginalPath);
+    if (!match) {
+      originalNotNormalizedCount++;
+      errors.push({
+        code: 'NORMALIZED_MAPPING_MISSING',
+        itemId: item.id,
+        message: `Playlist item "${item.title}" has no entry in normalized set ${normalizedSet.id}.`,
+      });
+      return item;
+    }
+    if (match.normalizedExists) {
+      normalizedMediaCount++;
+      return {
+        ...item,
+        absolutePath: match.normalizedPath,
+        relativePath: path.relative(normalizedSet.outputRoot, match.normalizedPath),
+      };
+    }
+    if (match.originalSafeFallback) {
+      originalSafeFallbackCount++;
+      warnings.push({
+        code: 'NORMALIZED_ORIGINAL_SAFE_FALLBACK',
+        itemId: item.id,
+        message: `Playlist item "${item.title}" is already broadcast-safe and remains on its original path.`,
+      });
+      return item;
+    }
+
+    missingNormalizedCount++;
+    errors.push({
+      code: 'NORMALIZED_FILE_MISSING',
+      itemId: item.id,
+      message: `Playlist item "${item.title}" expected normalized file ${match.normalizedPath}, but it is missing.`,
+    });
+    return item;
+  });
+
+  const concatRiskCount = missingNormalizedCount + originalNotNormalizedCount;
+  return {
+    items: nextItems,
+    summary: {
+      normalizedSetId: normalizedSet.id,
+      normalizedSetApplied: true,
+      normalizedMediaCount,
+      originalSafeFallbackCount,
+      missingNormalizedCount,
+      originalNotNormalizedCount,
+      concatRiskCount,
+    },
+  };
+}
+
+function findNormalizedMatch(
+  item: MaterializedPlaylistItem,
+  byMediaId: Map<string, NormalizedSetDiffItem>,
+  byOriginalPath: Map<string, NormalizedSetDiffItem>
+): NormalizedSetDiffItem | undefined {
+  if (item.mediaFileId) {
+    const byId = byMediaId.get(item.mediaFileId);
+    if (byId) return byId;
+  }
+  return item.absolutePath ? byOriginalPath.get(path.resolve(item.absolutePath)) : undefined;
+}
+
 function buildPlaylistSnapshot(
   schedule: PublishedScheduleDetail,
   runId: string,
@@ -362,7 +484,8 @@ function buildSummary(
   warnings: PlaylistMaterializationWarning[],
   errors: PlaylistMaterializationError[],
   expansionSummary: FileExpansionSummary,
-  ffconcatPath: string | null
+  ffconcatPath: string | null,
+  normalizedSummary: NormalizedApplicationSummary
 ): PlaylistMaterializationSummary {
   const scheduledItems = items.filter(item => item.type === 'program');
   const gapItems = items.filter(item => item.type === 'gap_filler');
@@ -389,6 +512,13 @@ function buildSummary(
     mediaExpansionAvailable: expansionSummary.mediaExpansionAvailable,
     missingMediaFileCount: expansionSummary.missingMediaFileCount,
     unknownDurationCount: expansionSummary.unknownDurationCount,
+    normalizedSetId: normalizedSummary.normalizedSetId,
+    normalizedSetApplied: normalizedSummary.normalizedSetApplied,
+    normalizedMediaCount: normalizedSummary.normalizedMediaCount,
+    originalSafeFallbackCount: normalizedSummary.originalSafeFallbackCount,
+    missingNormalizedCount: normalizedSummary.missingNormalizedCount,
+    originalNotNormalizedCount: normalizedSummary.originalNotNormalizedCount,
+    concatRiskCount: normalizedSummary.concatRiskCount,
     overlapCount: expansionSummary.overlapCount,
     negativeGapCount: expansionSummary.negativeGapCount,
     unfilledGapCount: expansionSummary.unfilledGapCount,
@@ -438,6 +568,13 @@ function renderMarkdownReport(
 - Media expansion available: ${summary.mediaExpansionAvailable}
 - Missing media files: ${summary.missingMediaFileCount}
 - Unknown durations: ${summary.unknownDurationCount}
+- Normalized set ID: ${summary.normalizedSetId ?? 'none'}
+- Normalized set applied: ${summary.normalizedSetApplied}
+- Normalized media paths: ${summary.normalizedMediaCount}
+- Original safe fallbacks: ${summary.originalSafeFallbackCount}
+- Missing normalized files: ${summary.missingNormalizedCount}
+- Original not normalized: ${summary.originalNotNormalizedCount}
+- Concat risk: ${summary.concatRiskCount}
 - Timeline overlaps: ${summary.overlapCount}
 - Unfilled gaps: ${summary.unfilledGapCount}
 - Test playout eligible: ${summary.testPlayoutEligible}

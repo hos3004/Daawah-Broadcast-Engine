@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { broadcastApi, systemApi } from '../api/client';
+import { broadcastApi, schedulerFoundationApi, systemApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { Radio, HardDrive, Cpu, AlertTriangle, Play, Clock } from 'lucide-react';
+import { Radio, HardDrive, Cpu, AlertTriangle, Play, Clock, FileCog, ListChecks } from 'lucide-react';
 import dayjs from 'dayjs';
 
 interface PlaylistItem {
@@ -25,6 +25,28 @@ interface BroadcastStatus {
   hls?: { ok: boolean; ageSeconds: number };
 }
 
+interface NormalizationRunSummary {
+  id: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  completedCount: number;
+  failedCount: number;
+  totalCount: number;
+  currentFile: string | null;
+}
+
+interface TestPlayoutRunSummary {
+  id: string;
+  status: 'running' | 'completed' | 'failed';
+  outputMode: string;
+  outputPath: string;
+  monitoring: {
+    output: {
+      exists: boolean;
+      hlsSegmentCount: number | null;
+    };
+  };
+}
+
 export default function DashboardPage() {
   const [broadcastState, setBroadcastState] = useState<BroadcastStatus | null>(null);
   const [nowPlaying, setNowPlaying] = useState<{ current: PlaylistItem | null; next: PlaylistItem | null }>({ current: null, next: null });
@@ -42,6 +64,27 @@ export default function DashboardPage() {
       return r.data;
     }),
     refetchInterval: 5000,
+  });
+
+  const { data: normalizationData } = useQuery({
+    queryKey: ['dashboard-normalization'],
+    queryFn: async () => {
+      const [statusResponse, runsResponse] = await Promise.all([
+        schedulerFoundationApi.normalizationStatus(),
+        schedulerFoundationApi.listNormalizationRuns(),
+      ]);
+      return {
+        status: statusResponse.data as { latestPlan: { summary: { total: number; failed: number; fullTranscode: number; audioOnly: number; remux: number } } | null },
+        runs: (runsResponse.data as { runs: NormalizationRunSummary[] }).runs,
+      };
+    },
+    refetchInterval: 15000,
+  });
+
+  const { data: testPlayoutData } = useQuery({
+    queryKey: ['dashboard-test-playout'],
+    queryFn: () => schedulerFoundationApi.listTestPlayoutRuns().then(r => r.data as { runs: TestPlayoutRunSummary[] }),
+    refetchInterval: 15000,
   });
 
   useQuery({
@@ -139,6 +182,60 @@ export default function DashboardPage() {
         />
       </div>
 
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="card">
+          <div className="flex items-center gap-2 mb-3">
+            <FileCog size={16} style={{ color: 'var(--accent)' }} />
+            <span className="font-medium text-sm">Normalization</span>
+          </div>
+          {normalizationData?.runs[0] ? (
+            <div className="space-y-2">
+              <StatusLine
+                label="آخر تشغيل"
+                value={`${normalizationData.runs[0].status} ${normalizationData.runs[0].completedCount}/${normalizationData.runs[0].totalCount}`}
+                tone={normalStatusTone(normalizationData.runs[0].status)}
+              />
+              <StatusLine label="failed" value={String(normalizationData.runs[0].failedCount)} tone={normalizationData.runs[0].failedCount === 0 ? 'ready' : 'error'} />
+              <p className="text-xs ltr-text break-all" style={{ color: 'var(--text-muted)' }}>
+                {normalizationData.runs[0].currentFile ?? 'لا يوجد ملف قيد التشغيل'}
+              </p>
+            </div>
+          ) : normalizationData?.status.latestPlan ? (
+            <div className="space-y-2">
+              <StatusLine label="latest plan" value={`${normalizationData.status.latestPlan.summary.total} files`} tone="info" />
+              <StatusLine label="failed" value={String(normalizationData.status.latestPlan.summary.failed)} tone={normalizationData.status.latestPlan.summary.failed === 0 ? 'ready' : 'error'} />
+              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                transcode {normalizationData.status.latestPlan.summary.fullTranscode}, audio {normalizationData.status.latestPlan.summary.audioOnly}, remux {normalizationData.status.latestPlan.summary.remux}
+              </p>
+            </div>
+          ) : (
+            <p style={{ color: 'var(--text-muted)' }} className="text-sm">لا توجد خطة normalization بعد</p>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="flex items-center gap-2 mb-3">
+            <ListChecks size={16} style={{ color: 'var(--accent)' }} />
+            <span className="font-medium text-sm">Test Playout</span>
+          </div>
+          {testPlayoutData?.runs[0] ? (
+            <div className="space-y-2">
+              <StatusLine
+                label="آخر اختبار"
+                value={testPlayoutData.runs[0].status}
+                tone={testPlayoutData.runs[0].status === 'completed' ? 'ready' : testPlayoutData.runs[0].status === 'failed' ? 'error' : 'warning'}
+              />
+              <StatusLine label="output" value={testPlayoutData.runs[0].monitoring.output.exists ? 'exists' : 'missing'} tone={testPlayoutData.runs[0].monitoring.output.exists ? 'ready' : 'warning'} />
+              <p className="text-xs ltr-text break-all" style={{ color: 'var(--text-muted)' }}>
+                {testPlayoutData.runs[0].outputPath}
+              </p>
+            </div>
+          ) : (
+            <p style={{ color: 'var(--text-muted)' }} className="text-sm">لا يوجد اختبار تشغيل بعد</p>
+          )}
+        </div>
+      </div>
+
       {/* Emergency warning */}
       {broadcastState?.isEmergency && (
         <div className="flex items-center gap-3 p-3 rounded-lg" style={{ background: '#451a03', border: '1px solid #f59e0b' }}>
@@ -150,6 +247,23 @@ export default function DashboardPage() {
       )}
     </div>
   );
+}
+
+function StatusLine({ label, value, tone }: { label: string; value: string; tone: 'ready' | 'warning' | 'error' | 'info' }) {
+  const cls = tone === 'ready' ? 'badge-ready' : tone === 'warning' ? 'badge-warning' : tone === 'error' ? 'badge-error' : 'badge-info';
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{label}</span>
+      <span className={`badge ${cls}`}>{value}</span>
+    </div>
+  );
+}
+
+function normalStatusTone(status: NormalizationRunSummary['status']): 'ready' | 'warning' | 'error' | 'info' {
+  if (status === 'completed') return 'ready';
+  if (status === 'failed') return 'error';
+  if (status === 'stopped') return 'warning';
+  return 'info';
 }
 
 function NowPlayingProgress({ item }: { item: PlaylistItem }) {

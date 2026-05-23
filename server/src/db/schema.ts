@@ -58,6 +58,9 @@ function runMigrations(db: Database.Database): void {
     { version: 8, apply: migration_008 },
     { version: 9, apply: migration_009 },
     { version: 10, apply: migration_010 },
+    { version: 11, apply: migration_011 },
+    { version: 12, apply: migration_012 },
+    { version: 13, apply: migration_013 },
   ];
 
   for (const m of migrations) {
@@ -647,5 +650,102 @@ function migration_010(db: Database.Database): void {
       ON test_playout_plans(status);
     CREATE INDEX IF NOT EXISTS idx_test_playout_plans_output_mode
       ON test_playout_plans(output_mode);
+  `);
+}
+
+function migration_011(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS normalization_plans (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL CHECK(scope IN ('active_schedule','published_schedule','media_roots')),
+      status TEXT NOT NULL CHECK(status IN ('dry_run_ready','blocked')),
+      output_root TEXT NOT NULL,
+      artifact_path TEXT NOT NULL,
+      target_json TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      items_json TEXT NOT NULL,
+      tasks_json TEXT NOT NULL,
+      errors_json TEXT NOT NULL DEFAULT '[]',
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_normalization_plans_created
+      ON normalization_plans(created_at);
+    CREATE INDEX IF NOT EXISTS idx_normalization_plans_scope
+      ON normalization_plans(scope, status);
+  `);
+
+  db.prepare(`
+    INSERT INTO media_roots
+      (id, root_key, absolute_path, is_readonly, is_original_library)
+    VALUES
+      (@id, @root_key, @absolute_path, @is_readonly, @is_original_library)
+    ON CONFLICT(root_key) DO UPDATE SET
+      absolute_path=excluded.absolute_path,
+      is_readonly=excluded.is_readonly,
+      is_original_library=excluded.is_original_library,
+      updated_at=datetime('now')
+  `).run({
+    id: 'root-normalized-ar',
+    root_key: 'normalized-ar',
+    absolute_path: '/srv/daawah/media/normalized-ar',
+    is_readonly: 0,
+    is_original_library: 0,
+  });
+}
+
+function migration_012(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS normalization_runs (
+      id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL REFERENCES normalization_plans(id),
+      status TEXT NOT NULL CHECK(status IN ('running','completed','failed','stopped')),
+      output_root TEXT NOT NULL,
+      artifact_path TEXT NOT NULL,
+      log_path TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      current_task_id TEXT,
+      current_file TEXT,
+      elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+      estimated_remaining_seconds INTEGER,
+      output_size_bytes INTEGER NOT NULL DEFAULT 0,
+      completed_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      total_count INTEGER NOT NULL DEFAULT 0,
+      errors_json TEXT NOT NULL DEFAULT '[]'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_normalization_runs_started
+      ON normalization_runs(started_at);
+    CREATE INDEX IF NOT EXISTS idx_normalization_runs_plan
+      ON normalization_runs(plan_id);
+    CREATE INDEX IF NOT EXISTS idx_normalization_runs_status
+      ON normalization_runs(status);
+  `);
+}
+
+function migration_013(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS normalized_sets (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES normalization_runs(id),
+      plan_id TEXT NOT NULL REFERENCES normalization_plans(id),
+      status TEXT NOT NULL CHECK(status IN ('ready','blocked')),
+      output_root TEXT NOT NULL,
+      artifact_path TEXT NOT NULL,
+      diff_path TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      diff_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_normalized_sets_created
+      ON normalized_sets(created_at);
+    CREATE INDEX IF NOT EXISTS idx_normalized_sets_run
+      ON normalized_sets(run_id);
+    CREATE INDEX IF NOT EXISTS idx_normalized_sets_status
+      ON normalized_sets(status);
   `);
 }

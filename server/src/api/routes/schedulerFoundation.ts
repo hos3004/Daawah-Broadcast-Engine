@@ -24,6 +24,24 @@ import {
 } from '../../media/safeNamingImport';
 import { SafeRootError } from '../../media/safeRoots';
 import {
+  createNormalizationPlanDryRun,
+  createNormalizationPreflight,
+  getNormalizationPlan,
+  getNormalizationRun,
+  getNormalizationStatus,
+  listNormalizationPlans,
+  listNormalizationRuns,
+  listNormalizedSets,
+  NormalizationManagerError,
+  publishNormalizedSet,
+  readNormalizationRunLog,
+  startNormalizationRun,
+  stopNormalizationRun,
+  type NormalizationPlanInput,
+  type NormalizationPreflightInput,
+  type NormalizationRunInput,
+} from '../../media/normalizationManager';
+import {
   buildTickerPreview,
   deleteLogoAsset,
   exportTickerAss,
@@ -51,7 +69,10 @@ import {
 } from '../../schedule/playlistMaterialization';
 import {
   listTestPlayoutPlans,
+  listTestPlayoutRuns,
   readTestPlayoutPlan,
+  readTestPlayoutRun,
+  readTestPlayoutRunLog,
   runIsolatedTestPlayout,
   writeTestPlayoutPlan,
   type TestPlayoutPlanInput,
@@ -693,6 +714,88 @@ schedulerFoundationRouter.post(
   }
 );
 
+schedulerFoundationRouter.get(
+  '/test-playout/runs',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      const limit = Number(req.query['limit'] ?? 50);
+      res.json({
+        mode: 'test-playout-run-list',
+        runs: listTestPlayoutRuns(limit),
+        safety: {
+          readOnly: true,
+          broadcastStarted: false,
+          rtmpPush: false,
+          streamKeyUsage: false,
+          productionPaths: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/test-playout/runs/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Test playout run id is required', code: 'TEST_PLAYOUT_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      const run = readTestPlayoutRun(id);
+      if (!run) {
+        res.status(404).json({ error: 'Test playout run not found', code: 'TEST_PLAYOUT_RUN_NOT_FOUND' });
+        return;
+      }
+      res.json({
+        mode: 'test-playout-run',
+        run,
+        safety: {
+          readOnly: true,
+          broadcastStarted: false,
+          rtmpPush: false,
+          streamKeyUsage: false,
+          productionPaths: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/test-playout/runs/:id/logs',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Test playout run id is required', code: 'TEST_PLAYOUT_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      res.json({
+        mode: 'test-playout-run-log',
+        log: readTestPlayoutRunLog(id, Number(req.query['lines'] ?? 200)),
+        safety: {
+          readOnly: true,
+          broadcastStarted: false,
+          productionPaths: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
 schedulerFoundationRouter.post(
   '/published-schedules/:id/activate',
   requireRole('admin'),
@@ -747,6 +850,252 @@ schedulerFoundationRouter.get(
       mode: 'published',
       publishedSchedule,
     });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/status',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      res.json(getNormalizationStatus());
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/normalization/preflight',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json(createNormalizationPreflight(req.body as NormalizationPreflightInput));
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/normalization/plans',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    try {
+      const plan = createNormalizationPlanDryRun(req.body as NormalizationPlanInput, req.user?.id ?? null);
+      res.status(201).json({
+        mode: 'normalization-plan',
+        plan,
+        safety: plan.safety,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/plans',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json({
+        mode: 'normalization-plan-list',
+        plans: listNormalizationPlans(Number(req.query['limit'] ?? 20)),
+        safety: {
+          readOnly: true,
+          ffmpegExecution: false,
+          mediaModification: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/plans/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Normalization plan id is required', code: 'NORMALIZATION_PLAN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      const plan = getNormalizationPlan(id);
+      if (!plan) {
+        res.status(404).json({ error: 'Normalization plan not found', code: 'NORMALIZATION_PLAN_NOT_FOUND' });
+        return;
+      }
+      res.json({
+        mode: 'normalization-plan',
+        plan,
+        safety: plan.safety,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/normalization/runs',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    try {
+      const run = startNormalizationRun(req.body as NormalizationRunInput);
+      res.status(202).json({
+        mode: 'normalization-run',
+        run,
+        safety: run.safety,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/runs',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json({
+        mode: 'normalization-run-list',
+        runs: listNormalizationRuns(Number(req.query['limit'] ?? 20)),
+        safety: {
+          readOnly: true,
+          originalMediaModification: false,
+          playlistActivation: false,
+          playout: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/runs/:id',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Normalization run id is required', code: 'NORMALIZATION_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      const run = getNormalizationRun(id);
+      if (!run) {
+        res.status(404).json({ error: 'Normalization run not found', code: 'NORMALIZATION_RUN_NOT_FOUND' });
+        return;
+      }
+      res.json({
+        mode: 'normalization-run',
+        run,
+        safety: run.safety,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/runs/:id/logs',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Normalization run id is required', code: 'NORMALIZATION_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      res.json({
+        mode: 'normalization-run-log',
+        log: readNormalizationRunLog(id, Number(req.query['lines'] ?? 240)),
+        safety: {
+          readOnly: true,
+          originalMediaModification: false,
+          playlistActivation: false,
+          playout: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/normalization/runs/:id/stop',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Normalization run id is required', code: 'NORMALIZATION_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      const run = stopNormalizationRun({ runId: id });
+      res.json({
+        mode: 'normalization-run-stop',
+        run,
+        safety: run.safety,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/normalization/sets',
+  requireRole('admin'),
+  (req: Request, res: Response): void => {
+    try {
+      const set = publishNormalizedSet(req.body as { runId?: string; confirmPublish?: boolean });
+      res.status(201).json({
+        mode: 'normalized-set',
+        set,
+        safety: set.safety,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/normalization/sets',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      res.json({
+        mode: 'normalized-set-list',
+        sets: listNormalizedSets(Number(req.query['limit'] ?? 20)),
+        safety: {
+          readOnly: true,
+          deletesOriginal: false,
+          mediaModification: false,
+          playlistActivation: false,
+          playout: false,
+          broadcast: false,
+        },
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
   }
 );
 
@@ -940,6 +1289,10 @@ function sendFoundationError(res: Response, err: unknown): void {
   }
   if (err instanceof SafeNamingImportError) {
     res.status(400).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof NormalizationManagerError) {
+    res.status(err.statusCode).json({ error: err.message, code: err.code });
     return;
   }
   res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

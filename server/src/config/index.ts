@@ -43,6 +43,7 @@ export const config = {
   security: {
     jwtSecret: optional('JWT_SECRET', 'dev-secret-change-in-production'),
     cookieSecret: optional('COOKIE_SECRET', 'dev-cookie-secret'),
+    cookieSecure: optionalBool('COOKIE_SECURE', optional('NODE_ENV', 'development') === 'production'),
     corsOrigin: optional('CORS_ORIGIN', 'http://localhost:5173'),
     bcryptRounds: optionalInt('BCRYPT_ROUNDS', 12),
   },
@@ -108,7 +109,7 @@ export const config = {
 
   mediaBrowser: {
     basePath: optional('MEDIA_BROWSER_BASE_PATH', '/srv/daawah/media'),
-    allowedRoots: optionalList('MEDIA_BROWSER_ALLOWED_ROOTS', ['original-ar', 'source', 'bumpers', 'emergency']),
+    allowedRoots: optionalList('MEDIA_BROWSER_ALLOWED_ROOTS', ['original-ar', 'source', 'bumpers', 'normalized-ar', 'emergency']),
     statsFileLimit: optionalInt('MEDIA_BROWSER_STATS_FILE_LIMIT', 10000),
   },
 

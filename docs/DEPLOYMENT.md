@@ -42,8 +42,7 @@ sudo usermod -aG www-data daawah
 
 ```bash
 sudo mkdir -p /opt/daawah-broadcast
-sudo mkdir -p /media/library/{programs,fillers,emergency,promos,quran}
-sudo mkdir -p /media/emergency
+sudo mkdir -p /srv/daawah/media/{source,bumpers,normalized-ar,emergency,original-ar}
 sudo mkdir -p /var/www/html/hls
 sudo mkdir -p /var/log/daawah-broadcast
 sudo mkdir -p /etc/daawah-broadcast
@@ -52,7 +51,7 @@ sudo mkdir -p /opt/daawah-broadcast/assets/{fonts,overlays/{logo,tickers,now-pla
 
 # Permissions
 sudo chown -R daawah:daawah /opt/daawah-broadcast
-sudo chown -R daawah:daawah /media
+sudo chown -R daawah:daawah /srv/daawah
 sudo chown -R daawah:www-data /var/www/html/hls
 sudo chmod 2775 /var/www/html/hls
 sudo chown -R daawah:daawah /var/log/daawah-broadcast
@@ -101,14 +100,20 @@ sudo nano /etc/daawah-broadcast/.env
 
 ```env
 NODE_ENV=production
+PORT=3001
+HOST=127.0.0.1
 JWT_SECRET=<generate: openssl rand -hex 64>
 COOKIE_SECRET=<generate: openssl rand -hex 32>
+COOKIE_SECURE=true
 ADMIN_EMAIL=admin@your-domain.com
 ADMIN_PASSWORD=<strong password>
 CORS_ORIGIN=https://admin.your-domain.com
 DB_PATH=/opt/daawah-broadcast/data/daawah.db
-MEDIA_LIBRARY_PATH=/media/library
-MEDIA_EMERGENCY_PATH=/media/emergency
+MEDIA_LIBRARY_PATH=/srv/daawah/media/source
+MEDIA_EMERGENCY_PATH=/srv/daawah/media/emergency
+MEDIA_BROWSER_BASE_PATH=/srv/daawah/media
+MEDIA_BROWSER_ALLOWED_ROOTS=original-ar,source,bumpers,normalized-ar,emergency
+NORMALIZED_MEDIA_PATH=/srv/daawah/media/normalized-ar
 HLS_OUTPUT_PATH=/var/www/html/hls
 LOG_PATH=/var/log/daawah-broadcast
 OVERLAY_FONT_PATH=/opt/daawah-broadcast/assets/fonts/NotoSansArabic-Regular.ttf
@@ -124,14 +129,14 @@ sudo chmod 600 /etc/daawah-broadcast/.env
 ## Step 6 — Systemd Service
 
 ```bash
-sudo cp /opt/daawah-broadcast/deploy/systemd/daawah-api.service /etc/systemd/system/
+sudo cp /opt/daawah-broadcast/deploy/systemd/daawah-control-backend.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable daawah-api
-sudo systemctl start daawah-api
+sudo systemctl enable daawah-control-backend
+sudo systemctl start daawah-control-backend
 
 # Check status
-sudo systemctl status daawah-api
-sudo journalctl -u daawah-api -f
+sudo systemctl status daawah-control-backend
+sudo journalctl -u daawah-control-backend -f
 ```
 
 ---
@@ -214,7 +219,7 @@ cd /opt/daawah-broadcast
 sudo -u daawah git pull origin master
 sudo -u daawah npm install
 sudo -u daawah npm run build
-sudo systemctl restart daawah-api
+sudo systemctl restart daawah-control-backend
 ```
 
 ---
@@ -223,7 +228,7 @@ sudo systemctl restart daawah-api
 
 ```bash
 # App logs
-sudo journalctl -u daawah-api -f --since "1 hour ago"
+sudo journalctl -u daawah-control-backend -f --since "1 hour ago"
 
 # FFmpeg logs
 sudo -u daawah tail -f /var/log/daawah-broadcast/ffmpeg-$(date +%Y-%m-%d).log
@@ -237,7 +242,7 @@ sudo -u daawah tail -f /var/log/daawah-broadcast/ffmpeg-$(date +%Y-%m-%d).log
 
 | Port | Service | Access |
 |------|---------|--------|
-| 3000 | Node.js API | localhost only (127.0.0.1) |
+| 3001 | Node.js API | localhost only (127.0.0.1) |
 | 80 / 443 | Nginx | Public |
 | 1935 | RTMP (optional) | Public (if enabled) |
 

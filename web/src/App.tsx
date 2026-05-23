@@ -10,7 +10,10 @@ import SchedulePage from './pages/Schedule';
 import SchedulerFoundationPage from './pages/SchedulerFoundation';
 import SchedulerDraftReviewPage from './pages/SchedulerDraftReview';
 import SchedulerPublishedReviewPage from './pages/SchedulerPublishedReview';
+import NormalizationManagerPage from './pages/NormalizationManager';
+import TestPlayoutPage from './pages/TestPlayout';
 import OverlaysPage from './pages/Overlays';
+import SafeNamingPage from './pages/SafeNaming';
 import BroadcastPage from './pages/BroadcastControl';
 import LogsPage from './pages/Logs';
 
@@ -57,7 +60,10 @@ export default function App() {
         <Route path="/scheduler-foundation" element={<SchedulerFoundationPage />} />
         <Route path="/scheduler-foundation/drafts/:draftId" element={<SchedulerDraftReviewPage />} />
         <Route path="/scheduler-foundation/published/:publishedId" element={<SchedulerPublishedReviewPage />} />
+        <Route path="/normalization" element={<NormalizationManagerPage />} />
+        <Route path="/test-playout" element={<TestPlayoutPage />} />
         <Route path="/overlays" element={<OverlaysPage />} />
+        <Route path="/safe-naming" element={<SafeNamingPage />} />
         <Route path="/broadcast" element={<BroadcastPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

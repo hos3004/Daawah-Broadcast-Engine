@@ -143,6 +143,13 @@ export interface TestPlayoutRunDetail {
   errors: TestPlayoutError[];
 }
 
+export interface TestPlayoutRunLog {
+  runId: string;
+  path: string;
+  exists: boolean;
+  text: string;
+}
+
 export interface TestPlayoutMonitoringSnapshot {
   heartbeatAt: string;
   status: 'running' | 'completed' | 'failed';
@@ -547,6 +554,48 @@ export function listTestPlayoutPlans(limit = 50): TestPlayoutPlanDetail[] {
     LIMIT ?
   `).all(clampLimit(limit)) as TestPlayoutPlanRow[];
   return rows.map(rowToPlan);
+}
+
+export function listTestPlayoutRuns(limit = 50): TestPlayoutRunDetail[] {
+  const root = getDefaultTestPlayoutRoot();
+  if (!fs.existsSync(root)) return [];
+
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => readTestPlayoutRun(entry.name))
+    .filter((run): run is TestPlayoutRunDetail => run !== null)
+    .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
+    .slice(0, clampLimit(limit));
+}
+
+export function readTestPlayoutRun(id: string): TestPlayoutRunDetail | null {
+  const runPath = path.join(getDefaultTestPlayoutRoot(), sanitizeRunId(id), 'run.json');
+  if (!isPathInside(runPath, getDefaultTestPlayoutRoot()) || !fs.existsSync(runPath)) return null;
+  try {
+    return JSON.parse(readTextFile(runPath)) as TestPlayoutRunDetail;
+  } catch {
+    return null;
+  }
+}
+
+export function readTestPlayoutRunLog(id: string, lines = 200): TestPlayoutRunLog {
+  const safeId = sanitizeRunId(id);
+  const runDir = path.join(getDefaultTestPlayoutRoot(), safeId);
+  const logPath = path.join(runDir, 'ffmpeg.log');
+  if (!isPathInside(logPath, getDefaultTestPlayoutRoot())) {
+    throw new DraftValidationError('Test playout log path is outside generated/test-playout', 'UNSAFE_TEST_PLAYOUT_LOG_PATH');
+  }
+  if (!fs.existsSync(logPath)) {
+    return { runId: safeId, path: logPath, exists: false, text: '' };
+  }
+  const allLines = readTextFile(logPath).split(/\r?\n/);
+  const safeLines = Math.max(1, Math.min(2000, Math.floor(lines)));
+  return {
+    runId: safeId,
+    path: logPath,
+    exists: true,
+    text: allLines.slice(-safeLines).join('\n'),
+  };
 }
 
 function buildCommandPreview(validated: ValidatedTestPlayoutPlan): TestPlayoutCommandPreview {
@@ -1229,6 +1278,14 @@ function cleanString(value: unknown): string {
 function clampLimit(limit: number): number {
   if (!Number.isInteger(limit)) return 50;
   return Math.min(Math.max(limit, 1), 100);
+}
+
+function sanitizeRunId(id: string): string {
+  const value = cleanString(id);
+  if (!/^[a-f0-9-]{8,64}$/i.test(value)) {
+    throw new DraftValidationError('Invalid test playout run id', 'INVALID_TEST_PLAYOUT_RUN_ID');
+  }
+  return value;
 }
 
 function readPlaylistItems(playlistPath: string): PlaylistArtifactItem[] {

@@ -1,0 +1,27 @@
+[Unit]
+Description=Daawah Control Backend
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=daawah
+Group=daawah
+WorkingDirectory=/opt/daawah-broadcast/server
+EnvironmentFile=/etc/daawah-broadcast/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=daawah-control-backend
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/daawah-broadcast /srv/daawah/media/normalized-ar /var/www/html/hls /var/log/daawah-broadcast
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

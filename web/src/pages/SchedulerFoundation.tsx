@@ -214,7 +214,14 @@ interface MaterializationRun {
     gapFillerItemCount: number;
     totalScheduledMinutes: number;
     totalGapMinutes: number;
-    mediaExpansionAvailable: false;
+    mediaExpansionAvailable: boolean;
+    normalizedSetId: string | null;
+    normalizedSetApplied: boolean;
+    normalizedMediaCount: number;
+    originalSafeFallbackCount: number;
+    missingNormalizedCount: number;
+    originalNotNormalizedCount: number;
+    concatRiskCount: number;
     safety: {
       cursorMutation: false;
       ffmpeg: false;
@@ -675,6 +682,16 @@ export default function SchedulerFoundationPage() {
                   <span className="badge badge-info">ffprobe: false</span>
                   <span className="badge badge-info">playout: false</span>
                   <span className="badge badge-info">broadcast: false</span>
+                  <span className={run.summary.concatRiskCount === 0 ? 'badge badge-ready' : 'badge badge-warning'}>
+                    concat risk: {run.summary.concatRiskCount}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mt-3">
+                  <Info label="normalized set" value={run.summary.normalizedSetId ?? 'none'} />
+                  <Info label="normalized files" value={run.summary.normalizedMediaCount} />
+                  <Info label="safe originals" value={run.summary.originalSafeFallbackCount} />
+                  <Info label="missing normalized" value={run.summary.missingNormalizedCount} />
+                  <Info label="original not normalized" value={run.summary.originalNotNormalizedCount} />
                 </div>
                 {run.warnings.length > 0 && (
                   <div className="mt-3" style={{ color: 'var(--warning)' }}>

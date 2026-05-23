@@ -76,6 +76,21 @@ export const schedulerFoundationApi = {
     confirmationText?: string;
     dryRun?: boolean;
   }) => api.post('/scheduler-foundation/safe-naming/import-apply', payload),
+  safeNamingImportPreviewFile: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post('/scheduler-foundation/safe-naming/import-preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  safeNamingImportApplyFile: (file: File, confirmationText: string, dryRun: boolean) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('dryRun', String(dryRun));
+    if (!dryRun) {
+      fd.append('confirmImport', 'true');
+      fd.append('confirmationText', confirmationText);
+    }
+    return api.post('/scheduler-foundation/safe-naming/import-apply', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   programCandidates: () => api.get('/scheduler-foundation/program-candidates'),
   excelImportPreview: (file: File) => {
     const fd = new FormData();
@@ -109,9 +124,53 @@ export const schedulerFoundationApi = {
     sourcePlaylistPath: string;
     outputMode: 'local_file' | 'localhost_hls';
     durationLimitSeconds?: number;
+    useControlPanelOverlays?: boolean;
+    overlayDate?: string;
   }) => api.post('/scheduler-foundation/test-playout/plans', payload),
   listTestPlayoutPlans: () => api.get('/scheduler-foundation/test-playout/plans'),
   getTestPlayoutPlan: (id: string) => api.get(`/scheduler-foundation/test-playout/plans/${id}`),
+  runTestPlayout: (payload: {
+    confirmExecution: boolean;
+    confirmationText: string;
+    sourcePlaylistPath: string;
+    outputMode: 'local_file' | 'localhost_hls';
+    durationLimitSeconds?: number;
+    useControlPanelOverlays?: boolean;
+    overlayDate?: string;
+  }) => api.post('/scheduler-foundation/test-playout/runs', payload),
+  listTestPlayoutRuns: () => api.get('/scheduler-foundation/test-playout/runs'),
+  getTestPlayoutRun: (id: string) => api.get(`/scheduler-foundation/test-playout/runs/${id}`),
+  getTestPlayoutRunLogs: (id: string, lines?: number) =>
+    api.get(`/scheduler-foundation/test-playout/runs/${id}/logs`, { params: { lines } }),
+  normalizationStatus: () => api.get('/scheduler-foundation/normalization/status'),
+  normalizationPreflight: (payload: {
+    scope?: 'active_schedule' | 'published_schedule' | 'media_roots';
+    publishedScheduleId?: string;
+    rootKeys?: string[];
+    limit?: number;
+  }) => api.post('/scheduler-foundation/normalization/preflight', payload),
+  createNormalizationPlan: (payload: {
+    confirmDryRun: boolean;
+    scope?: 'active_schedule' | 'published_schedule' | 'media_roots';
+    publishedScheduleId?: string;
+    rootKeys?: string[];
+    limit?: number;
+  }) => api.post('/scheduler-foundation/normalization/plans', payload),
+  listNormalizationPlans: () => api.get('/scheduler-foundation/normalization/plans'),
+  getNormalizationPlan: (id: string) => api.get(`/scheduler-foundation/normalization/plans/${id}`),
+  startNormalizationRun: (payload: {
+    planId: string;
+    confirmExecution: boolean;
+    confirmationText: string;
+  }) => api.post('/scheduler-foundation/normalization/runs', payload),
+  listNormalizationRuns: () => api.get('/scheduler-foundation/normalization/runs'),
+  getNormalizationRun: (id: string) => api.get(`/scheduler-foundation/normalization/runs/${id}`),
+  getNormalizationRunLogs: (id: string, lines?: number) =>
+    api.get(`/scheduler-foundation/normalization/runs/${id}/logs`, { params: { lines } }),
+  stopNormalizationRun: (id: string) => api.post(`/scheduler-foundation/normalization/runs/${id}/stop`),
+  publishNormalizedSet: (payload: { runId: string; confirmPublish: boolean }) =>
+    api.post('/scheduler-foundation/normalization/sets', payload),
+  listNormalizedSets: () => api.get('/scheduler-foundation/normalization/sets'),
   overlaySettings: () => api.get('/scheduler-foundation/overlays/settings'),
   saveOverlaySettings: (payload: unknown) => api.put('/scheduler-foundation/overlays/settings', payload),
   listLogoAssets: () => api.get('/scheduler-foundation/overlays/logo-assets'),
