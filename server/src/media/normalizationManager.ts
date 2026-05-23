@@ -1843,6 +1843,9 @@ function buildServerNormalizationNextTask(configValue: ServerNormalizationNextTa
     NORMALIZE_VIDEO_BUFSIZE: configValue.videoBufsize,
     NORMALIZE_AUDIO_BITRATE: configValue.audioBitrate,
     DELETE_ORIGINAL_AFTER_VALIDATION: configValue.deleteOriginalAfterValidation ? '1' : '0',
+    ...(configValue.deleteOriginalAfterValidation
+      ? { DELETE_CONFIRMATION: 'DELETE ORIGINAL AFTER VALIDATION' }
+      : {}),
     REQUIRE_FIX_DONE_BEFORE_CONTINUE: configValue.requireFixDoneBeforeContinue ? '1' : '0',
   };
   const envPrefix = Object.entries(envPreview)
