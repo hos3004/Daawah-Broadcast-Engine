@@ -1777,9 +1777,18 @@ interface ServerNormalizationJobDescriptor {
 }
 
 function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor): ServerNormalizationJobStatus {
-  const pid = readPidFile(descriptor.pidPath);
-  const running = pid !== null && isPidRunning(pid);
-  const pgid = pid ? getProcessGroupId(pid) : null;
+  let pid = readPidFile(descriptor.pidPath);
+  let pgid = pid ? getProcessGroupId(pid) : null;
+  let processes = readProcessesForJob(pgid, pid, descriptor.scriptPath);
+  if (pid === null) {
+    const inferred = inferMainProcess(processes, descriptor.scriptPath);
+    if (inferred) {
+      pid = inferred.pid;
+      pgid = inferred.pgid ?? getProcessGroupId(inferred.pid);
+      processes = readProcessesForJob(pgid, pid, descriptor.scriptPath);
+    }
+  }
+  const running = (pid !== null && isPidRunning(pid)) || processes.length > 0;
   const outputText = readTextTail(descriptor.outputPath, 1024 * 1024);
   const reportPath = latestReportPath(descriptor.reportPattern);
   const logProgress = parseNormalizationProgress(outputText);
@@ -1787,7 +1796,6 @@ function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor
   const reportCounts = reportPath ? parseNormalizationReportCounts(reportPath) : null;
   const counts = reportCounts ?? logCounts;
   const progress = inferNormalizationProgress(logProgress, counts, descriptor.key);
-  const processes = readProcessesForJob(pgid, pid, descriptor.scriptPath);
   const cpuPercent = processes.reduce((sum, processInfo) => sum + processInfo.cpuPercent, 0);
 
   return {
@@ -1974,11 +1982,35 @@ function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath
         (pgid !== null && processInfo.pgid === pgid)
         || (pid !== null && (processInfo.pid === pid || processInfo.ppid === pid))
         || processInfo.command.includes(scriptName)
+        || isLikelyNormalizationFfmpeg(processInfo.command, scriptName)
       ))
       .slice(0, 40);
   } catch {
     return [];
   }
+}
+
+function inferMainProcess(
+  processes: ServerNormalizationProcessInfo[],
+  scriptPath: string
+): ServerNormalizationProcessInfo | null {
+  const scriptName = path.basename(scriptPath);
+  return processes.find(processInfo => (
+    processInfo.command.includes(scriptPath)
+    || processInfo.command.includes(scriptName)
+  )) ?? null;
+}
+
+function isLikelyNormalizationFfmpeg(command: string, scriptName: string): boolean {
+  const lower = command.toLowerCase();
+  if (!lower.includes('ffmpeg')) return false;
+  if (scriptName.includes('fix_normalized')) {
+    return lower.includes('/srv/daawah/media/normalized-ar');
+  }
+  if (scriptName.includes('continue_normalize')) {
+    return lower.includes('/srv/daawah/media/original-ar') || lower.includes('/srv/daawah/media/normalized-ar');
+  }
+  return false;
 }
 
 function parseProcessLine(line: string): ServerNormalizationProcessInfo | null {
