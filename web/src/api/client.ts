@@ -9,7 +9,10 @@ export const api = axios.create({
 api.interceptors.response.use(
   r => r,
   err => {
-    if (err.response?.status === 401) {
+    const requestUrl = String(err.config?.url ?? '');
+    const isSessionProbe = requestUrl.includes('/auth/me');
+    const alreadyOnLogin = window.location.pathname === '/admin/login';
+    if (err.response?.status === 401 && !isSessionProbe && !alreadyOnLogin) {
       window.location.href = '/admin/login';
     }
     return Promise.reject(err);
