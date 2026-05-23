@@ -541,8 +541,9 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     outputPath: CONTINUE_NORMALIZE_OUTPUT_PATH,
     reportPattern: /^(continue|normalize).*\.csv$/,
   });
-  const throttlePid = readPidFile(FIX_THROTTLE_PID_PATH);
-  const throttleRunning = throttlePid !== null && isPidRunning(throttlePid);
+  const throttleProcess = readThrottleProcess();
+  const throttlePid = readPidFile(FIX_THROTTLE_PID_PATH) ?? throttleProcess?.pid ?? null;
+  const throttleRunning = (throttlePid !== null && isPidRunning(throttlePid)) || throttleProcess !== null;
   const rawDisk = diskUsage('/srv');
   const freeBytes = Math.max(0, rawDisk.total - rawDisk.used);
   const phase: ServerNormalizationStatus['phase'] = continueJob.running
@@ -2000,6 +2001,10 @@ function inferMainProcess(
     processInfo.command.includes(scriptPath)
     || processInfo.command.includes(scriptName)
   )) ?? null;
+}
+
+function readThrottleProcess(): ServerNormalizationProcessInfo | null {
+  return inferMainProcess(readProcessesForJob(null, null, '/tmp/throttle_fix_normalized_ar.sh'), '/tmp/throttle_fix_normalized_ar.sh');
 }
 
 function isLikelyNormalizationFfmpeg(command: string, scriptName: string): boolean {
