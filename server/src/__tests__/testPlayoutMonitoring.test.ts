@@ -4,6 +4,7 @@ import path from 'path';
 import {
   classifyTestPlayoutFailure,
   inspectTestPlayoutOutput,
+  listTestPlayoutRuns,
 } from '../playout/testPlayout';
 
 describe('test playout monitoring helpers', () => {
@@ -51,5 +52,12 @@ describe('test playout monitoring helpers', () => {
       .toBe('DTS_PTS');
     expect(classifyTestPlayoutFailure('Invalid data found when processing input')?.code)
       .toBe('DECODER_ERROR');
+  });
+
+  it('ignores non-run directories when listing historical test playout runs', () => {
+    process.env['TEST_PLAYOUT_PROJECT_ROOT'] = tempDir;
+    fs.mkdirSync(path.join(tempDir, 'generated', 'test-playout', 'hls'), { recursive: true });
+
+    expect(listTestPlayoutRuns()).toEqual([]);
   });
 });

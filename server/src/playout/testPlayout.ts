@@ -604,7 +604,13 @@ export function listTestPlayoutRuns(limit = 50): TestPlayoutRunDetail[] {
 
   return fs.readdirSync(root, { withFileTypes: true })
     .filter(entry => entry.isDirectory())
-    .map(entry => readTestPlayoutRun(entry.name))
+    .map(entry => {
+      try {
+        return readTestPlayoutRun(entry.name);
+      } catch {
+        return null;
+      }
+    })
     .filter((run): run is TestPlayoutRunDetail => run !== null)
     .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
     .slice(0, clampLimit(limit));
