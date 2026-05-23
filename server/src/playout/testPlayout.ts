@@ -164,6 +164,10 @@ export interface TestPlayoutMonitoringSnapshot {
     exists: boolean;
     sizeBytes: number | null;
     hlsSegmentCount: number | null;
+    hlsIndexAgeSeconds: number | null;
+    hlsStaleThresholdSeconds: number | null;
+    hlsHealthy: boolean | null;
+    hlsStale: boolean;
   };
   process: {
     rssBytes: number;
@@ -374,6 +378,10 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
   let exitCode: number | null = null;
   let signal: NodeJS.Signals | string | null = null;
   let endedAt: string | null = null;
+  let ffmpegLogTail = '';
+  let activeChild: ReturnType<typeof childProcess.spawn> | null = null;
+  let hlsStaleDetected = false;
+  let hlsStaleMessage = '';
 
   const writeStatus = (ffmpegStatus: TestPlayoutMonitoringSnapshot['ffmpegStatus']): TestPlayoutMonitoringSnapshot => {
     const snapshot = buildMonitoringSnapshot(
@@ -385,6 +393,24 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
       validated.outputPath
     );
     writeJsonFile(statusPath, snapshot);
+    if (
+      status === 'running' &&
+      ffmpegStatus === 'running' &&
+      validated.outputMode === 'localhost_hls' &&
+      snapshot.output.hlsStale &&
+      !hlsStaleDetected &&
+      activeChild
+    ) {
+      hlsStaleDetected = true;
+      hlsStaleMessage = `HLS index did not update for ${snapshot.output.hlsIndexAgeSeconds ?? 'unknown'}s; threshold is ${snapshot.output.hlsStaleThresholdSeconds}s.`;
+      logStream.write(`\n[watchdog] ${hlsStaleMessage} Sending SIGTERM.\n`);
+      signal = 'SIGTERM';
+      try {
+        activeChild.kill('SIGTERM');
+      } catch (err) {
+        logStream.write(`\n[watchdog] Failed to stop stale HLS FFmpeg process: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
     return snapshot;
   };
 
@@ -402,6 +428,7 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      activeChild = child;
       const timeoutMs = getFfmpegTimeoutMs(validated.durationLimitSeconds);
       const killGraceMs = getEnvPositiveInteger('TEST_PLAYOUT_FFMPEG_KILL_GRACE_MS') ?? DEFAULT_FFMPEG_KILL_GRACE_MS;
       const forceCloseMs = getEnvPositiveInteger('TEST_PLAYOUT_FFMPEG_FORCE_CLOSE_MS') ?? DEFAULT_FFMPEG_FORCE_CLOSE_MS;
@@ -461,9 +488,13 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
       }, timeoutMs);
 
       child.stdout?.on('data', chunk => {
+        const text = chunk.toString();
+        ffmpegLogTail = appendTail(ffmpegLogTail, text);
         logStream.write(chunk);
       });
       child.stderr?.on('data', chunk => {
+        const text = chunk.toString();
+        ffmpegLogTail = appendTail(ffmpegLogTail, text);
         logStream.write(chunk);
       });
       child.on('error', err => {
@@ -472,17 +503,27 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
       child.on('close', (code, closeSignal) => {
         exitCode = code;
         signal = closeSignal ?? signal;
+        activeChild = null;
         settleResolve();
       });
     });
 
-    status = exitCode === 0 && !timedOut ? 'completed' : 'failed';
-    if (timedOut) {
+    status = exitCode === 0 && !timedOut && !hlsStaleDetected ? 'completed' : 'failed';
+    if (hlsStaleDetected) {
+      errors.push({
+        code: 'HLS_OUTPUT_STALE',
+        message: hlsStaleMessage || 'HLS output became stale during isolated test playout.',
+      });
+    } else if (timedOut) {
       errors.push({
         code: forcedKill ? 'FFMPEG_TIMEOUT_FORCE_KILLED' : 'FFMPEG_TIMEOUT',
         message: `FFmpeg exceeded the isolated test timeout and was stopped${forcedKill ? ' with SIGKILL after SIGTERM did not close it' : ' with SIGTERM'}.`,
       });
     } else if (exitCode !== 0) {
+      const classifiedFailure = classifyTestPlayoutFailure(ffmpegLogTail);
+      if (classifiedFailure) {
+        errors.push(classifiedFailure);
+      }
       errors.push({
         code: 'FFMPEG_EXIT_NON_ZERO',
         message: `FFmpeg exited with code ${exitCode ?? 'null'}${signal ? ` and signal ${signal}` : ''}.`,
@@ -496,6 +537,7 @@ export async function runIsolatedTestPlayout(input: TestPlayoutRunInput): Promis
     });
   } finally {
     clearInterval(heartbeat);
+    activeChild = null;
     endedAt = new Date().toISOString();
     await new Promise<void>(resolve => {
       logStream.end(resolve);
@@ -1387,8 +1429,21 @@ function buildMonitoringSnapshot(
 }
 
 function inspectOutput(outputMode: TestPlayoutOutputMode, outputPath: string): TestPlayoutMonitoringSnapshot['output'] {
+  return inspectTestPlayoutOutput(outputMode, outputPath);
+}
+
+export function inspectTestPlayoutOutput(
+  outputMode: TestPlayoutOutputMode,
+  outputPath: string
+): TestPlayoutMonitoringSnapshot['output'] {
   if (outputMode === 'localhost_hls') {
-    const exists = fs.existsSync(path.join(outputPath, 'index.m3u8'));
+    const indexPath = path.join(outputPath, 'index.m3u8');
+    const exists = fs.existsSync(indexPath);
+    const hlsStaleThresholdSeconds = config.monitoring.hlsStaleThreshold;
+    const hlsIndexAgeSeconds = exists
+      ? Math.max(0, Math.floor((Date.now() - fs.statSync(indexPath).mtimeMs) / 1000))
+      : null;
+    const hlsStale = hlsIndexAgeSeconds !== null && hlsIndexAgeSeconds > hlsStaleThresholdSeconds;
     const hlsSegmentCount = fs.existsSync(outputPath)
       ? fs.readdirSync(outputPath).filter(file => file.endsWith('.ts')).length
       : 0;
@@ -1398,6 +1453,10 @@ function inspectOutput(outputMode: TestPlayoutOutputMode, outputPath: string): T
       exists,
       sizeBytes: null,
       hlsSegmentCount,
+      hlsIndexAgeSeconds,
+      hlsStaleThresholdSeconds,
+      hlsHealthy: exists && !hlsStale,
+      hlsStale,
     };
   }
 
@@ -1408,7 +1467,38 @@ function inspectOutput(outputMode: TestPlayoutOutputMode, outputPath: string): T
     exists,
     sizeBytes: exists ? fs.statSync(outputPath).size : null,
     hlsSegmentCount: null,
+    hlsIndexAgeSeconds: null,
+    hlsStaleThresholdSeconds: null,
+    hlsHealthy: null,
+    hlsStale: false,
   };
+}
+
+function appendTail(current: string, next: string, maxChars = 16_000): string {
+  const combined = `${current}${next}`;
+  return combined.length > maxChars ? combined.slice(-maxChars) : combined;
+}
+
+export function classifyTestPlayoutFailure(logText: string): TestPlayoutError | null {
+  if (/No such file|Error opening input|Cannot open|failed to open/i.test(logText)) {
+    return {
+      code: 'MISSING_FILE',
+      message: 'FFmpeg stopped because an input file could not be opened.',
+    };
+  }
+  if (/non[- ]monoton|DTS|PTS|timestamp|Invalid timestamps/i.test(logText)) {
+    return {
+      code: 'DTS_PTS',
+      message: 'FFmpeg reported timestamp/DTS/PTS problems during isolated playout.',
+    };
+  }
+  if (/Invalid data found|Error while decoding|decode.*error|corrupt|Could not find codec/i.test(logText)) {
+    return {
+      code: 'DECODER_ERROR',
+      message: 'FFmpeg reported a decoder or corrupt media error during isolated playout.',
+    };
+  }
+  return null;
 }
 
 function writeJsonFile(filePath: string, value: unknown): void {
@@ -1441,6 +1531,8 @@ function renderRunReport(detail: TestPlayoutRunDetail): string {
 - Drift seconds: ${detail.monitoring.driftSeconds}
 - Output exists: ${detail.monitoring.output.exists}
 - HLS segment count: ${detail.monitoring.output.hlsSegmentCount ?? 'n/a'}
+- HLS index age seconds: ${detail.monitoring.output.hlsIndexAgeSeconds ?? 'n/a'}
+- HLS stale: ${detail.monitoring.output.hlsStale}
 
 ## Safety
 

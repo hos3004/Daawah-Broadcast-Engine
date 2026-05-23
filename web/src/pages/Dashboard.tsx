@@ -43,6 +43,9 @@ interface TestPlayoutRunSummary {
     output: {
       exists: boolean;
       hlsSegmentCount: number | null;
+      hlsHealthy?: boolean | null;
+      hlsStale?: boolean;
+      hlsIndexAgeSeconds?: number | null;
     };
   };
 }
@@ -225,7 +228,7 @@ export default function DashboardPage() {
                 value={testPlayoutData.runs[0].status}
                 tone={testPlayoutData.runs[0].status === 'completed' ? 'ready' : testPlayoutData.runs[0].status === 'failed' ? 'error' : 'warning'}
               />
-              <StatusLine label="output" value={testPlayoutData.runs[0].monitoring.output.exists ? 'exists' : 'missing'} tone={testPlayoutData.runs[0].monitoring.output.exists ? 'ready' : 'warning'} />
+              <StatusLine label="output" value={testPlayoutOutputLabel(testPlayoutData.runs[0])} tone={testPlayoutOutputTone(testPlayoutData.runs[0])} />
               <p className="text-xs ltr-text break-all" style={{ color: 'var(--text-muted)' }}>
                 {testPlayoutData.runs[0].outputPath}
               </p>
@@ -264,6 +267,20 @@ function normalStatusTone(status: NormalizationRunSummary['status']): 'ready' | 
   if (status === 'failed') return 'error';
   if (status === 'stopped') return 'warning';
   return 'info';
+}
+
+function testPlayoutOutputLabel(run: TestPlayoutRunSummary): string {
+  const output = run.monitoring.output;
+  if (output.hlsStale) return `HLS stale ${output.hlsIndexAgeSeconds ?? '?'}s`;
+  if (output.hlsHealthy === true) return 'HLS healthy';
+  return output.exists ? 'exists' : 'missing';
+}
+
+function testPlayoutOutputTone(run: TestPlayoutRunSummary): 'ready' | 'warning' | 'error' | 'info' {
+  const output = run.monitoring.output;
+  if (output.hlsStale) return 'error';
+  if (output.hlsHealthy === true || output.exists) return 'ready';
+  return 'warning';
 }
 
 function NowPlayingProgress({ item }: { item: PlaylistItem }) {

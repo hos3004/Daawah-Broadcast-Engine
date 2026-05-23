@@ -316,7 +316,7 @@ export default function NormalizationManagerPage() {
             <FileCog size={20} style={{ color: 'var(--accent)' }} />
             <h2 className="text-xl font-bold">Normalization Manager</h2>
             <span className="badge badge-warning">dry-run first</span>
-            <span className="badge badge-info">no FFmpeg execution</span>
+            <span className="badge badge-info">typed confirmation before FFmpeg</span>
           </div>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
             Scan source and bumper media, classify playout risk, and prepare a reviewable plan for /srv/daawah/media/normalized-ar.

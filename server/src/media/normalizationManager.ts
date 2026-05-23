@@ -638,7 +638,8 @@ export function publishNormalizedSet(input: NormalizedSetInput): NormalizedSetDe
   const diffPath = path.join(setDir, 'diff.md');
   const createdAt = new Date().toISOString();
   const diff = plan.items.map(item => {
-    const normalizedExists = fs.existsSync(item.normalizedPath);
+    const originalSafeFallback = item.decision === 'ok' && item.exists;
+    const normalizedExists = !originalSafeFallback && fs.existsSync(item.normalizedPath);
     return {
       mediaFileId: item.mediaFileId,
       title: item.title,
@@ -646,7 +647,7 @@ export function publishNormalizedSet(input: NormalizedSetInput): NormalizedSetDe
       originalPath: item.absolutePath,
       normalizedPath: item.normalizedPath,
       normalizedExists,
-      originalSafeFallback: item.decision === 'ok' && item.exists,
+      originalSafeFallback,
     };
   });
   const missingNormalized = diff.filter(item => !item.normalizedExists && !item.originalSafeFallback).length;

@@ -3,9 +3,9 @@
 ## Purpose
 
 This document defines the design for an isolated test playout phase and tracks
-the Phase 14A prepare-only harness foundation. The foundation does not implement
-playout execution, does not run ffmpeg, does not access media, and does not
-start any process.
+the control-panel implementation. The current control-panel path supports both
+prepare-only plans and explicitly confirmed short FFmpeg test runs, while
+keeping output constrained to `generated/test-playout`.
 
 The goal is to prove that a future playout runner can consume approved test
 playlist artifacts without touching the live broadcast path, old OBS workflow,
@@ -15,17 +15,14 @@ production stream settings, DNS, or media folders.
 
 In scope:
 
-- Test-only playout design.
-- Local file output design.
-- Localhost-only HLS output design.
-- Safety gates before any later execution.
+- Test-only playout design and implementation.
+- Local file output.
+- Localhost-only HLS output.
+- Safety gates before execution.
 - Logging, monitoring, stop, cleanup, and rollback requirements.
 
 Out of scope:
 
-- Playout implementation.
-- ffmpeg command execution.
-- Media access or QC execution.
 - Production playlist materialization.
 - Live stream output.
 - DNS, stream key, OBS, or broadcast server changes.
@@ -187,9 +184,17 @@ The log must include:
 - Expected duration.
 - Actual duration.
 - Drift.
-- ffmpeg exit status when ffmpeg is introduced in a later approved phase.
+- FFmpeg exit status.
 - Errors and warnings.
 - Safety summary.
+
+When FFmpeg exits non-zero, the control panel should preserve the raw log and
+also classify common failures as:
+
+- `MISSING_FILE`
+- `DTS_PTS`
+- `DECODER_ERROR`
+- `HLS_OUTPUT_STALE`
 
 The markdown report must include:
 
@@ -205,7 +210,7 @@ The markdown report must include:
 
 ## Monitoring Requirements
 
-During a future test run, monitoring must show:
+During a test run, monitoring must show:
 
 - Process status.
 - PID.
@@ -223,9 +228,14 @@ For localhost-only HLS tests, monitoring must also show:
 
 - HLS output directory.
 - Segment count.
-- Latest segment timestamp.
-- Manifest update timestamp.
-- Segment growth rate.
+- Manifest/index age.
+- Stale threshold.
+- HLS healthy/stale state.
+
+The isolated runner treats HLS as unhealthy if `index.m3u8` exists but has not
+updated within `HLS_STALE_THRESHOLD` seconds. The default threshold is 30
+seconds. If this happens during an isolated run, FFmpeg is stopped and the run
+records `HLS_OUTPUT_STALE`.
 
 ## Stop And Kill Procedure
 
@@ -284,16 +294,20 @@ Any later implementation PR must keep these concerns separate:
 The first implementation should support a dry, local-only test path before any
 real media playout is considered.
 
-## Phase 14A Harness Foundation
+## Phase 14A/14B Control-Panel Harness
 
-Phase 14A implements a plan-only harness foundation. It prepares and stores
-reviewable test playout plans, but it does not execute them.
+Phase 14A implemented a plan-only harness foundation. Phase 14B adds explicit
+isolated execution with typed confirmation and status/log artifact reads.
 
 Implemented endpoints:
 
 - `POST /api/scheduler-foundation/test-playout/plans`
 - `GET /api/scheduler-foundation/test-playout/plans`
 - `GET /api/scheduler-foundation/test-playout/plans/:id`
+- `POST /api/scheduler-foundation/test-playout/runs`
+- `GET /api/scheduler-foundation/test-playout/runs`
+- `GET /api/scheduler-foundation/test-playout/runs/:id`
+- `GET /api/scheduler-foundation/test-playout/runs/:id/logs`
 
 The prepare endpoint requires:
 
@@ -307,10 +321,17 @@ The harness stores planned output targets only under:
 - `generated/test-playout/<planId>/output.mp4`
 - `generated/test-playout/<planId>/hls/`
 
-The generated command preview is for review only. The server does not spawn a
-process, does not run FFmpeg, does not start HLS, does not access media files,
-does not push RTMP, does not use stream keys, does not mutate cursors, and does
-not broadcast.
+The generated plan command preview is for review only. Execution requires
+`confirmExecution=true` and exact confirmation text:
+
+```text
+RUN ISOLATED TEST PLAYOUT
+```
+
+The execution route spawns FFmpeg only for the isolated run, uses concat filter
+instead of concat demuxer for mixed MP4 input, writes only under
+`generated/test-playout`, and records status/report/log artifacts. It does not
+push RTMP, use stream keys, mutate cursors, or broadcast.
 
 Rejected targets include:
 
@@ -325,16 +346,12 @@ Rejected targets include:
 
 ## Explicit Non-Actions
 
-These restrictions remain true after Phase 14A:
+These restrictions remain true for the control-panel test path:
 
-- No playout execution implementation.
-- No ffmpeg command execution.
 - No ffprobe command execution.
-- No media access.
 - No scan.
 - No broadcast.
 - No stream key handling.
 - No DNS or live URL changes.
-- No server or background process starts.
 - No production materialization.
 - No cursor mutation.

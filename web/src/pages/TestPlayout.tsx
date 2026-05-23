@@ -62,6 +62,10 @@ interface TestPlayoutRun {
       exists: boolean;
       sizeBytes: number | null;
       hlsSegmentCount: number | null;
+      hlsIndexAgeSeconds: number | null;
+      hlsStaleThresholdSeconds: number | null;
+      hlsHealthy: boolean | null;
+      hlsStale: boolean;
     };
   };
   errors: Array<{ code: string; message: string }>;
@@ -388,10 +392,21 @@ export default function TestPlayoutPage() {
               <Info label="output exists" value={selectedRun.monitoring.output.exists ? 'yes' : 'no'} />
             </div>
             {selectedRun.outputMode === 'localhost_hls' && (
-              <div className="flex flex-wrap items-center gap-2">
-                <CheckCircle2 size={14} style={{ color: 'var(--success)' }} />
-                <span>HLS index:</span>
-                <span className="ltr-text break-all">{`${selectedRun.outputPath.replace(/\\/g, '/')}/index.m3u8`}</span>
+              <div className="rounded-md border p-3 space-y-2" style={{ borderColor: selectedRun.monitoring.output.hlsStale ? 'var(--danger)' : 'var(--bg-border)' }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  {selectedRun.monitoring.output.hlsHealthy ? (
+                    <CheckCircle2 size={14} style={{ color: 'var(--success)' }} />
+                  ) : (
+                    <AlertTriangle size={14} style={{ color: 'var(--warning)' }} />
+                  )}
+                  <span>HLS index:</span>
+                  <span className="ltr-text break-all">{`${selectedRun.outputPath.replace(/\\/g, '/')}/index.m3u8`}</span>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  <Info label="hls health" value={selectedRun.monitoring.output.hlsHealthy ? 'healthy' : selectedRun.monitoring.output.hlsStale ? 'stale' : 'pending'} />
+                  <Info label="index age" value={selectedRun.monitoring.output.hlsIndexAgeSeconds === null ? '-' : `${selectedRun.monitoring.output.hlsIndexAgeSeconds}s`} />
+                  <Info label="stale threshold" value={selectedRun.monitoring.output.hlsStaleThresholdSeconds === null ? '-' : `${selectedRun.monitoring.output.hlsStaleThresholdSeconds}s`} />
+                </div>
               </div>
             )}
             {selectedRun.errors.length > 0 && (
