@@ -552,7 +552,8 @@ export default function SchedulerFoundationPage() {
       setActiveTab('preview');
       setWizardStep(5);
       if (parsedPreview.summary.errors > 0) {
-        setWizardError(`تم إنشاء المعاينة لكن بها أخطاء تمنع الاعتماد:\n${formatPreviewIssues(parsedPreview.issues, 6)}`);
+        const blockingIssues = parsedPreview.issues.filter(issue => issue.severity === 'error');
+        setWizardError(`تم إنشاء المعاينة لكن بها أخطاء تمنع الاعتماد:\n${formatPreviewIssues(blockingIssues, 8, parsedPreview)}`);
       }
     } catch (err) {
       setWizardError(describeWizardPreviewError(err));
@@ -1659,21 +1660,7 @@ function ScheduleWizardModal({
             </div>
           )}
 
-          {step === 5 && preview && preview.issues.length > 0 && (
-            <div className="rounded-md border p-3 mt-4 text-xs space-y-1" style={{ borderColor: preview.summary.errors > 0 ? 'var(--danger)' : 'var(--warning)' }}>
-              <div className="font-semibold" style={{ color: preview.summary.errors > 0 ? 'var(--danger)' : 'var(--warning)' }}>
-                تفاصيل المراجعة
-              </div>
-              {preview.issues.slice(0, 8).map((issue, index) => (
-                <div key={`${issue.code}-${index}`} style={{ color: issue.severity === 'error' ? 'var(--danger)' : 'var(--warning)' }}>
-                  {formatPreviewIssue(issue)}
-                </div>
-              ))}
-              {preview.issues.length > 8 && (
-                <div style={{ color: 'var(--text-muted)' }}>وهناك {preview.issues.length - 8} ملاحظة أخرى في تبويب الأخطاء والتحذيرات.</div>
-              )}
-            </div>
-          )}
+          {step === 5 && preview && preview.issues.length > 0 && <PreviewIssueSummary preview={preview} />}
 
           {error && <p className="text-xs mt-4 whitespace-pre-line" style={{ color: 'var(--danger)' }}>{error}</p>}
         </div>
@@ -1697,6 +1684,54 @@ function WizardStepPill({ label, index, active, done, onClick }: { label: string
       {done ? <CheckCircle2 size={13} style={{ color: 'var(--success)' }} /> : <span>{index}</span>}
       {label}
     </button>
+  );
+}
+
+function PreviewIssueSummary({ preview }: { preview: ExcelPreview }) {
+  const errors = preview.issues.filter(issue => issue.severity === 'error');
+  const warnings = preview.issues.filter(issue => issue.severity === 'warning');
+  const infos = preview.issues.filter(issue => issue.severity === 'info');
+
+  return (
+    <div className="rounded-md border p-3 mt-4 text-xs space-y-3" style={{ borderColor: errors.length > 0 ? 'var(--danger)' : 'var(--warning)' }}>
+      {errors.length > 0 && (
+        <div className="space-y-1">
+          <div className="font-semibold" style={{ color: 'var(--danger)' }}>
+            أخطاء تمنع الاعتماد
+          </div>
+          {errors.slice(0, 10).map((issue, index) => (
+            <div key={`${issue.code}-${index}`} style={{ color: 'var(--danger)' }}>
+              {formatPreviewIssue(issue, preview)}
+            </div>
+          ))}
+          {errors.length > 10 && (
+            <div style={{ color: 'var(--text-muted)' }}>وهناك {errors.length - 10} خطأ آخر في تبويب الأخطاء والتحذيرات.</div>
+          )}
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="space-y-1">
+          <div className="font-semibold" style={{ color: 'var(--warning)' }}>
+            تحذيرات لا تمنع الاعتماد
+          </div>
+          {warnings.slice(0, 6).map((issue, index) => (
+            <div key={`${issue.code}-${index}`} style={{ color: 'var(--warning)' }}>
+              {formatPreviewIssue(issue, preview)}
+            </div>
+          ))}
+          {warnings.length > 6 && (
+            <div style={{ color: 'var(--text-muted)' }}>وهناك {warnings.length - 6} تحذير آخر في تبويب الأخطاء والتحذيرات.</div>
+          )}
+        </div>
+      )}
+
+      {infos.length > 0 && (
+        <div style={{ color: 'var(--text-muted)' }}>
+          معلومات إضافية: {infos.length}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2225,17 +2260,39 @@ function describeWizardPreviewError(err: unknown): string {
   return lines.join('\n');
 }
 
-function formatPreviewIssues(issues: ExcelIssue[], limit: number): string {
+function formatPreviewIssues(issues: ExcelIssue[], limit: number, preview?: ExcelPreview): string {
   if (issues.length === 0) return 'لا توجد تفاصيل إضافية.';
-  const visible = issues.slice(0, limit).map(formatPreviewIssue);
+  const visible = issues.slice(0, limit).map(issue => formatPreviewIssue(issue, preview));
   if (issues.length > limit) visible.push(`... و${issues.length - limit} ملاحظة أخرى`);
   return visible.join('\n');
 }
 
-function formatPreviewIssue(issue: ExcelIssue): string {
+function formatPreviewIssue(issue: ExcelIssue, preview?: ExcelPreview): string {
   const row = issue.row ? `صف ${issue.row}` : 'بدون صف';
   const field = issue.field ? ` / ${issue.field}` : '';
-  return `[${issue.severity}] ${issue.sheet} ${row}${field} - ${issue.code}: ${issue.message}`;
+  const context = preview ? previewIssueContext(issue, preview) : '';
+  return `[${issue.severity}] ${issue.sheet} ${row}${context}${field} - ${issue.code}: ${issue.message}`;
+}
+
+function previewIssueContext(issue: ExcelIssue, preview: ExcelPreview): string {
+  if (!issue.row) return '';
+
+  if (issue.sheet === 'Slots') {
+    const slot = preview.slots.find(row => row.row === issue.row);
+    if (!slot) return '';
+    const program = preview.programs.find(row => row.program_key === slot.program_key);
+    const title = program?.program_name || slot.program_key;
+    const duration = slot.duration_minutes ? ` / ${slot.duration_minutes} دقيقة` : '';
+    return ` (${title} - ${slot.start_time}${duration})`;
+  }
+
+  if (issue.sheet === 'Programs') {
+    const program = preview.programs.find(row => row.row === issue.row);
+    if (!program) return '';
+    return ` (${program.program_name || program.program_key})`;
+  }
+
+  return '';
 }
 
 function isExcelIssueLike(value: unknown): value is ExcelIssue {
