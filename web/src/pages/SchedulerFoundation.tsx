@@ -1420,8 +1420,8 @@ function ScheduleWizardModal({
   const wizardIssueMap = preview ? buildWizardIssueMap(rows, preview) : new Map<string, WizardRowIssueSummary>();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2" style={{ background: 'rgba(0,0,0,0.72)' }}>
-      <div className="w-full max-h-[96vh] overflow-hidden rounded-lg" style={{ width: '98vw', maxWidth: 'none', background: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-1" style={{ background: 'rgba(0,0,0,0.72)' }}>
+      <div className="w-full max-h-[98vh] overflow-hidden rounded-lg" style={{ width: '99.5vw', maxWidth: 'none', background: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
         <div className="flex items-start justify-between gap-4 px-5 py-4" style={{ borderBottom: '1px solid var(--bg-border)' }}>
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1446,7 +1446,7 @@ function ScheduleWizardModal({
           </div>
         </div>
 
-        <div className="p-5 overflow-y-auto max-h-[78vh]">
+        <div className="p-4 overflow-y-auto max-h-[82vh]">
           {step === 1 && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1513,10 +1513,10 @@ function ScheduleWizardModal({
                 </div>
               )}
               <div className="overflow-x-auto rounded-md border" style={{ borderColor: 'var(--bg-border)' }}>
-                <table className="w-full text-sm min-w-[1760px]">
+                <table className="w-full text-sm min-w-[2200px]">
                   <thead>
                     <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
-                      {['البرنامج', 'المشكلة', 'المجلد', 'النوع', 'تشغيل', 'المدة', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count', ''].map(header => (
+                      {['حذف', 'البرنامج', 'المشكلة', 'المجلد', 'النوع', 'تشغيل', 'المدة', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count'].map(header => (
                         <th key={header} className="text-right px-3 py-2 font-medium text-xs" style={{ color: 'var(--text-muted)' }}>{header}</th>
                       ))}
                     </tr>
@@ -1532,6 +1532,11 @@ function ScheduleWizardModal({
                           : 'transparent';
                       return (
                       <tr key={row.localId} style={{ borderBottom: '1px solid var(--bg-border)', background: rowBackground }}>
+                        <td className="px-3 py-2 align-top w-16">
+                          <button className="btn-ghost px-2 py-1.5" onClick={() => onRemoveRow(row.localId)} title="حذف السطر">
+                            <XCircle size={14} />
+                          </button>
+                        </td>
                         <td className="px-3 py-2 align-top min-w-60">
                           <input className={fieldClass} style={fieldStyle} value={row.name} onChange={event => onUpdateRow(row.localId, { name: event.target.value })} />
                           <div className="mt-1">
@@ -1585,32 +1590,32 @@ function ScheduleWizardModal({
                             أطول حلقة: {formatDurationMs(row.longestDurationMs)} · الملفات: {row.fileCount ?? '-'}
                           </div>
                         </td>
-                        <td className="px-3 py-2 align-top">
-                          <select className={fieldClass} style={fieldStyle} value={row.slotMode} onChange={event => onUpdateRow(row.localId, { slotMode: event.target.value as WizardSlotMode })}>
+                        <td className="px-3 py-2 align-top min-w-44">
+                          <select className={`${fieldClass} min-w-[150px]`} style={fieldStyle} value={row.slotMode} onChange={event => onUpdateRow(row.localId, { slotMode: event.target.value as WizardSlotMode })}>
                             {(Object.keys(slotModeLabels) as WizardSlotMode[]).map(mode => <option key={mode} value={mode}>{slotModeLabels[mode]}</option>)}
                           </select>
                         </td>
-                        <td className="px-3 py-2 align-top">
-                          <select className={fieldClass} style={fieldStyle} value={row.playMode} onChange={event => onUpdateRow(row.localId, { playMode: event.target.value as WizardPlayMode })}>
+                        <td className="px-3 py-2 align-top min-w-44">
+                          <select className={`${fieldClass} min-w-[150px]`} style={fieldStyle} value={row.playMode} onChange={event => onUpdateRow(row.localId, { playMode: event.target.value as WizardPlayMode })}>
                             <option value="sequential">sequential</option>
                             <option value="shuffle">shuffle</option>
                             <option value="newest">newest</option>
                             <option value="round_robin">round_robin</option>
                           </select>
                         </td>
-                        <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={wizardFieldStyle(rowIssues, 'duration_minutes')} type="number" min={1} value={row.durationMinutes} onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })} />
+                        <td className="px-3 py-2 align-top min-w-32">
+                          <input className={`${fieldClass} min-w-[110px]`} style={wizardFieldStyle(rowIssues, 'duration_minutes')} type="number" min={1} value={row.durationMinutes} onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })} />
                         </td>
-                        <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={wizardTimeFieldStyle(rowIssues, row.startTime)} type="time" value={row.startTime} onChange={event => onUpdateRow(row.localId, { startTime: event.target.value })} />
+                        <td className="px-3 py-2 align-top min-w-36">
+                          <input className={`${fieldClass} min-w-[120px]`} style={wizardTimeFieldStyle(rowIssues, row.startTime)} type="time" value={row.startTime} onChange={event => onUpdateRow(row.localId, { startTime: event.target.value })} />
                         </td>
-                        <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={wizardTimeFieldStyle(rowIssues, row.repeatTime)} type="time" value={row.repeatTime} onChange={event => onUpdateRow(row.localId, { repeatTime: event.target.value })} />
+                        <td className="px-3 py-2 align-top min-w-36">
+                          <input className={`${fieldClass} min-w-[120px]`} style={wizardTimeFieldStyle(rowIssues, row.repeatTime)} type="time" value={row.repeatTime} onChange={event => onUpdateRow(row.localId, { repeatTime: event.target.value })} />
                         </td>
-                        <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={wizardTimeFieldStyle(rowIssues, row.secondRepeatTime)} type="time" value={row.secondRepeatTime} onChange={event => onUpdateRow(row.localId, { secondRepeatTime: event.target.value })} />
+                        <td className="px-3 py-2 align-top min-w-36">
+                          <input className={`${fieldClass} min-w-[120px]`} style={wizardTimeFieldStyle(rowIssues, row.secondRepeatTime)} type="time" value={row.secondRepeatTime} onChange={event => onUpdateRow(row.localId, { secondRepeatTime: event.target.value })} />
                         </td>
-                        <td className="px-3 py-2 align-top min-w-72">
+                        <td className="px-3 py-2 align-top min-w-[360px]">
                           <div className="flex flex-wrap gap-1">
                             {dayKeys.map(day => (
                               <button
@@ -1629,13 +1634,8 @@ function ScheduleWizardModal({
                             ))}
                           </div>
                         </td>
-                        <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={fieldStyle} type="number" min={1} disabled={row.slotMode !== 'file-count'} value={row.fileCountLimit} onChange={event => onUpdateRow(row.localId, { fileCountLimit: Number(event.target.value) })} />
-                        </td>
-                        <td className="px-3 py-2 align-top">
-                          <button className="btn-ghost px-2 py-1.5" onClick={() => onRemoveRow(row.localId)} title="حذف السطر">
-                            <XCircle size={14} />
-                          </button>
+                        <td className="px-3 py-2 align-top min-w-32">
+                          <input className={`${fieldClass} min-w-[110px]`} style={fieldStyle} type="number" min={1} disabled={row.slotMode !== 'file-count'} value={row.fileCountLimit} onChange={event => onUpdateRow(row.localId, { fileCountLimit: Number(event.target.value) })} />
                         </td>
                       </tr>
                       );
