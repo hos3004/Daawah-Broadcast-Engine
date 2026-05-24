@@ -342,6 +342,8 @@ const slotModeLabels: Record<WizardSlotMode, string> = {
   'file-count': 'file-count',
 };
 
+const MAX_REASONABLE_WIZARD_SLOT_MINUTES = 6 * 60;
+
 export default function SchedulerFoundationPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('programs');
@@ -1541,6 +1543,11 @@ function ScheduleWizardModal({
                         <td className="px-3 py-2 align-top min-w-80 max-w-sm">
                           {rowIssues && rowIssues.issues.length > 0 ? (
                             <div className="space-y-1">
+                              {row.notes && (
+                                <div className="rounded-md border px-2 py-1 badge-warning" style={{ whiteSpace: 'normal' }}>
+                                  {row.notes}
+                                </div>
+                              )}
                               {rowIssues.issues.slice(0, 3).map((issue, issueIndex) => (
                                 <div
                                   key={`${issue.code}-${issueIndex}`}
@@ -1553,6 +1560,10 @@ function ScheduleWizardModal({
                               {rowIssues.issues.length > 3 && (
                                 <div style={{ color: 'var(--text-muted)' }}>+{rowIssues.issues.length - 3} ملاحظة أخرى</div>
                               )}
+                            </div>
+                          ) : row.notes ? (
+                            <div className="rounded-md border px-2 py-1 badge-warning" style={{ whiteSpace: 'normal' }}>
+                              {row.notes}
                             </div>
                           ) : (
                             <span style={{ color: 'var(--text-muted)' }}>-</span>
@@ -2122,6 +2133,7 @@ interface ParsedWizardProgramLine {
   name: string;
   startTime?: string;
   durationMinutes?: number | null;
+  durationWarning?: string;
 }
 
 function parseWizardProgramLine(line: string): ParsedWizardProgramLine | null {
@@ -2132,10 +2144,14 @@ function parseWizardProgramLine(line: string): ParsedWizardProgramLine | null {
   if (rangeMatch) {
     const startTime = normalizeTimeText(rangeMatch[1]);
     const endTime = normalizeTimeText(rangeMatch[2]);
+    const durationMinutes = startTime && endTime ? durationBetweenTimes(startTime, endTime) : null;
     return {
       name: rangeMatch[3].trim(),
       startTime,
-      durationMinutes: startTime && endTime ? durationBetweenTimes(startTime, endTime) : null,
+      durationMinutes,
+      durationWarning: startTime && endTime && durationMinutes === null
+        ? `مدة غير منطقية من ${startTime} إلى ${endTime}; تم استخدام مدة الحلقة أو 30 دقيقة بدلًا منها.`
+        : undefined,
     };
   }
 
@@ -2176,7 +2192,7 @@ function createWizardRow(entry: ParsedWizardProgramLine, folders: ProgramFolderO
     secondRepeatTime: '',
     durationMinutes,
     fileCountLimit: 1,
-    notes: '',
+    notes: entry.durationWarning ?? '',
   };
 }
 
@@ -2320,14 +2336,14 @@ function normalizeTimeText(value: string | undefined): string {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-function durationBetweenTimes(startTime: string, endTime: string): number {
+function durationBetweenTimes(startTime: string, endTime: string): number | null {
   const start = timeToMinutes(startTime);
   const end = timeToMinutes(endTime);
-  if (start === null || end === null) return 30;
-  let adjustedEnd = end;
-  if (adjustedEnd <= start && start < 18 * 60 && adjustedEnd < 6 * 60) adjustedEnd += 12 * 60;
-  if (adjustedEnd <= start) adjustedEnd += 24 * 60;
-  return Math.max(1, adjustedEnd - start);
+  if (start === null || end === null) return null;
+  const adjustedEnd = end <= start ? end + 24 * 60 : end;
+  const duration = adjustedEnd - start;
+  if (duration <= 0 || duration > MAX_REASONABLE_WIZARD_SLOT_MINUTES) return null;
+  return duration;
 }
 
 function timeToMinutes(value: string): number | null {
