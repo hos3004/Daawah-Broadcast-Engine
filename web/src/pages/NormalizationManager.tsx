@@ -939,8 +939,9 @@ function buildSummaryCards(
   status: NormalizationStatus | null
 ): SummaryCardMetric[] {
   if (currentServerJob && isLiveJobSummaryAvailable(currentServerJob)) {
-    const checked = currentServerJob.progress.current ?? jobProcessedCount(currentServerJob);
-    const total = currentServerJob.progress.total ?? checked;
+    const processed = jobProcessedCount(currentServerJob);
+    const checked = currentServerJob.progress.current ?? (processed > 0 ? processed : 'running');
+    const total = currentServerJob.progress.total ?? (processed > 0 ? processed : '-');
     return [
       { label: 'total', value: total },
       { label: 'checked', value: checked },
