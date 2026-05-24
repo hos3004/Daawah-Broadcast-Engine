@@ -2221,6 +2221,7 @@ function scoreFolderMatch(name: string, folder: ProgramFolderOption): number {
   const baseName = normalizeLookupText(folder.original_relative_path.split(/[\\/]/).filter(Boolean).pop() ?? folder.display_name_ar);
   const slug = normalizeLookupText(folder.safe_slug);
   const candidates = [display, baseName, relativePath, slug].filter(Boolean);
+  const folderText = `${display} ${relativePath} ${slug}`;
   let score = 0;
 
   for (const candidate of candidates) {
@@ -2235,6 +2236,7 @@ function scoreFolderMatch(name: string, folder: ProgramFolderOption): number {
 
   if (folder.root_key === 'normalized-ar') score += 12;
   else if (folder.root_key.includes('normalized')) score += 8;
+  if (indicatesFirstSeason(query) && indicatesLaterSeason(folderText)) score -= 18;
   if ((folder.active_file_count ?? folder.file_count ?? 0) <= 0) score -= 25;
   if (folder.status && !['ready', 'indexed'].includes(folder.status)) score -= 5;
 
@@ -2281,6 +2283,14 @@ function significantLookupTokens(value: string): string[] {
   return normalizeLookupText(value)
     .split(' ')
     .filter(token => token.length > 1 && !/^\d+$/.test(token) && !wizardMatchStopTokens.has(token));
+}
+
+function indicatesFirstSeason(value: string): boolean {
+  return /(^|\s)1(\s|$)/.test(value) || value.includes('الاول') || value.includes('اول');
+}
+
+function indicatesLaterSeason(value: string): boolean {
+  return /(^|\s)[2-9](\s|$)/.test(value) || value.includes('الثاني') || value.includes('الثالث');
 }
 
 function normalizeLookupText(value: string): string {
