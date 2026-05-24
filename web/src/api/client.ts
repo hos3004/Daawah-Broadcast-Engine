@@ -108,6 +108,11 @@ export const schedulerFoundationApi = {
     fd.append('file', file);
     return api.post('/scheduler-foundation/excel-import/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
+  scheduleInputPreview: (payload: {
+    settings?: Record<string, unknown>[];
+    programs?: Record<string, unknown>[];
+    slots?: Record<string, unknown>[];
+  }) => api.post('/scheduler-foundation/excel-import/preview', payload),
   saveDraftSchedule: (payload: {
     name?: string;
     sourceExcel: { filename: string; sha256: string };

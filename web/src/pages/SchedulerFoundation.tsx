@@ -14,11 +14,12 @@ import {
   ShieldCheck,
   Upload,
   Wand2,
+  X,
   XCircle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { schedulerFoundationApi } from '../api/client';
+import { mediaApi, schedulerFoundationApi } from '../api/client';
 
 type TabKey = 'programs' | 'slots' | 'matching' | 'issues' | 'preview';
 
@@ -147,6 +148,51 @@ interface ExcelPreview {
   willActivateSchedule: false;
   willUpdateCursors: false;
   willMaterializePlaylist: false;
+}
+
+interface ProgramFolderOption {
+  id: string;
+  root_key: string;
+  root_path?: string;
+  original_relative_path: string;
+  display_name_ar: string;
+  safe_slug: string;
+  active_file_count: number;
+  active_total_duration_ms: number | null;
+  active_longest_file_duration_ms: number | null;
+  file_count: number;
+  total_duration_ms: number | null;
+  longest_file_duration_ms: number | null;
+  status: string;
+}
+
+type WizardSlotMode = 'fit' | 'playlist' | 'file-count';
+type WizardPlayMode = 'sequential' | 'shuffle' | 'newest' | 'round_robin';
+
+interface WizardProgramDraft {
+  localId: string;
+  name: string;
+  folderId: string;
+  folderRoot: string;
+  folderHint: string;
+  matchStatus: 'matched' | 'manual' | 'needs_review';
+  matchConfidence: number;
+  fileCount: number | null;
+  longestDurationMs: number | null;
+  slotMode: WizardSlotMode;
+  playMode: WizardPlayMode;
+  days: string[];
+  startTime: string;
+  repeatTime: string;
+  secondRepeatTime: string;
+  durationMinutes: number;
+  fileCountLimit: number;
+  notes: string;
+}
+
+interface PreviewSource {
+  filename: string;
+  sha256: string;
 }
 
 interface DraftListItem {
@@ -288,10 +334,19 @@ const dayLabels: Record<string, string> = {
   fri: 'الجمعة',
 };
 
+const dayKeys = ['sat', 'sun', 'mon', 'tue', 'wed', 'thu', 'fri'];
+
+const slotModeLabels: Record<WizardSlotMode, string> = {
+  fit: 'fit',
+  playlist: 'playlist',
+  'file-count': 'file-count',
+};
+
 export default function SchedulerFoundationPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('programs');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewSource, setPreviewSource] = useState<PreviewSource | null>(null);
   const [preview, setPreview] = useState<ExcelPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
@@ -322,10 +377,21 @@ export default function SchedulerFoundationPage() {
   const [workflowMessage, setWorkflowMessage] = useState('');
   const [workflowError, setWorkflowError] = useState('');
   const [error, setError] = useState('');
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState(1);
+  const [wizardStartDate, setWizardStartDate] = useState(() => todayDateInputValue());
+  const [wizardEndDate, setWizardEndDate] = useState(() => todayDateInputValue());
+  const [wizardProgramText, setWizardProgramText] = useState('');
+  const [wizardRows, setWizardRows] = useState<WizardProgramDraft[]>([]);
+  const [wizardFolders, setWizardFolders] = useState<ProgramFolderOption[]>([]);
+  const [wizardLoadingFolders, setWizardLoadingFolders] = useState(false);
+  const [wizardBuilding, setWizardBuilding] = useState(false);
+  const [wizardError, setWizardError] = useState('');
 
-  const completedStep = activeSchedule ? 4 : approvedSchedule ? 3 : preview ? 2 : selectedFile ? 1 : 0;
+  const hasScheduleSource = Boolean(selectedFile || previewSource);
+  const completedStep = activeSchedule ? 4 : approvedSchedule ? 3 : preview ? 2 : hasScheduleSource ? 1 : 0;
   const summary = preview?.summary;
-  const canApproveSchedule = Boolean(selectedFile && preview && preview.summary.errors === 0 && !approvedSchedule);
+  const canApproveSchedule = Boolean(hasScheduleSource && preview && preview.summary.errors === 0 && !approvedSchedule);
   const canActivateApprovedSchedule = Boolean(approvedSchedule && !approvedSchedule.isActive && !activeSchedule);
   const issueGroups = useMemo(() => groupIssues(preview?.issues ?? []), [preview]);
 
@@ -338,6 +404,7 @@ export default function SchedulerFoundationPage() {
   const chooseFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
     setSelectedFile(file);
+    setPreviewSource(null);
     setPreview(null);
     setDraftMessage('');
     setApprovedSchedule(null);
@@ -367,18 +434,142 @@ export default function SchedulerFoundationPage() {
     }
   };
 
-  const saveDraftRecord = async (): Promise<DraftListItem> => {
-    if (!selectedFile || !preview || preview.summary.errors > 0) {
-      throw new Error('Cannot save schedule before reading a valid file.');
+  const loadWizardFolders = async (force = false): Promise<ProgramFolderOption[]> => {
+    if (!force && wizardFolders.length > 0) return wizardFolders;
+    setWizardLoadingFolders(true);
+    setWizardError('');
+    try {
+      const response = await mediaApi.programFolders();
+      const body = response.data as { folders: ProgramFolderOption[] };
+      setWizardFolders(body.folders);
+      return body.folders;
+    } catch {
+      setWizardError('تعذر تحميل قائمة البرامج من مكتبة الوسائط.');
+      return [];
+    } finally {
+      setWizardLoadingFolders(false);
     }
-    const sha256 = await sha256File(selectedFile);
-    const name = `${stripScheduleExtension(selectedFile.name)} ${preview.settings.schedule_start_date} to ${preview.settings.schedule_end_date}`;
+  };
+
+  const openScheduleWizard = () => {
+    setWizardOpen(true);
+    setWizardError('');
+    setWizardStep(wizardRows.length > 0 ? 3 : 1);
+    void loadWizardFolders();
+  };
+
+  const parseWizardPrograms = async () => {
+    const folders = await loadWizardFolders();
+    const rows = createWizardRowsFromText(wizardProgramText, folders);
+    if (rows.length === 0) {
+      setWizardError('اكتب أسماء البرامج، كل برنامج في سطر مستقل.');
+      return;
+    }
+
+    setWizardRows(rows);
+    setWizardError('');
+    setWizardStep(3);
+  };
+
+  const addWizardRow = () => {
+    setWizardRows(rows => [...rows, createWizardRow({
+      name: `برنامج ${rows.length + 1}`,
+      startTime: '08:00',
+      durationMinutes: 30,
+    }, wizardFolders, rows.length)]);
+    setWizardStep(3);
+  };
+
+  const updateWizardRow = (localId: string, patch: Partial<WizardProgramDraft>) => {
+    setWizardRows(rows => rows.map(row => (row.localId === localId ? { ...row, ...patch } : row)));
+  };
+
+  const removeWizardRow = (localId: string) => {
+    setWizardRows(rows => rows.filter(row => row.localId !== localId));
+  };
+
+  const applyWizardFolder = (localId: string, folderId: string) => {
+    const folder = wizardFolders.find(item => item.id === folderId);
+    if (!folder) {
+      updateWizardRow(localId, {
+        folderId: '',
+        folderRoot: '',
+        folderHint: '',
+        fileCount: null,
+        longestDurationMs: null,
+        matchStatus: 'needs_review',
+        matchConfidence: 0,
+      });
+      return;
+    }
+
+    updateWizardRow(localId, {
+      folderId: folder.id,
+      folderRoot: folder.root_key,
+      folderHint: folder.original_relative_path,
+      fileCount: folder.active_file_count ?? folder.file_count ?? null,
+      longestDurationMs: folder.active_longest_file_duration_ms ?? folder.longest_file_duration_ms ?? null,
+      durationMinutes: roundDurationMsToMinutes(folder.active_longest_file_duration_ms ?? folder.longest_file_duration_ms) || 30,
+      matchStatus: 'manual',
+      matchConfidence: 100,
+    });
+  };
+
+  const toggleWizardDay = (localId: string, day: string) => {
+    setWizardRows(rows => rows.map(row => {
+      if (row.localId !== localId) return row;
+      const hasDay = row.days.includes(day);
+      const nextDays = hasDay ? row.days.filter(item => item !== day) : [...row.days, day];
+      return { ...row, days: nextDays.length > 0 ? nextDays : row.days };
+    }));
+  };
+
+  const buildWizardPreview = async () => {
+    const validationError = validateWizardRows(wizardStartDate, wizardEndDate, wizardRows);
+    if (validationError) {
+      setWizardError(validationError);
+      return;
+    }
+
+    setWizardBuilding(true);
+    setWizardError('');
+    try {
+      const payload = buildWizardSchedulePayload(wizardStartDate, wizardEndDate, wizardRows);
+      const response = await schedulerFoundationApi.scheduleInputPreview(payload);
+      const parsedPreview = response.data as ExcelPreview;
+      const payloadText = JSON.stringify(payload);
+      setSelectedFile(null);
+      if (fileRef.current) fileRef.current.value = '';
+      setPreviewSource({
+        filename: `wizard-schedule-${wizardStartDate}-to-${wizardEndDate}.json`,
+        sha256: await sha256Text(payloadText),
+      });
+      setPreview(parsedPreview);
+      setDraftMessage('');
+      setApprovedSchedule(null);
+      setWorkflowError('');
+      setWorkflowMessage('تم إنشاء معاينة الجدولة من الويزرد. راجعها ثم اضغط اعتماد الجدول.');
+      setActiveTab('preview');
+      setWizardStep(5);
+    } catch {
+      setWizardError('تعذر إنشاء معاينة الجدولة. راجع البرامج والمواعيد ثم حاول مرة أخرى.');
+    } finally {
+      setWizardBuilding(false);
+    }
+  };
+
+  const saveDraftRecord = async (): Promise<DraftListItem> => {
+    if (!preview || preview.summary.errors > 0 || (!selectedFile && !previewSource)) {
+      throw new Error('Cannot save schedule before reading a valid source.');
+    }
+
+    const sourceExcel = selectedFile
+      ? { filename: selectedFile.name, sha256: await sha256File(selectedFile) }
+      : previewSource!;
+    const name = `${stripScheduleExtension(sourceExcel.filename)} ${preview.settings.schedule_start_date} to ${preview.settings.schedule_end_date}`;
     const response = await schedulerFoundationApi.saveDraftSchedule({
       name,
-      sourceExcel: {
-        filename: selectedFile.name,
-        sha256,
-      },
+      sourceExcel,
       preview,
     });
     const body = response.data as { draft: DraftListItem };
@@ -386,7 +577,7 @@ export default function SchedulerFoundationPage() {
   };
 
   const saveDraft = async () => {
-    if (!selectedFile || !preview || preview.summary.errors > 0) return;
+    if (!preview || preview.summary.errors > 0 || (!selectedFile && !previewSource)) return;
     setSavingDraft(true);
     setError('');
     setDraftMessage('');
@@ -575,6 +766,37 @@ export default function SchedulerFoundationPage() {
 
   return (
     <div className="space-y-5">
+      {wizardOpen && (
+        <ScheduleWizardModal
+          step={wizardStep}
+          startDate={wizardStartDate}
+          endDate={wizardEndDate}
+          programText={wizardProgramText}
+          rows={wizardRows}
+          folders={wizardFolders}
+          loadingFolders={wizardLoadingFolders}
+          building={wizardBuilding}
+          error={wizardError}
+          preview={preview}
+          canApprove={canApproveSchedule}
+          approving={approvingSchedule}
+          onClose={() => setWizardOpen(false)}
+          onStep={setWizardStep}
+          onStartDate={setWizardStartDate}
+          onEndDate={setWizardEndDate}
+          onProgramText={setWizardProgramText}
+          onLoadFolders={() => void loadWizardFolders(true)}
+          onParsePrograms={() => void parseWizardPrograms()}
+          onBuildPreview={() => void buildWizardPreview()}
+          onApprove={() => void approveSchedule()}
+          onAddRow={addWizardRow}
+          onRemoveRow={removeWizardRow}
+          onUpdateRow={updateWizardRow}
+          onApplyFolder={applyWizardFolder}
+          onToggleDay={toggleWizardDay}
+        />
+      )}
+
       <section className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -587,6 +809,13 @@ export default function SchedulerFoundationPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button
+            className="btn-primary flex items-center gap-2 text-sm"
+            onClick={openScheduleWizard}
+          >
+            <Wand2 size={14} />
+            جدولة جديدة
+          </button>
           {preview && preview.summary.errors === 0 && !approvedSchedule && (
             <button
               className="btn-primary flex items-center gap-2 text-sm"
@@ -625,6 +854,10 @@ export default function SchedulerFoundationPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button className="btn-primary flex items-center gap-2 text-sm" onClick={openScheduleWizard}>
+              <Wand2 size={14} />
+              جدولة جديدة
+            </button>
             <button className="btn-ghost flex items-center gap-2 text-sm" onClick={() => fileRef.current?.click()}>
               <Upload size={14} />
               اختيار ملف
@@ -645,7 +878,7 @@ export default function SchedulerFoundationPage() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <WorkflowStep number={1} title="الملف" value={selectedFile?.name ?? 'اختر Excel أو JSON'} done={Boolean(selectedFile)} />
+          <WorkflowStep number={1} title="المصدر" value={selectedFile?.name ?? previewSource?.filename ?? 'اختر Excel/JSON أو أنشئ جدولة'} done={hasScheduleSource} />
           <WorkflowStep number={2} title="المراجعة" value={preview ? `${preview.summary.programCount} برنامج / ${preview.summary.slotCount} موعد` : 'لم تتم القراءة بعد'} done={Boolean(preview)} warning={Boolean(preview && preview.summary.errors > 0)} />
           <WorkflowStep number={3} title="الاعتماد" value={approvedSchedule ? approvedSchedule.name : 'بانتظار الاعتماد'} done={Boolean(approvedSchedule)} />
           <WorkflowStep number={4} title="التفعيل" value={activeSchedule?.name ?? 'لم يتم التفعيل'} done={Boolean(activeSchedule)} />
@@ -682,6 +915,10 @@ export default function SchedulerFoundationPage() {
           </div>
 
           <div className="flex flex-wrap gap-2">
+            <button className="btn-primary flex items-center gap-2 text-sm" onClick={openScheduleWizard}>
+              <Wand2 size={14} />
+              جدولة جديدة
+            </button>
             <a className="btn-primary flex items-center gap-2 text-sm" href={schedulerFoundationApi.excelTemplateUrl}>
               <Download size={14} />
               تحميل نموذج Excel
@@ -699,7 +936,7 @@ export default function SchedulerFoundationPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <FileSpreadsheet size={16} style={{ color: 'var(--accent)' }} />
-              <span className="text-sm">{selectedFile?.name ?? 'لم يتم اختيار ملف بعد'}</span>
+              <span className="text-sm">{selectedFile?.name ?? previewSource?.filename ?? 'لم يتم اختيار ملف أو إنشاء جدولة بعد'}</span>
             </div>
             <button className="btn-primary flex items-center gap-2 text-sm" disabled={!selectedFile || loading} onClick={() => void runPreview()}>
               <ListChecks size={14} />
@@ -714,7 +951,7 @@ export default function SchedulerFoundationPage() {
                 <CheckCircle2 size={14} />
                 {approvingSchedule ? 'جاري الاعتماد...' : 'اعتماد الجدول'}
               </button>
-              <button className="btn-ghost flex items-center gap-2 text-sm" disabled={!selectedFile || savingDraft} onClick={() => void saveDraft()}>
+              <button className="btn-ghost flex items-center gap-2 text-sm" disabled={!canApproveSchedule || savingDraft} onClick={() => void saveDraft()}>
                 <Save size={14} />
                 {savingDraft ? 'جاري الحفظ...' : 'حفظ فقط'}
               </button>
@@ -1117,6 +1354,333 @@ function WorkflowStep({
   );
 }
 
+function ScheduleWizardModal({
+  step,
+  startDate,
+  endDate,
+  programText,
+  rows,
+  folders,
+  loadingFolders,
+  building,
+  error,
+  preview,
+  canApprove,
+  approving,
+  onClose,
+  onStep,
+  onStartDate,
+  onEndDate,
+  onProgramText,
+  onLoadFolders,
+  onParsePrograms,
+  onBuildPreview,
+  onApprove,
+  onAddRow,
+  onRemoveRow,
+  onUpdateRow,
+  onApplyFolder,
+  onToggleDay,
+}: {
+  step: number;
+  startDate: string;
+  endDate: string;
+  programText: string;
+  rows: WizardProgramDraft[];
+  folders: ProgramFolderOption[];
+  loadingFolders: boolean;
+  building: boolean;
+  error: string;
+  preview: ExcelPreview | null;
+  canApprove: boolean;
+  approving: boolean;
+  onClose: () => void;
+  onStep: (step: number) => void;
+  onStartDate: (value: string) => void;
+  onEndDate: (value: string) => void;
+  onProgramText: (value: string) => void;
+  onLoadFolders: () => void;
+  onParsePrograms: () => void;
+  onBuildPreview: () => void;
+  onApprove: () => void;
+  onAddRow: () => void;
+  onRemoveRow: (localId: string) => void;
+  onUpdateRow: (localId: string, patch: Partial<WizardProgramDraft>) => void;
+  onApplyFolder: (localId: string, folderId: string) => void;
+  onToggleDay: (localId: string, day: string) => void;
+}) {
+  const fieldClass = 'w-full rounded-md border px-2 py-1.5 bg-transparent';
+  const fieldStyle = { borderColor: 'var(--bg-border)' };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
+      <div className="w-full max-w-7xl max-h-[92vh] overflow-hidden rounded-lg" style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
+        <div className="flex items-start justify-between gap-4 px-5 py-4" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Wand2 size={18} style={{ color: 'var(--accent)' }} />
+              <h3 className="font-semibold">معالج إنشاء الجدولة</h3>
+              <span className="badge badge-info">fit / playlist / file-count</span>
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              نفس فكرة النظام القديم: برامج، مواعيد بث، إعادات، أيام، ثم اعتماد وتشغيل.
+            </p>
+          </div>
+          <button className="btn-ghost px-2 py-2" onClick={onClose} title="إغلاق">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 pt-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+            {['الفترة', 'قائمة البرامج', 'المطابقة', 'المعاينة', 'الاعتماد'].map((label, index) => (
+              <WizardStepPill key={label} label={label} index={index + 1} active={step === index + 1} done={step > index + 1} onClick={() => onStep(index + 1)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="p-5 overflow-y-auto max-h-[72vh]">
+          {step === 1 && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="text-xs space-y-1">
+                  <span style={{ color: 'var(--text-muted)' }}>تاريخ بداية الجدولة</span>
+                  <input className={fieldClass} style={fieldStyle} type="date" value={startDate} onChange={event => onStartDate(event.target.value)} />
+                </label>
+                <label className="text-xs space-y-1">
+                  <span style={{ color: 'var(--text-muted)' }}>تاريخ نهاية الجدولة</span>
+                  <input className={fieldClass} style={fieldStyle} type="date" value={endDate} onChange={event => onEndDate(event.target.value)} />
+                </label>
+              </div>
+              <div className="rounded-md border p-3 text-sm" style={{ borderColor: 'var(--bg-border)', color: 'var(--text-muted)' }}>
+                اختر فترة الخريطة، ثم الصق أسماء البرامج في الخطوة التالية. يمكن كتابة السطر كاسم فقط، أو بصيغة: 12:00 - 12:30 اسم البرنامج.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-primary flex items-center gap-2 text-sm" onClick={() => onStep(2)}>
+                  <ListChecks size={14} />
+                  التالي
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="space-y-4">
+              <label className="text-xs space-y-1 block">
+                <span style={{ color: 'var(--text-muted)' }}>كل سطر برنامج. يمكن إضافة وقت البث قبل الاسم.</span>
+                <textarea
+                  className="w-full min-h-72 rounded-md border px-3 py-2 bg-transparent"
+                  style={fieldStyle}
+                  value={programText}
+                  onChange={event => onProgramText(event.target.value)}
+                  placeholder={'أيام الله\n12:30 - 13:00 معاني وأسرار الحج\n21:00 فقه الحج'}
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-ghost flex items-center gap-2 text-sm" disabled={loadingFolders} onClick={onLoadFolders}>
+                  <FolderSearch size={14} />
+                  {loadingFolders ? 'تحميل البرامج...' : `تحديث البرامج (${folders.length})`}
+                </button>
+                <button className="btn-primary flex items-center gap-2 text-sm" disabled={loadingFolders} onClick={onParsePrograms}>
+                  <CheckCircle2 size={14} />
+                  مطابقة الأسماء
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
+                  راجع البرنامج، المجلد، نوع التشغيل، مدة الفترة، وقت البث والإعادات.
+                </div>
+                <button className="btn-ghost flex items-center gap-2 text-sm" onClick={onAddRow}>
+                  <Wand2 size={14} />
+                  إضافة برنامج
+                </button>
+              </div>
+              <div className="overflow-x-auto rounded-md border" style={{ borderColor: 'var(--bg-border)' }}>
+                <table className="w-full text-sm min-w-[1280px]">
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
+                      {['البرنامج', 'المجلد', 'النوع', 'تشغيل', 'المدة', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count', ''].map(header => (
+                        <th key={header} className="text-right px-3 py-2 font-medium text-xs" style={{ color: 'var(--text-muted)' }}>{header}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(row => (
+                      <tr key={row.localId} style={{ borderBottom: '1px solid var(--bg-border)' }}>
+                        <td className="px-3 py-2 align-top min-w-56">
+                          <input className={fieldClass} style={fieldStyle} value={row.name} onChange={event => onUpdateRow(row.localId, { name: event.target.value })} />
+                          <div className="mt-1">
+                            <span className={`badge ${row.matchStatus === 'needs_review' ? 'badge-warning' : 'badge-ready'}`}>
+                              {row.matchStatus === 'needs_review' ? 'مراجعة' : `${row.matchConfidence}%`}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 align-top min-w-80">
+                          <select className={fieldClass} style={fieldStyle} value={row.folderId} onChange={event => onApplyFolder(row.localId, event.target.value)}>
+                            <option value="">اختر مجلد البرنامج</option>
+                            {folders.map(folder => (
+                              <option key={folder.id} value={folder.id}>
+                                {folder.root_key} / {folder.display_name_ar || folder.original_relative_path}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="text-xs mt-1 ltr-text truncate" style={{ color: 'var(--text-muted)' }}>
+                            {row.folderRoot ? `${row.folderRoot}/${row.folderHint}` : 'لم يتم تحديد المجلد'}
+                          </div>
+                          <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                            أطول حلقة: {formatDurationMs(row.longestDurationMs)} · الملفات: {row.fileCount ?? '-'}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <select className={fieldClass} style={fieldStyle} value={row.slotMode} onChange={event => onUpdateRow(row.localId, { slotMode: event.target.value as WizardSlotMode })}>
+                            {(Object.keys(slotModeLabels) as WizardSlotMode[]).map(mode => <option key={mode} value={mode}>{slotModeLabels[mode]}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <select className={fieldClass} style={fieldStyle} value={row.playMode} onChange={event => onUpdateRow(row.localId, { playMode: event.target.value as WizardPlayMode })}>
+                            <option value="sequential">sequential</option>
+                            <option value="shuffle">shuffle</option>
+                            <option value="newest">newest</option>
+                            <option value="round_robin">round_robin</option>
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 align-top w-28">
+                          <input className={fieldClass} style={fieldStyle} type="number" min={1} value={row.durationMinutes} onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })} />
+                        </td>
+                        <td className="px-3 py-2 align-top w-28">
+                          <input className={fieldClass} style={fieldStyle} type="time" value={row.startTime} onChange={event => onUpdateRow(row.localId, { startTime: event.target.value })} />
+                        </td>
+                        <td className="px-3 py-2 align-top w-28">
+                          <input className={fieldClass} style={fieldStyle} type="time" value={row.repeatTime} onChange={event => onUpdateRow(row.localId, { repeatTime: event.target.value })} />
+                        </td>
+                        <td className="px-3 py-2 align-top w-28">
+                          <input className={fieldClass} style={fieldStyle} type="time" value={row.secondRepeatTime} onChange={event => onUpdateRow(row.localId, { secondRepeatTime: event.target.value })} />
+                        </td>
+                        <td className="px-3 py-2 align-top min-w-72">
+                          <div className="flex flex-wrap gap-1">
+                            {dayKeys.map(day => (
+                              <button
+                                key={day}
+                                type="button"
+                                className="rounded border px-2 py-1 text-[11px]"
+                                style={{
+                                  borderColor: row.days.includes(day) ? 'var(--accent)' : 'var(--bg-border)',
+                                  color: row.days.includes(day) ? 'var(--accent)' : 'var(--text-muted)',
+                                  background: row.days.includes(day) ? 'rgba(232,160,32,0.10)' : 'transparent',
+                                }}
+                                onClick={() => onToggleDay(row.localId, day)}
+                              >
+                                {dayLabels[day]}
+                              </button>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 align-top w-28">
+                          <input className={fieldClass} style={fieldStyle} type="number" min={1} disabled={row.slotMode !== 'file-count'} value={row.fileCountLimit} onChange={event => onUpdateRow(row.localId, { fileCountLimit: Number(event.target.value) })} />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <button className="btn-ghost px-2 py-1.5" onClick={() => onRemoveRow(row.localId)} title="حذف السطر">
+                            <XCircle size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-ghost text-sm" onClick={() => onStep(2)}>رجوع للقائمة</button>
+                <button className="btn-primary flex items-center gap-2 text-sm" onClick={() => onStep(4)}>
+                  <Eye size={14} />
+                  معاينة قبل الإنشاء
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 4 && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <SummaryCard label="البرامج" value={rows.length} />
+                <SummaryCard label="مجلدات محددة" value={rows.filter(row => row.folderId).length} tone="ready" />
+                <SummaryCard label="تحتاج مراجعة" value={rows.filter(row => !row.folderId).length} tone="warning" />
+                <SummaryCard label="المواعيد" value={rows.reduce((sum, row) => sum + wizardSlotTimes(row).length, 0)} />
+              </div>
+              <DataTable
+                empty="لا توجد برامج في الويزرد"
+                headers={['البرنامج', 'النوع', 'المدة', 'المواعيد', 'المجلد', 'أطول حلقة', 'الملفات']}
+                rows={rows.map(row => [
+                  row.name,
+                  row.slotMode,
+                  `${row.durationMinutes} دقيقة`,
+                  wizardSlotTimes(row).join('، '),
+                  row.folderRoot ? `${row.folderRoot}/${row.folderHint}` : 'غير محدد',
+                  formatDurationMs(row.longestDurationMs),
+                  row.fileCount ?? '-',
+                ])}
+              />
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-ghost text-sm" onClick={() => onStep(3)}>رجوع للتعديل</button>
+                <button className="btn-primary flex items-center gap-2 text-sm" disabled={building} onClick={onBuildPreview}>
+                  <ListChecks size={14} />
+                  {building ? 'جاري إنشاء المعاينة...' : 'إنشاء معاينة الجدولة'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 5 && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <SummaryCard label="البرامج" value={preview?.summary.programCount ?? 0} />
+                <SummaryCard label="المواعيد" value={preview?.summary.slotCount ?? 0} />
+                <SummaryCard label="التحذيرات" value={preview?.summary.warnings ?? 0} tone="warning" />
+                <SummaryCard label="الأخطاء" value={preview?.summary.errors ?? 0} tone="error" />
+              </div>
+              <div className="rounded-md border p-3 text-sm" style={{ borderColor: 'var(--bg-border)', color: 'var(--text-muted)' }}>
+                تم تجهيز المعاينة داخل الصفحة. عند عدم وجود أخطاء يمكنك اعتماد الجدول، ثم تفعيله للبث من نفس الصفحة.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-ghost text-sm" onClick={() => onStep(3)}>رجوع للتعديل</button>
+                <button className="btn-primary flex items-center gap-2 text-sm" disabled={!canApprove || approving} onClick={onApprove}>
+                  <ShieldCheck size={14} />
+                  {approving ? 'جاري الاعتماد...' : 'اعتماد الجدول'}
+                </button>
+                <button className="btn-ghost text-sm" onClick={onClose}>إغلاق الويزرد</button>
+              </div>
+            </div>
+          )}
+
+          {error && <p className="text-xs mt-4" style={{ color: 'var(--danger)' }}>{error}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WizardStepPill({ label, index, active, done, onClick }: { label: string; index: number; active: boolean; done: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="rounded-md border px-3 py-2 text-xs flex items-center gap-2"
+      style={{
+        borderColor: active || done ? 'var(--accent)' : 'var(--bg-border)',
+        color: active || done ? 'var(--text-primary)' : 'var(--text-muted)',
+        background: active ? 'rgba(232,160,32,0.10)' : 'transparent',
+      }}
+      onClick={onClick}
+    >
+      {done ? <CheckCircle2 size={13} style={{ color: 'var(--success)' }} /> : <span>{index}</span>}
+      {label}
+    </button>
+  );
+}
+
 function ProgramsTable({ rows }: { rows: ProgramRow[] }) {
   return (
     <DataTable
@@ -1327,8 +1891,299 @@ function groupIssues(issues: ExcelIssue[]): Record<string, number> {
   }, {});
 }
 
+function createWizardRowsFromText(text: string, folders: ProgramFolderOption[]): WizardProgramDraft[] {
+  const rows: WizardProgramDraft[] = [];
+  const byName = new Map<string, WizardProgramDraft>();
+
+  text
+    .split(/\r?\n/)
+    .map(line => parseWizardProgramLine(line))
+    .filter((entry): entry is ParsedWizardProgramLine => Boolean(entry))
+    .forEach(entry => {
+      const key = normalizeLookupText(entry.name);
+      const existing = byName.get(key);
+      if (existing && entry.startTime) {
+        if (existing.startTime !== entry.startTime && !existing.repeatTime) {
+          existing.repeatTime = entry.startTime;
+        } else if (existing.startTime !== entry.startTime && existing.repeatTime !== entry.startTime && !existing.secondRepeatTime) {
+          existing.secondRepeatTime = entry.startTime;
+        }
+        if (entry.durationMinutes && existing.durationMinutes === 30) {
+          existing.durationMinutes = entry.durationMinutes;
+        }
+        return;
+      }
+
+      const row = createWizardRow(entry, folders, rows.length);
+      rows.push(row);
+      byName.set(key, row);
+    });
+
+  return rows;
+}
+
+interface ParsedWizardProgramLine {
+  name: string;
+  startTime?: string;
+  durationMinutes?: number | null;
+}
+
+function parseWizardProgramLine(line: string): ParsedWizardProgramLine | null {
+  const cleaned = line.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return null;
+
+  const rangeMatch = cleaned.match(/^(\d{1,2}:\d{2})\s*(?:-|–|—|to|الى|إلى)\s*(\d{1,2}:\d{2})\s+(.+)$/i);
+  if (rangeMatch) {
+    const startTime = normalizeTimeText(rangeMatch[1]);
+    const endTime = normalizeTimeText(rangeMatch[2]);
+    return {
+      name: rangeMatch[3].trim(),
+      startTime,
+      durationMinutes: startTime && endTime ? durationBetweenTimes(startTime, endTime) : null,
+    };
+  }
+
+  const startMatch = cleaned.match(/^(\d{1,2}:\d{2})\s+(.+)$/);
+  if (startMatch) {
+    return {
+      name: startMatch[2].trim(),
+      startTime: normalizeTimeText(startMatch[1]),
+      durationMinutes: null,
+    };
+  }
+
+  return { name: cleaned, durationMinutes: null };
+}
+
+function createWizardRow(entry: ParsedWizardProgramLine, folders: ProgramFolderOption[], index: number): WizardProgramDraft {
+  const best = findBestFolderMatch(entry.name, folders);
+  const matchedFolder = best && best.score >= 60 ? best.folder : null;
+  const longestDurationMs = matchedFolder?.active_longest_file_duration_ms ?? matchedFolder?.longest_file_duration_ms ?? null;
+  const fileCount = matchedFolder?.active_file_count ?? matchedFolder?.file_count ?? null;
+  const durationMinutes = entry.durationMinutes || roundDurationMsToMinutes(longestDurationMs) || 30;
+
+  return {
+    localId: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
+    name: entry.name,
+    folderId: matchedFolder?.id ?? '',
+    folderRoot: matchedFolder?.root_key ?? '',
+    folderHint: matchedFolder?.original_relative_path ?? '',
+    matchStatus: matchedFolder ? (best!.score >= 80 ? 'matched' : 'needs_review') : 'needs_review',
+    matchConfidence: matchedFolder ? best!.score : 0,
+    fileCount,
+    longestDurationMs,
+    slotMode: 'fit',
+    playMode: 'sequential',
+    days: [...dayKeys],
+    startTime: entry.startTime || minutesToTime((8 * 60 + index * 30) % (24 * 60)),
+    repeatTime: '',
+    secondRepeatTime: '',
+    durationMinutes,
+    fileCountLimit: 1,
+    notes: '',
+  };
+}
+
+function findBestFolderMatch(name: string, folders: ProgramFolderOption[]): { folder: ProgramFolderOption; score: number } | null {
+  let best: { folder: ProgramFolderOption; score: number } | null = null;
+  for (const folder of folders) {
+    const score = scoreFolderMatch(name, folder);
+    if (!best || score > best.score) {
+      best = { folder, score };
+    }
+  }
+  return best;
+}
+
+function scoreFolderMatch(name: string, folder: ProgramFolderOption): number {
+  const query = normalizeLookupText(name);
+  const display = normalizeLookupText(folder.display_name_ar);
+  const relativePath = normalizeLookupText(folder.original_relative_path);
+  const baseName = normalizeLookupText(folder.original_relative_path.split(/[\\/]/).filter(Boolean).pop() ?? folder.display_name_ar);
+  const slug = normalizeLookupText(folder.safe_slug);
+  const candidates = [display, baseName, relativePath, slug].filter(Boolean);
+  let score = 0;
+
+  for (const candidate of candidates) {
+    if (candidate === query) score = Math.max(score, 100);
+    else if (candidate.includes(query) || query.includes(candidate)) score = Math.max(score, 86);
+    else score = Math.max(score, tokenOverlapScore(query, candidate));
+  }
+
+  if (folder.root_key === 'normalized-ar') score += 12;
+  else if (folder.root_key.includes('normalized')) score += 8;
+  if ((folder.active_file_count ?? folder.file_count ?? 0) <= 0) score -= 25;
+  if (folder.status && !['ready', 'indexed'].includes(folder.status)) score -= 5;
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function tokenOverlapScore(left: string, right: string): number {
+  const leftTokens = new Set(left.split(' ').filter(Boolean));
+  const rightTokens = new Set(right.split(' ').filter(Boolean));
+  if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
+  let overlap = 0;
+  leftTokens.forEach(token => {
+    if (rightTokens.has(token)) overlap += 1;
+  });
+  return Math.round((overlap / Math.max(leftTokens.size, rightTokens.size)) * 72);
+}
+
+function normalizeLookupText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[إأآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function validateWizardRows(startDate: string, endDate: string, rows: WizardProgramDraft[]): string {
+  if (!startDate || !endDate) return 'حدد تاريخ بداية ونهاية الجدولة.';
+  if (endDate < startDate) return 'تاريخ نهاية الجدولة يجب أن يكون بعد تاريخ البداية.';
+  if (rows.length === 0) return 'أضف برنامجًا واحدًا على الأقل.';
+
+  const invalidRow = rows.find(row =>
+    !row.name.trim() ||
+    !row.folderId ||
+    !row.folderRoot ||
+    !row.folderHint ||
+    !row.startTime ||
+    row.durationMinutes <= 0 ||
+    row.days.length === 0 ||
+    (row.slotMode === 'file-count' && row.fileCountLimit <= 0)
+  );
+
+  if (invalidRow) {
+    return `راجع بيانات البرنامج: ${invalidRow.name || 'بدون اسم'}.`;
+  }
+
+  return '';
+}
+
+function buildWizardSchedulePayload(startDate: string, endDate: string, rows: WizardProgramDraft[]) {
+  const keyedRows = rows.map((row, index) => ({
+    row,
+    key: safeProgramKey(row.name, index),
+  }));
+
+  return {
+    settings: [{
+      timezone: 'Europe/Istanbul',
+      schedule_start_date: startDate,
+      schedule_end_date: endDate,
+      default_duration_policy: 'fit',
+      default_repeat_policy: 'same_day_same_episode',
+      default_gap_policy: 'professional_gap_filler',
+    }],
+    programs: keyedRows.map(({ row, key }) => ({
+      program_key: key,
+      program_name: row.name.trim(),
+      folder_root: row.folderRoot,
+      folder_hint: row.folderHint,
+      play_mode: row.playMode,
+      slot_mode: wizardSlotModeForPayload(row.slotMode),
+      file_count: row.slotMode === 'file-count' ? row.fileCountLimit : '',
+      repeat_policy: 'same_day_same_episode',
+      enabled: 'true',
+      notes: row.notes || `wizard:${row.matchStatus}`,
+    })),
+    slots: keyedRows.flatMap(({ row, key }, rowIndex) => wizardSlotTimes(row).map((time, timeIndex) => ({
+      program_key: key,
+      days: row.days.join(';'),
+      start_time: time,
+      duration_minutes: row.durationMinutes,
+      effective_from: startDate,
+      effective_to: endDate,
+      priority: rowIndex * 10 + timeIndex + 1,
+      notes: timeIndex === 0 ? 'main airing' : `repeat ${timeIndex}`,
+    }))),
+  };
+}
+
+function wizardSlotModeForPayload(mode: WizardSlotMode): 'fit' | 'playlist' | 'file_count' {
+  return mode === 'file-count' ? 'file_count' : mode;
+}
+
+function wizardSlotTimes(row: WizardProgramDraft): string[] {
+  return [row.startTime, row.repeatTime, row.secondRepeatTime]
+    .map(value => value.trim())
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index);
+}
+
+function safeProgramKey(name: string, index: number): string {
+  const normalized = normalizeLookupText(name).replace(/\s+/g, '-').slice(0, 80);
+  return `${normalized || 'program'}-${index + 1}`;
+}
+
+function normalizeTimeText(value: string | undefined): string {
+  if (!value) return '';
+  const [hourRaw, minuteRaw] = value.split(':');
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return '';
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function durationBetweenTimes(startTime: string, endTime: string): number {
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+  if (start === null || end === null) return 30;
+  let adjustedEnd = end;
+  if (adjustedEnd <= start && start < 18 * 60 && adjustedEnd < 6 * 60) adjustedEnd += 12 * 60;
+  if (adjustedEnd <= start) adjustedEnd += 24 * 60;
+  return Math.max(1, adjustedEnd - start);
+}
+
+function timeToMinutes(value: string): number | null {
+  const [hourRaw, minuteRaw] = value.split(':');
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+
+function minutesToTime(minutes: number): string {
+  const normalized = ((minutes % (24 * 60)) + 24 * 60) % (24 * 60);
+  const hour = Math.floor(normalized / 60);
+  const minute = normalized % 60;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function roundDurationMsToMinutes(value: number | null | undefined): number | null {
+  if (!value || value <= 0) return null;
+  return Math.max(1, Math.ceil(value / 60000));
+}
+
+function formatDurationMs(value: number | null | undefined): string {
+  if (!value || value <= 0) return '-';
+  const totalSeconds = Math.round(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function todayDateInputValue(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 async function sha256File(file: File): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function sha256Text(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest))
     .map(byte => byte.toString(16).padStart(2, '0'))
     .join('');
