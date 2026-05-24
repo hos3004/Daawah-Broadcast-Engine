@@ -272,13 +272,10 @@ const tabs: Array<{ key: TabKey; label: string; icon: LucideIcon }> = [
 ];
 
 const steps = [
-  'رفع ملف Excel',
-  'قراءة البيانات',
-  'فحص البرامج',
-  'فحص المواعيد',
-  'مطابقة المجلدات',
-  'معاينة أولية',
-  'حفظ كمسودة فقط',
+  'رفع الملف',
+  'قراءة الخريطة',
+  'اعتماد الجدول',
+  'تفعيل للبث',
 ];
 
 const dayLabels: Record<string, string> = {
@@ -319,10 +316,17 @@ export default function SchedulerFoundationPage() {
   const [testPlayoutError, setTestPlayoutError] = useState('');
   const [expandedTestPlayoutPlanId, setExpandedTestPlayoutPlanId] = useState<string | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
+  const [approvedSchedule, setApprovedSchedule] = useState<PublishedListItem | null>(null);
+  const [approvingSchedule, setApprovingSchedule] = useState(false);
+  const [activatingSchedule, setActivatingSchedule] = useState(false);
+  const [workflowMessage, setWorkflowMessage] = useState('');
+  const [workflowError, setWorkflowError] = useState('');
   const [error, setError] = useState('');
 
-  const completedStep = draftMessage ? 7 : preview ? 6 : selectedFile ? 1 : 0;
+  const completedStep = activeSchedule ? 4 : approvedSchedule ? 3 : preview ? 2 : selectedFile ? 1 : 0;
   const summary = preview?.summary;
+  const canApproveSchedule = Boolean(selectedFile && preview && preview.summary.errors === 0 && !approvedSchedule);
+  const canActivateApprovedSchedule = Boolean(approvedSchedule && !approvedSchedule.isActive && !activeSchedule);
   const issueGroups = useMemo(() => groupIssues(preview?.issues ?? []), [preview]);
 
   useEffect(() => {
@@ -336,6 +340,9 @@ export default function SchedulerFoundationPage() {
     setSelectedFile(file);
     setPreview(null);
     setDraftMessage('');
+    setApprovedSchedule(null);
+    setWorkflowMessage('');
+    setWorkflowError('');
     setError('');
   };
 
@@ -343,16 +350,39 @@ export default function SchedulerFoundationPage() {
     if (!selectedFile) return;
     setLoading(true);
     setError('');
+    setWorkflowError('');
     try {
-      const response = await schedulerFoundationApi.excelImportPreview(selectedFile);
-      setPreview(response.data as ExcelPreview);
+      const parsedPreview = isJsonScheduleFile(selectedFile)
+        ? readJsonSchedulePreview(await selectedFile.text())
+        : (await schedulerFoundationApi.excelImportPreview(selectedFile)).data as ExcelPreview;
+      setPreview(parsedPreview);
       setDraftMessage('');
+      setApprovedSchedule(null);
+      setWorkflowMessage('تمت قراءة الخريطة. راجع جدول البرامج ثم اضغط اعتماد الجدول.');
       setActiveTab('programs');
     } catch {
-      setError('تعذر قراءة ملف Excel. تأكد من أن الملف بصيغة .xlsx ويحتوي على Sheets المطلوبة.');
+      setError('تعذر قراءة الملف. استخدم ملف Excel بصيغة .xlsx أو ملف JSON صادر من النظام.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const saveDraftRecord = async (): Promise<DraftListItem> => {
+    if (!selectedFile || !preview || preview.summary.errors > 0) {
+      throw new Error('Cannot save schedule before reading a valid file.');
+    }
+    const sha256 = await sha256File(selectedFile);
+    const name = `${stripScheduleExtension(selectedFile.name)} ${preview.settings.schedule_start_date} to ${preview.settings.schedule_end_date}`;
+    const response = await schedulerFoundationApi.saveDraftSchedule({
+      name,
+      sourceExcel: {
+        filename: selectedFile.name,
+        sha256,
+      },
+      preview,
+    });
+    const body = response.data as { draft: DraftListItem };
+    return body.draft;
   };
 
   const saveDraft = async () => {
@@ -361,23 +391,69 @@ export default function SchedulerFoundationPage() {
     setError('');
     setDraftMessage('');
     try {
-      const sha256 = await sha256File(selectedFile);
-      const name = `${stripExcelExtension(selectedFile.name)} ${preview.settings.schedule_start_date} to ${preview.settings.schedule_end_date}`;
-      const response = await schedulerFoundationApi.saveDraftSchedule({
-        name,
-        sourceExcel: {
-          filename: selectedFile.name,
-          sha256,
-        },
-        preview,
-      });
-      const body = response.data as { draft: DraftListItem };
-      setDraftMessage(`Draft saved: ${body.draft.name}`);
+      const draft = await saveDraftRecord();
+      setDraftMessage(`تم حفظ الجدول: ${draft.name}`);
       await loadDrafts();
     } catch {
-      setError('Could not save the draft. Make sure the preview has zero errors and try again.');
+      setError('تعذر حفظ الجدول. تأكد أن الملف بلا أخطاء ثم حاول مرة أخرى.');
     } finally {
       setSavingDraft(false);
+    }
+  };
+
+  const approveSchedule = async () => {
+    if (!canApproveSchedule || approvingSchedule) return;
+    const confirmed = window.confirm('اعتماد هذا الجدول؟ بعد الاعتماد يمكن تفعيله للبث من نفس الصفحة.');
+    if (!confirmed) return;
+
+    setApprovingSchedule(true);
+    setWorkflowError('');
+    setWorkflowMessage('');
+    try {
+      const draft = await saveDraftRecord();
+      const response = await schedulerFoundationApi.publishDraftSchedule(draft.id);
+      const body = response.data as { publishedSchedule: PublishedListItem };
+      setApprovedSchedule(body.publishedSchedule);
+      setWorkflowMessage(`تم اعتماد الجدول: ${body.publishedSchedule.name}`);
+      await Promise.all([loadDrafts(), loadPublishedSchedules()]);
+    } catch {
+      setWorkflowError('تعذر اعتماد الجدول. تأكد أن الخريطة بلا أخطاء وأنها لم تعتمد من قبل.');
+    } finally {
+      setApprovingSchedule(false);
+    }
+  };
+
+  const activateApprovedSchedule = async () => {
+    if (!approvedSchedule || activatingSchedule) return;
+    const confirmed = window.confirm(`تفعيل "${approvedSchedule.name}" للبث؟`);
+    if (!confirmed) return;
+
+    setActivatingSchedule(true);
+    setWorkflowError('');
+    setWorkflowMessage('');
+    try {
+      const response = await schedulerFoundationApi.activatePublishedSchedule(approvedSchedule.id, {
+        scheduleId: approvedSchedule.id,
+        confirmActivation: true,
+        confirmationText: `ACTIVATE SCHEDULE ${approvedSchedule.id}`,
+      });
+      const body = response.data as { activeSchedule: PublishedListItem };
+      setApprovedSchedule({ ...approvedSchedule, isActive: true });
+      setActiveSchedule({
+        id: body.activeSchedule.id,
+        name: body.activeSchedule.name,
+        isActive: true,
+        scheduleStartDate: body.activeSchedule.scheduleStartDate,
+        scheduleEndDate: body.activeSchedule.scheduleEndDate,
+        timezone: body.activeSchedule.timezone,
+        slotCount: body.activeSchedule.slotCount,
+      });
+      setWorkflowMessage('تم تفعيل الجدول للبث. الخطوة التالية هي تجهيز ملفات التشغيل أو تشغيل تجربة البث.');
+      await Promise.all([loadActiveSchedule(), loadPublishedSchedules()]);
+    } catch {
+      setWorkflowError('تعذر تفعيل الجدول. تأكد أنه معتمد وصالح ولم يكن مفعلاً من قبل.');
+    } finally {
+      setActivatingSchedule(false);
     }
   };
 
@@ -389,7 +465,7 @@ export default function SchedulerFoundationPage() {
       const body = response.data as { drafts: DraftListItem[] };
       setDrafts(body.drafts);
     } catch {
-      setError('Could not load draft schedules.');
+      setError('تعذر تحميل الجداول المحفوظة.');
     } finally {
       setDraftsLoading(false);
     }
@@ -403,7 +479,7 @@ export default function SchedulerFoundationPage() {
       const body = response.data as { publishedSchedules: PublishedListItem[] };
       setPublishedSchedules(body.publishedSchedules);
     } catch {
-      setError('Could not load published schedules.');
+      setError('تعذر تحميل الجداول المعتمدة.');
     } finally {
       setPublishedLoading(false);
     }
@@ -428,7 +504,7 @@ export default function SchedulerFoundationPage() {
       const body = response.data as { runs: MaterializationRun[] };
       setMaterializationRuns(body.runs);
     } catch {
-      setMaterializationError('Could not load materialization dry-run history.');
+      setMaterializationError('تعذر تحميل ملفات التشغيل المجهزة.');
     } finally {
       setMaterializationLoading(false);
     }
@@ -437,7 +513,7 @@ export default function SchedulerFoundationPage() {
   const runMaterializationDryRun = async () => {
     if (!activeSchedule || materializing) return;
     const confirmed = window.confirm(
-      `Create a playlist materialization dry-run for "${activeSchedule.name}"?\n\nThis writes test artifacts under generated/playlists only. It does not modify media, update cursors, start playout, or broadcast.`
+      `تجهيز ملفات التشغيل للجدول "${activeSchedule.name}"؟\n\nسيتم إنشاء ملفات playlist داخل generated/playlists فقط.`
     );
     if (!confirmed) return;
 
@@ -450,11 +526,11 @@ export default function SchedulerFoundationPage() {
         publishedScheduleId: activeSchedule.id,
       });
       const body = response.data as { run: MaterializationRun };
-      setMaterializationMessage(`Dry-run created: ${body.run.id}`);
+      setMaterializationMessage(`تم تجهيز ملفات التشغيل: ${body.run.id}`);
       setExpandedRunId(body.run.id);
       await loadMaterializationRuns();
     } catch {
-      setMaterializationError('Could not create playlist materialization dry-run.');
+      setMaterializationError('تعذر تجهيز ملفات التشغيل.');
     } finally {
       setMaterializing(false);
     }
@@ -487,11 +563,11 @@ export default function SchedulerFoundationPage() {
         durationLimitSeconds: testPlayoutDuration,
       });
       const body = response.data as { plan: TestPlayoutPlan };
-      setTestPlayoutMessage(`Plan prepared: ${body.plan.id}`);
+      setTestPlayoutMessage(`تم تجهيز تجربة البث: ${body.plan.id}`);
       setExpandedTestPlayoutPlanId(body.plan.id);
       await loadTestPlayoutPlans();
     } catch {
-      setTestPlayoutError('Could not prepare the test playout plan. Check that the playlist path is under generated/playlists and the output target is test-only.');
+      setTestPlayoutError('تعذر تجهيز تجربة البث. تأكد أن مسار playlist داخل generated/playlists.');
     } finally {
       setTestPlayoutPreparing(false);
     }
@@ -504,21 +580,21 @@ export default function SchedulerFoundationPage() {
           <div className="flex flex-wrap items-center gap-2">
             <ShieldCheck size={20} style={{ color: 'var(--accent)' }} />
             <h2 className="text-xl font-bold">لوحة تجهيز وجدولة البث</h2>
-            <span className="badge badge-warning">معاينة فقط - لم يتم تفعيل الجدول</span>
+            <span className="badge badge-info">ارفع الخريطة ثم اعتمدها</span>
           </div>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-            تحميل نموذج Excel، رفع الجدول، فحص البرامج والمواعيد، ومراجعة المطابقة قبل أي تفعيل.
+            مسار مبسط: قراءة ملف Excel أو JSON، مراجعة جدول البرامج، اعتماد الجدول، ثم تفعيله للبث.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {preview && preview.summary.errors === 0 && (
+          {preview && preview.summary.errors === 0 && !approvedSchedule && (
             <button
               className="btn-primary flex items-center gap-2 text-sm"
-              disabled={!selectedFile || savingDraft}
-              onClick={() => void saveDraft()}
+              disabled={!canApproveSchedule || approvingSchedule}
+              onClick={() => void approveSchedule()}
             >
               <Save size={14} />
-              {savingDraft ? 'Saving Draft...' : 'Save Draft'}
+              {approvingSchedule ? 'جاري الاعتماد...' : 'اعتماد الجدول'}
             </button>
           )}
           <button
@@ -527,7 +603,7 @@ export default function SchedulerFoundationPage() {
             onClick={() => void loadDrafts()}
           >
             <ListChecks size={14} />
-            {draftsLoading ? 'Loading Drafts...' : 'View Drafts'}
+            {draftsLoading ? 'جاري التحميل...' : 'الجداول المحفوظة'}
           </button>
           <button
             className="btn-ghost flex items-center gap-2 text-sm"
@@ -535,9 +611,51 @@ export default function SchedulerFoundationPage() {
             onClick={() => void loadPublishedSchedules()}
           >
             <CheckCircle2 size={14} />
-            {publishedLoading ? 'Loading Published...' : 'View Published'}
+            {publishedLoading ? 'جاري التحميل...' : 'الجداول المعتمدة'}
           </button>
         </div>
+      </section>
+
+      <section className="card space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h3 className="font-semibold">المسار السريع</h3>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              استخدم هذه الخطوات فقط في التشغيل العادي. الجداول التفصيلية بالأسفل للمراجعة عند الحاجة.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button className="btn-ghost flex items-center gap-2 text-sm" onClick={() => fileRef.current?.click()}>
+              <Upload size={14} />
+              اختيار ملف
+            </button>
+            <button className="btn-primary flex items-center gap-2 text-sm" disabled={!selectedFile || loading} onClick={() => void runPreview()}>
+              <ListChecks size={14} />
+              {loading ? 'جاري القراءة...' : 'قراءة الخريطة'}
+            </button>
+            <button className="btn-primary flex items-center gap-2 text-sm" disabled={!canApproveSchedule || approvingSchedule} onClick={() => void approveSchedule()}>
+              <CheckCircle2 size={14} />
+              {approvingSchedule ? 'جاري الاعتماد...' : 'اعتماد الجدول'}
+            </button>
+            <button className="btn-primary flex items-center gap-2 text-sm" disabled={!canActivateApprovedSchedule || activatingSchedule} onClick={() => void activateApprovedSchedule()}>
+              <ShieldCheck size={14} />
+              {activatingSchedule ? 'جاري التفعيل...' : 'تفعيل للبث'}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <WorkflowStep number={1} title="الملف" value={selectedFile?.name ?? 'اختر Excel أو JSON'} done={Boolean(selectedFile)} />
+          <WorkflowStep number={2} title="المراجعة" value={preview ? `${preview.summary.programCount} برنامج / ${preview.summary.slotCount} موعد` : 'لم تتم القراءة بعد'} done={Boolean(preview)} warning={Boolean(preview && preview.summary.errors > 0)} />
+          <WorkflowStep number={3} title="الاعتماد" value={approvedSchedule ? approvedSchedule.name : 'بانتظار الاعتماد'} done={Boolean(approvedSchedule)} />
+          <WorkflowStep number={4} title="التفعيل" value={activeSchedule?.name ?? 'لم يتم التفعيل'} done={Boolean(activeSchedule)} />
+        </div>
+
+        {(workflowMessage || workflowError) && (
+          <p className="text-xs" style={{ color: workflowError ? 'var(--danger)' : 'var(--success)' }}>
+            {workflowError || workflowMessage}
+          </p>
+        )}
       </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -575,7 +693,7 @@ export default function SchedulerFoundationPage() {
           </div>
         </div>
 
-        <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={chooseFile} />
+        <input ref={fileRef} type="file" accept=".xlsx,.json,application/json" className="hidden" onChange={chooseFile} />
 
         <div className="mt-4 rounded-md border p-3" style={{ borderColor: 'var(--bg-border)' }}>
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -590,6 +708,18 @@ export default function SchedulerFoundationPage() {
           </div>
           {error && <p className="text-xs mt-2" style={{ color: 'var(--danger)' }}>{error}</p>}
           {draftMessage && <p className="text-xs mt-2" style={{ color: 'var(--success)' }}>{draftMessage}</p>}
+          {preview && preview.summary.errors === 0 && !approvedSchedule && (
+            <div className="flex flex-wrap items-center gap-2 mt-3">
+              <button className="btn-primary flex items-center gap-2 text-sm" disabled={!canApproveSchedule || approvingSchedule} onClick={() => void approveSchedule()}>
+                <CheckCircle2 size={14} />
+                {approvingSchedule ? 'جاري الاعتماد...' : 'اعتماد الجدول'}
+              </button>
+              <button className="btn-ghost flex items-center gap-2 text-sm" disabled={!selectedFile || savingDraft} onClick={() => void saveDraft()}>
+                <Save size={14} />
+                {savingDraft ? 'جاري الحفظ...' : 'حفظ فقط'}
+              </button>
+            </div>
+          )}
         </div>
       </section>
 
@@ -598,13 +728,13 @@ export default function SchedulerFoundationPage() {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <ShieldCheck size={18} style={{ color: 'var(--accent)' }} />
-              <h3 className="font-semibold">Playlist Materialization Dry-Run</h3>
-              <span className="badge badge-info">dry-run only</span>
-              <span className="badge badge-info">no broadcast</span>
-              <span className="badge badge-info">no media modification</span>
+              <h3 className="font-semibold">تجهيز ملفات التشغيل</h3>
+              <span className="badge badge-info">ملفات مراجعة</span>
+              <span className="badge badge-info">بدون بث مباشر</span>
+              <span className="badge badge-info">لا يغير ملفات الفيديو</span>
             </div>
             <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
-              Generates review artifacts under generated/playlists only. No ffmpeg, ffprobe, playout, broadcast, production materialization, or cursor mutation.
+              يجهز ملفات playlist داخل generated/playlists حتى تستخدمها في تجربة البث أو المراجعة.
             </p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
               <Info label="active schedule" value={activeSchedule?.name ?? 'No active schedule'} />
@@ -625,7 +755,7 @@ export default function SchedulerFoundationPage() {
               }}
             >
               <ListChecks size={14} />
-              {materializationLoading ? 'Refreshing...' : 'Refresh Status'}
+              {materializationLoading ? 'جاري التحديث...' : 'تحديث الحالة'}
             </button>
             <button
               className="btn-primary flex items-center gap-2 text-sm"
@@ -633,7 +763,7 @@ export default function SchedulerFoundationPage() {
               onClick={() => void runMaterializationDryRun()}
             >
               <CheckCircle2 size={14} />
-              {materializing ? 'Creating Dry-Run...' : 'Create Dry-Run'}
+              {materializing ? 'جاري التجهيز...' : 'تجهيز ملفات التشغيل'}
             </button>
           </div>
         </div>
@@ -642,13 +772,13 @@ export default function SchedulerFoundationPage() {
 
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-          <h3 className="font-semibold">Playlist Materialization Dry-Runs</h3>
-          <span className="badge badge-info">generated/playlists only</span>
+          <h3 className="font-semibold">ملفات التشغيل المجهزة</h3>
+          <span className="badge badge-info">generated/playlists</span>
         </div>
         <div>
           <DataTable
-            empty={materializationLoading ? 'Loading dry-runs...' : 'No playlist materialization dry-runs yet'}
-            headers={['Run', 'Schedule', 'Status', 'Items', 'Warnings', 'Errors', 'Output', 'Details']}
+            empty={materializationLoading ? 'جاري التحميل...' : 'لم يتم تجهيز ملفات تشغيل بعد'}
+            headers={['التشغيل', 'الجدول', 'الحالة', 'العناصر', 'تحذيرات', 'أخطاء', 'المخرجات', 'تفاصيل']}
             rows={materializationRuns.map(run => [
               run.id,
               run.publishedScheduleId,
@@ -663,7 +793,7 @@ export default function SchedulerFoundationPage() {
                 onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)}
               >
                 <Eye size={13} />
-                {expandedRunId === run.id ? 'Hide' : 'Details'}
+                {expandedRunId === run.id ? 'إخفاء' : 'تفاصيل'}
               </button>,
             ])}
           />
@@ -706,23 +836,20 @@ export default function SchedulerFoundationPage() {
 
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-          <h3 className="font-semibold">Test Playout Planning</h3>
-          <span className="badge badge-warning">Plan only. Does not run FFmpeg. Does not broadcast.</span>
+          <h3 className="font-semibold">تجربة البث</h3>
+          <span className="badge badge-warning">تحضير تجربة محلية فقط</span>
         </div>
         <div className="rounded-md border p-3" style={{ borderColor: 'var(--bg-border)', background: 'rgba(232,160,32,0.08)' }}>
           <div className="flex flex-wrap gap-2 text-xs">
-            <span className="badge badge-info">no Run button</span>
-            <span className="badge badge-info">no Start button</span>
-            <span className="badge badge-info">no Stop button</span>
-            <span className="badge badge-info">no RTMP</span>
-            <span className="badge badge-info">no stream keys</span>
-            <span className="badge badge-info">generated/test-playout only</span>
+            <span className="badge badge-info">لا يستخدم RTMP</span>
+            <span className="badge badge-info">لا يستخدم مفاتيح بث</span>
+            <span className="badge badge-info">المخرجات داخل generated/test-playout</span>
           </div>
         </div>
         <div className="rounded-md border p-4 space-y-3" style={{ borderColor: 'var(--bg-border)' }}>
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
             <label className="lg:col-span-2 text-xs space-y-1">
-              <span style={{ color: 'var(--text-muted)' }}>Dry-run playlist path</span>
+              <span style={{ color: 'var(--text-muted)' }}>مسار ملف التشغيل</span>
               <input
                 className="w-full rounded-md border px-3 py-2 bg-transparent"
                 style={{ borderColor: 'var(--bg-border)' }}
@@ -732,7 +859,7 @@ export default function SchedulerFoundationPage() {
               />
             </label>
             <label className="text-xs space-y-1">
-              <span style={{ color: 'var(--text-muted)' }}>Output mode</span>
+              <span style={{ color: 'var(--text-muted)' }}>نوع الخروج</span>
               <select
                 className="w-full rounded-md border px-3 py-2 bg-transparent"
                 style={{ borderColor: 'var(--bg-border)' }}
@@ -744,7 +871,7 @@ export default function SchedulerFoundationPage() {
               </select>
             </label>
             <label className="text-xs space-y-1">
-              <span style={{ color: 'var(--text-muted)' }}>Duration limit seconds</span>
+              <span style={{ color: 'var(--text-muted)' }}>مدة التجربة بالثواني</span>
               <input
                 className="w-full rounded-md border px-3 py-2 bg-transparent"
                 style={{ borderColor: 'var(--bg-border)' }}
@@ -763,7 +890,7 @@ export default function SchedulerFoundationPage() {
               onClick={() => void prepareTestPlayoutPlan()}
             >
               <ShieldCheck size={14} />
-              {testPlayoutPreparing ? 'Preparing Plan...' : 'Prepare Plan'}
+              {testPlayoutPreparing ? 'جاري التجهيز...' : 'تجهيز تجربة البث'}
             </button>
             <button
               className="btn-ghost flex items-center gap-2 text-sm"
@@ -771,15 +898,15 @@ export default function SchedulerFoundationPage() {
               onClick={() => void loadTestPlayoutPlans()}
             >
               <ListChecks size={14} />
-              {testPlayoutLoading ? 'Loading Plans...' : 'Refresh Plans'}
+              {testPlayoutLoading ? 'جاري التحميل...' : 'تحديث التجارب'}
             </button>
           </div>
           {testPlayoutMessage && <p className="text-xs" style={{ color: 'var(--success)' }}>{testPlayoutMessage}</p>}
           {testPlayoutError && <p className="text-xs" style={{ color: 'var(--danger)' }}>{testPlayoutError}</p>}
         </div>
         <DataTable
-          empty={testPlayoutLoading ? 'Loading test playout plans...' : 'No test playout plans yet'}
-          headers={['Plan', 'Mode', 'Status', 'Duration', 'Source playlist', 'Output', 'Details']}
+          empty={testPlayoutLoading ? 'جاري تحميل التجارب...' : 'لم يتم تجهيز تجربة بث بعد'}
+          headers={['التجربة', 'النوع', 'الحالة', 'المدة', 'ملف التشغيل', 'المخرجات', 'تفاصيل']}
           rows={testPlayoutPlans.map(plan => [
             plan.id,
             plan.outputMode === 'local_file' ? 'local file' : 'localhost HLS',
@@ -793,7 +920,7 @@ export default function SchedulerFoundationPage() {
               onClick={() => setExpandedTestPlayoutPlanId(expandedTestPlayoutPlanId === plan.id ? null : plan.id)}
             >
               <Eye size={13} />
-              {expandedTestPlayoutPlanId === plan.id ? 'Hide' : 'Details'}
+              {expandedTestPlayoutPlanId === plan.id ? 'إخفاء' : 'تفاصيل'}
             </button>,
           ])}
         />
@@ -825,18 +952,18 @@ export default function SchedulerFoundationPage() {
       {(drafts.length > 0 || draftsLoading) && (
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <h3 className="font-semibold">Draft Schedules</h3>
-            <span className="badge badge-info">inactive drafts only</span>
+            <h3 className="font-semibold">الجداول المحفوظة</h3>
+            <span className="badge badge-info">لم تعتمد بعد</span>
           </div>
           <DataTable
-            empty={draftsLoading ? 'Loading drafts...' : 'No draft schedules saved yet'}
-            headers={['Name', 'Date range', 'Programs', 'Slots', 'Status', 'Source Excel', 'Created', 'Review']}
+            empty={draftsLoading ? 'جاري التحميل...' : 'لا توجد جداول محفوظة'}
+            headers={['الاسم', 'الفترة', 'البرامج', 'المواعيد', 'الحالة', 'الملف', 'تاريخ الحفظ', 'مراجعة']}
             rows={drafts.map(draft => [
               draft.name,
               `${draft.scheduleStartDate} to ${draft.scheduleEndDate}`,
               draft.programCount,
               draft.slotCount,
-              draft.status === 'draft' && !draft.isActive ? 'inactive draft' : draft.status,
+              draft.status === 'draft' && !draft.isActive ? 'محفوظ' : draft.status,
               `${draft.sourceExcelFilename} (${draft.sourceExcelSha256.slice(0, 12)}...)`,
               draft.createdAt,
               <Link
@@ -845,7 +972,7 @@ export default function SchedulerFoundationPage() {
                 className="btn-ghost inline-flex items-center gap-2 text-xs"
               >
                 <Eye size={13} />
-                Review
+                مراجعة
               </Link>,
             ])}
           />
@@ -855,18 +982,18 @@ export default function SchedulerFoundationPage() {
       {(publishedSchedules.length > 0 || publishedLoading) && (
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <h3 className="font-semibold">Published Schedules</h3>
-            <span className="badge badge-ready">activation marks one active schedule only</span>
+            <h3 className="font-semibold">الجداول المعتمدة</h3>
+            <span className="badge badge-ready">يمكن تفعيل جدول واحد فقط</span>
           </div>
           <DataTable
-            empty={publishedLoading ? 'Loading published schedules...' : 'No published schedules yet'}
-            headers={['Name', 'Date range', 'Programs', 'Slots', 'Status', 'Source draft', 'Published', 'Review']}
+            empty={publishedLoading ? 'جاري التحميل...' : 'لا توجد جداول معتمدة'}
+            headers={['الاسم', 'الفترة', 'البرامج', 'المواعيد', 'الحالة', 'مصدر الاعتماد', 'تاريخ الاعتماد', 'مراجعة']}
             rows={publishedSchedules.map(schedule => [
               schedule.name,
               `${schedule.scheduleStartDate} to ${schedule.scheduleEndDate}`,
               schedule.programCount,
               schedule.slotCount,
-              schedule.isActive ? 'published active' : 'published inactive',
+              schedule.isActive ? 'مفعل للبث' : 'معتمد غير مفعل',
               schedule.sourceDraftId,
               schedule.publishedAt,
               <Link
@@ -875,7 +1002,7 @@ export default function SchedulerFoundationPage() {
                 className="btn-ghost inline-flex items-center gap-2 text-xs"
               >
                 <Eye size={13} />
-                Review
+                مراجعة
               </Link>,
             ])}
           />
@@ -958,6 +1085,34 @@ function Info({ label, value }: { label: string; value: string | number }) {
     <div>
       <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{label}</div>
       <div className="font-medium mt-1">{value}</div>
+    </div>
+  );
+}
+
+function WorkflowStep({
+  number,
+  title,
+  value,
+  done,
+  warning,
+}: {
+  number: number;
+  title: string;
+  value: string | number;
+  done: boolean;
+  warning?: boolean;
+}) {
+  const borderColor = warning ? 'var(--warning)' : done ? 'var(--success)' : 'var(--bg-border)';
+  const iconColor = warning ? 'var(--warning)' : done ? 'var(--success)' : 'var(--text-muted)';
+  return (
+    <div className="rounded-md border p-3 min-h-24" style={{ borderColor }}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{title}</div>
+        <span className="flex h-6 w-6 items-center justify-center rounded-full border text-xs" style={{ borderColor, color: iconColor }}>
+          {done && !warning ? <CheckCircle2 size={14} /> : number}
+        </span>
+      </div>
+      <div className="font-medium mt-2 text-sm break-words">{value}</div>
     </div>
   );
 }
@@ -1179,8 +1334,61 @@ async function sha256File(file: File): Promise<string> {
     .join('');
 }
 
-function stripExcelExtension(filename: string): string {
-  return filename.replace(/\.xlsx$/i, '').slice(0, 120) || 'Excel schedule';
+function isJsonScheduleFile(file: File): boolean {
+  return file.name.toLowerCase().endsWith('.json') || file.type === 'application/json';
+}
+
+function readJsonSchedulePreview(text: string): ExcelPreview {
+  const parsed = JSON.parse(text) as unknown;
+  const candidate = isRecord(parsed) && isRecord(parsed['preview'])
+    ? parsed['preview']
+    : isRecord(parsed) && isRecord(parsed['draft'])
+      ? parsed['draft']
+      : parsed;
+  if (!isRecord(candidate)) {
+    throw new Error('Invalid schedule JSON.');
+  }
+
+  const maybePreview = candidate as Partial<ExcelPreview>;
+  if (
+    !isRecord(maybePreview.settings) ||
+    !Array.isArray(maybePreview.programs) ||
+    !Array.isArray(maybePreview.slots) ||
+    !Array.isArray(maybePreview.folderMatches) ||
+    !isRecord(maybePreview.schedulePreview) ||
+    !isRecord(maybePreview.summary)
+  ) {
+    throw new Error('Schedule JSON must contain settings, programs, slots, folderMatches, schedulePreview, and summary.');
+  }
+
+  return {
+    mode: 'preview',
+    settings: maybePreview.settings as SettingsPreview,
+    programs: maybePreview.programs as ProgramRow[],
+    slots: maybePreview.slots as SlotRow[],
+    folderMatches: maybePreview.folderMatches as FolderMatch[],
+    schedulePreview: maybePreview.schedulePreview as ExcelPreview['schedulePreview'],
+    summary: maybePreview.summary as ExcelPreview['summary'],
+    issues: Array.isArray(maybePreview.issues) ? maybePreview.issues as ExcelIssue[] : [],
+    productionSafety: {
+      previewOnly: true,
+      cursorUpdates: false,
+      playlistMaterialization: false,
+      ffmpeg: false,
+      scheduleActivation: false,
+    },
+    willActivateSchedule: false,
+    willUpdateCursors: false,
+    willMaterializePlaylist: false,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stripScheduleExtension(filename: string): string {
+  return filename.replace(/\.(xlsx|json)$/i, '').slice(0, 120) || 'Schedule';
 }
 
 function statusBadgeClass(value: string | undefined): string {
