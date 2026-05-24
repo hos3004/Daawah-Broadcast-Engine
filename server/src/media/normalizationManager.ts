@@ -2000,7 +2000,6 @@ function readProcessesForJob(
     });
     const scriptPaths = [scriptPath, ...alternateScriptPaths];
     const scriptNames = scriptPaths.map(script => path.basename(script));
-    const hasProcessGroup = pgid !== null || pid !== null;
     return output
       .split(/\r?\n/)
       .map(parseProcessLine)
@@ -2010,7 +2009,7 @@ function readProcessesForJob(
         || (pid !== null && (processInfo.pid === pid || processInfo.ppid === pid))
         || scriptPaths.some(script => processInfo.command.includes(script))
         || scriptNames.some(scriptName => processInfo.command.includes(scriptName))
-        || (hasProcessGroup && scriptNames.some(scriptName => isLikelyNormalizationFfmpeg(processInfo.command, scriptName)))
+        || (pgid !== null && scriptNames.some(scriptName => isLikelyNormalizationFfmpeg(processInfo.command, scriptName)))
       ))
       .slice(0, 40);
   } catch {
