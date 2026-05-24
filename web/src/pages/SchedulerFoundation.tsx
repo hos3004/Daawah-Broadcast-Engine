@@ -551,8 +551,11 @@ export default function SchedulerFoundationPage() {
       setWorkflowMessage('تم إنشاء معاينة الجدولة من الويزرد. راجعها ثم اضغط اعتماد الجدول.');
       setActiveTab('preview');
       setWizardStep(5);
-    } catch {
-      setWizardError('تعذر إنشاء معاينة الجدولة. راجع البرامج والمواعيد ثم حاول مرة أخرى.');
+      if (parsedPreview.summary.errors > 0) {
+        setWizardError(`تم إنشاء المعاينة لكن بها أخطاء تمنع الاعتماد:\n${formatPreviewIssues(parsedPreview.issues, 6)}`);
+      }
+    } catch (err) {
+      setWizardError(describeWizardPreviewError(err));
     } finally {
       setWizardBuilding(false);
     }
@@ -1656,7 +1659,23 @@ function ScheduleWizardModal({
             </div>
           )}
 
-          {error && <p className="text-xs mt-4" style={{ color: 'var(--danger)' }}>{error}</p>}
+          {step === 5 && preview && preview.issues.length > 0 && (
+            <div className="rounded-md border p-3 mt-4 text-xs space-y-1" style={{ borderColor: preview.summary.errors > 0 ? 'var(--danger)' : 'var(--warning)' }}>
+              <div className="font-semibold" style={{ color: preview.summary.errors > 0 ? 'var(--danger)' : 'var(--warning)' }}>
+                تفاصيل المراجعة
+              </div>
+              {preview.issues.slice(0, 8).map((issue, index) => (
+                <div key={`${issue.code}-${index}`} style={{ color: issue.severity === 'error' ? 'var(--danger)' : 'var(--warning)' }}>
+                  {formatPreviewIssue(issue)}
+                </div>
+              ))}
+              {preview.issues.length > 8 && (
+                <div style={{ color: 'var(--text-muted)' }}>وهناك {preview.issues.length - 8} ملاحظة أخرى في تبويب الأخطاء والتحذيرات.</div>
+              )}
+            </div>
+          )}
+
+          {error && <p className="text-xs mt-4 whitespace-pre-line" style={{ color: 'var(--danger)' }}>{error}</p>}
         </div>
       </div>
     </div>
@@ -2041,26 +2060,23 @@ function normalizeLookupText(value: string): string {
 }
 
 function validateWizardRows(startDate: string, endDate: string, rows: WizardProgramDraft[]): string {
-  if (!startDate || !endDate) return 'حدد تاريخ بداية ونهاية الجدولة.';
-  if (endDate < startDate) return 'تاريخ نهاية الجدولة يجب أن يكون بعد تاريخ البداية.';
-  if (rows.length === 0) return 'أضف برنامجًا واحدًا على الأقل.';
+  const issues: string[] = [];
+  if (!startDate) issues.push('تاريخ بداية الجدولة غير محدد.');
+  if (!endDate) issues.push('تاريخ نهاية الجدولة غير محدد.');
+  if (startDate && endDate && endDate < startDate) issues.push('تاريخ نهاية الجدولة يجب أن يكون بعد تاريخ البداية.');
+  if (rows.length === 0) issues.push('لا توجد برامج. أضف برنامجًا واحدًا على الأقل.');
 
-  const invalidRow = rows.find(row =>
-    !row.name.trim() ||
-    !row.folderId ||
-    !row.folderRoot ||
-    !row.folderHint ||
-    !row.startTime ||
-    row.durationMinutes <= 0 ||
-    row.days.length === 0 ||
-    (row.slotMode === 'file-count' && row.fileCountLimit <= 0)
-  );
+  rows.forEach((row, index) => {
+    const label = `السطر ${index + 1}${row.name.trim() ? ` (${row.name.trim()})` : ''}`;
+    if (!row.name.trim()) issues.push(`${label}: اسم البرنامج فارغ.`);
+    if (!row.folderId || !row.folderRoot || !row.folderHint) issues.push(`${label}: لم يتم اختيار مجلد البرنامج من مكتبة الوسائط.`);
+    if (!row.startTime) issues.push(`${label}: وقت البث غير محدد.`);
+    if (row.durationMinutes <= 0) issues.push(`${label}: مدة الفترة يجب أن تكون أكبر من صفر.`);
+    if (row.days.length === 0) issues.push(`${label}: اختر يوم بث واحدًا على الأقل.`);
+    if (row.slotMode === 'file-count' && row.fileCountLimit <= 0) issues.push(`${label}: file-count يحتاج عدد ملفات أكبر من صفر.`);
+  });
 
-  if (invalidRow) {
-    return `راجع بيانات البرنامج: ${invalidRow.name || 'بدون اسم'}.`;
-  }
-
-  return '';
+  return issues.length > 0 ? issues.slice(0, 12).join('\n') : '';
 }
 
 function buildWizardSchedulePayload(startDate: string, endDate: string, rows: WizardProgramDraft[]) {
@@ -2173,6 +2189,65 @@ function todayDateInputValue(): string {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function describeWizardPreviewError(err: unknown): string {
+  const response = isRecord(err) && isRecord(err['response']) ? err['response'] : null;
+  const status = typeof response?.['status'] === 'number' ? response['status'] : null;
+  const data = response && isRecord(response['data']) ? response['data'] : null;
+  const code = data ? textValue(data['code']) : '';
+  const serverMessage = data ? (textValue(data['error']) || textValue(data['message'])) : '';
+  const serverIssues = data && Array.isArray(data['issues'])
+    ? formatPreviewIssues(data['issues'].filter(isExcelIssueLike) as ExcelIssue[], 8)
+    : '';
+
+  const lines = ['تعذر إنشاء معاينة الجدولة.'];
+  if (status || code) {
+    lines.push(`الاستجابة: ${status ? `HTTP ${status}` : 'HTTP error'}${code ? ` / ${code}` : ''}`);
+  }
+  if (serverMessage) {
+    lines.push(`رسالة السيرفر: ${serverMessage}`);
+  }
+  if (serverIssues) {
+    lines.push('تفاصيل الأخطاء:');
+    lines.push(serverIssues);
+  }
+
+  if (!status && !serverMessage) {
+    const fallbackMessage = err instanceof Error ? err.message : String(err);
+    if (fallbackMessage && fallbackMessage !== '[object Object]') {
+      lines.push(`تفاصيل: ${fallbackMessage}`);
+    } else {
+      lines.push('لم يرجع السيرفر تفاصيل مفهومة. راجع اتصال اللوحة بالـ backend.');
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function formatPreviewIssues(issues: ExcelIssue[], limit: number): string {
+  if (issues.length === 0) return 'لا توجد تفاصيل إضافية.';
+  const visible = issues.slice(0, limit).map(formatPreviewIssue);
+  if (issues.length > limit) visible.push(`... و${issues.length - limit} ملاحظة أخرى`);
+  return visible.join('\n');
+}
+
+function formatPreviewIssue(issue: ExcelIssue): string {
+  const row = issue.row ? `صف ${issue.row}` : 'بدون صف';
+  const field = issue.field ? ` / ${issue.field}` : '';
+  return `[${issue.severity}] ${issue.sheet} ${row}${field} - ${issue.code}: ${issue.message}`;
+}
+
+function isExcelIssueLike(value: unknown): value is ExcelIssue {
+  return isRecord(value) &&
+    typeof value['severity'] === 'string' &&
+    typeof value['code'] === 'string' &&
+    typeof value['sheet'] === 'string' &&
+    typeof value['message'] === 'string';
+}
+
+function textValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }
 
 async function sha256File(file: File): Promise<string> {
