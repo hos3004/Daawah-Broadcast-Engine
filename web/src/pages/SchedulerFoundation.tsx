@@ -2215,6 +2215,7 @@ function findBestFolderMatch(name: string, folders: ProgramFolderOption[]): { fo
 
 function scoreFolderMatch(name: string, folder: ProgramFolderOption): number {
   const query = normalizeLookupText(name);
+  const queryTokens = significantLookupTokens(query);
   const display = normalizeLookupText(folder.display_name_ar);
   const relativePath = normalizeLookupText(folder.original_relative_path);
   const baseName = normalizeLookupText(folder.original_relative_path.split(/[\\/]/).filter(Boolean).pop() ?? folder.display_name_ar);
@@ -2225,7 +2226,11 @@ function scoreFolderMatch(name: string, folder: ProgramFolderOption): number {
   for (const candidate of candidates) {
     if (candidate === query) score = Math.max(score, 100);
     else if (candidate.includes(query) || query.includes(candidate)) score = Math.max(score, 86);
-    else score = Math.max(score, tokenOverlapScore(query, candidate));
+    else score = Math.max(
+      score,
+      tokenOverlapScore(query, candidate),
+      tokenSubsetScore(queryTokens, significantLookupTokens(candidate))
+    );
   }
 
   if (folder.root_key === 'normalized-ar') score += 12;
@@ -2235,6 +2240,22 @@ function scoreFolderMatch(name: string, folder: ProgramFolderOption): number {
 
   return Math.max(0, Math.min(100, Math.round(score)));
 }
+
+const wizardMatchStopTokens = new Set([
+  'ا',
+  'د',
+  'مع',
+  'في',
+  'من',
+  'الي',
+  'الى',
+  'الشيخ',
+  'الدكتور',
+  'فضيله',
+  'قناه',
+  'دعوه',
+  'برنامج',
+]);
 
 function tokenOverlapScore(left: string, right: string): number {
   const leftTokens = new Set(left.split(' ').filter(Boolean));
@@ -2247,6 +2268,21 @@ function tokenOverlapScore(left: string, right: string): number {
   return Math.round((overlap / Math.max(leftTokens.size, rightTokens.size)) * 72);
 }
 
+function tokenSubsetScore(leftTokens: string[], rightTokens: string[]): number {
+  if (leftTokens.length < 2 || rightTokens.length === 0) return 0;
+  const right = new Set(rightTokens);
+  const matched = leftTokens.filter(token => right.has(token)).length;
+  if (matched === leftTokens.length) return 84;
+  if (matched >= Math.max(2, Math.ceil(leftTokens.length * 0.75))) return 78;
+  return 0;
+}
+
+function significantLookupTokens(value: string): string[] {
+  return normalizeLookupText(value)
+    .split(' ')
+    .filter(token => token.length > 1 && !/^\d+$/.test(token) && !wizardMatchStopTokens.has(token));
+}
+
 function normalizeLookupText(value: string): string {
   return value
     .toLowerCase()
@@ -2255,7 +2291,8 @@ function normalizeLookupText(value: string): string {
     .replace(/ى/g, 'ي')
     .replace(/ة/g, 'ه')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim();
+    .trim()
+    .replace(/عبد\s+الحي/g, 'عبدالحي');
 }
 
 function validateWizardRows(startDate: string, endDate: string, rows: WizardProgramDraft[]): string {
