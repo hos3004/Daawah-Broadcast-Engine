@@ -17,6 +17,7 @@ SOURCE_ROOT = Path(os.environ.get("NORMALIZE_SOURCE_ROOT", "/srv/daawah/media/or
 OUTPUT_ROOT = Path(os.environ.get("NORMALIZE_OUTPUT_ROOT", "/srv/daawah/media/normalized-ar")).resolve()
 MAX_PARALLEL = max(1, min(10, int(os.environ.get("NORMALIZE_MAX_PARALLEL", "5"))))
 LIMIT = int(os.environ["NORMALIZE_LIMIT"]) if os.environ.get("NORMALIZE_LIMIT") else None
+MANIFEST_PATH = os.environ.get("NORMALIZE_MANIFEST")
 DRY_RUN = os.environ.get("DRY_RUN", "0") in {"1", "true", "yes"}
 DELETE_ORIGINAL = os.environ.get("DELETE_ORIGINAL_AFTER_VALIDATION", "0") in {"1", "true", "yes"}
 DELETE_CONFIRMATION = "DELETE ORIGINAL AFTER VALIDATION"
@@ -472,10 +473,34 @@ def process_one(index, total, src: Path, collision=False):
 
 
 def collect_sources():
+    if MANIFEST_PATH:
+        return collect_manifest_sources(Path(MANIFEST_PATH))
     files = sorted(
         path for path in SOURCE_ROOT.rglob("*")
         if path.is_file() and path.suffix.lower() in VIDEO_EXTS
     )
+    if LIMIT is not None:
+        files = files[:LIMIT]
+    return files
+
+
+def collect_manifest_sources(manifest: Path):
+    if not manifest.exists():
+        raise SystemExit(f"manifest missing: {manifest}")
+    files = []
+    for raw in manifest.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        candidate = Path(line)
+        if not candidate.is_absolute():
+            candidate = SOURCE_ROOT / candidate
+        candidate = candidate.resolve()
+        if not is_inside(SOURCE_ROOT, candidate):
+            raise SystemExit(f"manifest path is outside source root: {candidate}")
+        if candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTS:
+            files.append(candidate)
+    files = sorted(dict.fromkeys(files))
     if LIMIT is not None:
         files = files[:LIMIT]
     return files
