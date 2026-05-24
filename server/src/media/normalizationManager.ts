@@ -556,6 +556,7 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     outputPath: CONTINUE_NORMALIZE_OUTPUT_PATH,
     reportPattern: /^(continue|normalize).*\.csv$/,
     inferFromScriptName: false,
+    useLatestReportFallback: false,
   });
   const priorityHajjJob = readServerNormalizationJob({
     key: 'priority_hajj_map',
@@ -566,6 +567,7 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     outputPath: PRIORITY_HAJJ_NORMALIZE_OUTPUT_PATH,
     reportPattern: /^continue_normalize_ar_.*\.csv$/,
     inferFromScriptName: false,
+    useLatestReportFallback: false,
   });
   const hajj10SourceJob = readServerNormalizationJob({
     key: 'hajj10_source',
@@ -576,6 +578,7 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     outputPath: HAJJ10_SOURCE_NORMALIZE_OUTPUT_PATH,
     reportPattern: /^continue_normalize_ar_.*\.csv$/,
     inferFromScriptName: false,
+    useLatestReportFallback: false,
   });
   const activeJob = [hajj10SourceJob, priorityHajjJob, continueJob, fixJob].find(job => job.running) ?? null;
   const throttlePaths = activeJob && activeJob.key !== 'fix_existing_normalized'
@@ -1831,6 +1834,7 @@ interface ServerNormalizationJobDescriptor {
   outputPath: string;
   reportPattern: RegExp;
   inferFromScriptName?: boolean;
+  useLatestReportFallback?: boolean;
 }
 
 function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor): ServerNormalizationJobStatus {
@@ -1849,7 +1853,8 @@ function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor
   }
   const running = (pid !== null && isPidRunning(pid)) || processes.length > 0;
   const outputText = readTextTail(descriptor.outputPath, 1024 * 1024);
-  const reportPath = reportPathFromOutput(outputText, descriptor.reportPattern) ?? latestReportPath(descriptor.reportPattern);
+  const reportPath = reportPathFromOutput(outputText, descriptor.reportPattern)
+    ?? (descriptor.useLatestReportFallback === false ? null : latestReportPath(descriptor.reportPattern));
   const logProgress = parseNormalizationProgress(outputText);
   const logCounts = parseNormalizationCounts(outputText);
   const reportCounts = reportPath ? parseNormalizationReportCounts(reportPath) : null;

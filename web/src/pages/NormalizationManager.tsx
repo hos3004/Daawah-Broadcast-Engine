@@ -549,7 +549,7 @@ export default function NormalizationManagerPage() {
           <Info label="normalized-ar" value={serverStatus?.paths.normalizedSize ?? 'unknown'} />
           <Info label="disk free" value={serverStatus ? `${serverStatus.disk.freeLabel} free / ${serverStatus.disk.percent}% used` : '-'} />
           <Info label="throttle watcher" value={serverStatus ? `${serverStatus.throttle.running ? 'running' : 'stopped'}${serverStatus.throttle.pid ? ` pid ${serverStatus.throttle.pid}` : ''}` : '-'} />
-          <Info label="current cpu" value={currentServerJob ? `${currentServerJob.cpuPercent.toFixed(1)}%` : '-'} />
+          <Info label="job cpu" value={currentServerJob ? `${currentServerJob.cpuPercent.toFixed(1)}% of one core` : '-'} />
           <Info label="next gate" value={serverStatus?.guidance.canStartContinue ? 'ready after DONE' : serverStatus?.guidance.reason ?? '-'} />
         </div>
 
@@ -964,7 +964,7 @@ function buildSummaryCards(
       { label: workLabel, value: workCount, tone: 'warning' },
       { label: 'deleted', value: currentServerJob.counts.deletedOriginal, tone: 'warning' },
       { label: 'failed', value: currentServerJob.counts.failed, tone: 'error' },
-      { label: 'cpu', value: `${currentServerJob.cpuPercent.toFixed(1)}%` },
+      { label: 'job cpu', value: `${currentServerJob.cpuPercent.toFixed(1)}%` },
     ];
   }
 
@@ -1059,7 +1059,7 @@ function ServerJobPanel({ job }: { job: ServerNormalizationJobStatus }) {
         <Info label="ok / failed" value={`${jobOkCount(job)} / ${job.counts.failed}`} />
         <Info label="normalized / deleted" value={`${job.counts.normalized} / ${job.counts.deletedOriginal}`} />
         <Info label="fix / no action" value={`${job.counts.fix} / ${job.counts.noAction}`} />
-        <Info label="cpu" value={`${job.cpuPercent.toFixed(1)}%`} />
+        <Info label="job cpu" value={`${job.cpuPercent.toFixed(1)}% of one core`} />
         <Info label="pid" value={job.pid ?? '-'} />
         <Info label="pgid" value={job.pgid ?? '-'} />
         <Info label="report" value={job.reportPath ?? '-'} />
