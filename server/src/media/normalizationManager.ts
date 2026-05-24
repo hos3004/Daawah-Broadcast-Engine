@@ -254,7 +254,7 @@ export interface ServerNormalizationProcessInfo {
 }
 
 export interface ServerNormalizationJobStatus {
-  key: 'fix_existing_normalized' | 'continue_original_ar';
+  key: 'fix_existing_normalized' | 'continue_original_ar' | 'priority_hajj_map' | 'hajj10_source';
   label: string;
   scriptPath: string;
   pidPath: string;
@@ -277,6 +277,11 @@ export interface ServerNormalizationJobStatus {
     remux: number;
     audioOnly: number;
     fullTranscode: number;
+    normalized: number;
+    existingValid: number;
+    promotedReady: number;
+    needsNormalize: number;
+    deletedOriginal: number;
     other: number;
   };
   cpuPercent: number;
@@ -286,7 +291,7 @@ export interface ServerNormalizationJobStatus {
 
 export interface ServerNormalizationStatus {
   mode: 'server-normalization-status';
-  phase: 'fix_running' | 'continue_running' | 'ready_for_continue' | 'idle';
+  phase: 'fix_running' | 'continue_running' | 'priority_hajj_running' | 'hajj10_source_running' | 'ready_for_continue' | 'idle';
   generatedAt: string;
   server: {
     hostname: string;
@@ -319,6 +324,8 @@ export interface ServerNormalizationStatus {
   };
   fixJob: ServerNormalizationJobStatus;
   continueJob: ServerNormalizationJobStatus;
+  priorityHajjJob: ServerNormalizationJobStatus;
+  hajj10SourceJob: ServerNormalizationJobStatus;
   guidance: {
     canStartContinue: boolean;
     reason: string;
@@ -466,6 +473,10 @@ const CONTINUE_NORMALIZE_SCRIPT_PATH = '/tmp/continue_normalize_ar_server.sh';
 const CONTINUE_NORMALIZE_PYTHON_PATH = '/tmp/continue_normalize_ar_server.py';
 const CONTINUE_NORMALIZE_PID_PATH = '/tmp/continue_normalize_ar_server.pid';
 const CONTINUE_NORMALIZE_OUTPUT_PATH = '/tmp/continue_normalize_ar_server.out';
+const PRIORITY_HAJJ_NORMALIZE_PID_PATH = '/tmp/priority_hajj_normalize.pid';
+const PRIORITY_HAJJ_NORMALIZE_OUTPUT_PATH = '/tmp/priority_hajj_normalize.out';
+const HAJJ10_SOURCE_NORMALIZE_PID_PATH = '/tmp/hajj10_source_normalize.pid';
+const HAJJ10_SOURCE_NORMALIZE_OUTPUT_PATH = '/tmp/hajj10_source_normalize.out';
 const FIX_THROTTLE_PID_PATH = '/tmp/fix_normalized_ar_throttle.pid';
 const FIX_THROTTLE_LOG_PATH = '/tmp/fix_normalized_ar_throttle.out';
 const CONTINUE_THROTTLE_PID_PATH = '/tmp/continue_normalize_ar_throttle.pid';
@@ -544,8 +555,30 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     pidPath: CONTINUE_NORMALIZE_PID_PATH,
     outputPath: CONTINUE_NORMALIZE_OUTPUT_PATH,
     reportPattern: /^(continue|normalize).*\.csv$/,
+    inferFromScriptName: false,
   });
-  const throttlePaths = continueJob.running
+  const priorityHajjJob = readServerNormalizationJob({
+    key: 'priority_hajj_map',
+    label: 'Priority Hajj map normalize',
+    scriptPath: CONTINUE_NORMALIZE_SCRIPT_PATH,
+    alternateScriptPaths: [CONTINUE_NORMALIZE_PYTHON_PATH],
+    pidPath: PRIORITY_HAJJ_NORMALIZE_PID_PATH,
+    outputPath: PRIORITY_HAJJ_NORMALIZE_OUTPUT_PATH,
+    reportPattern: /^continue_normalize_ar_.*\.csv$/,
+    inferFromScriptName: false,
+  });
+  const hajj10SourceJob = readServerNormalizationJob({
+    key: 'hajj10_source',
+    label: 'Hajj-10 source normalize',
+    scriptPath: CONTINUE_NORMALIZE_SCRIPT_PATH,
+    alternateScriptPaths: [CONTINUE_NORMALIZE_PYTHON_PATH],
+    pidPath: HAJJ10_SOURCE_NORMALIZE_PID_PATH,
+    outputPath: HAJJ10_SOURCE_NORMALIZE_OUTPUT_PATH,
+    reportPattern: /^continue_normalize_ar_.*\.csv$/,
+    inferFromScriptName: false,
+  });
+  const activeJob = [hajj10SourceJob, priorityHajjJob, continueJob, fixJob].find(job => job.running) ?? null;
+  const throttlePaths = activeJob && activeJob.key !== 'fix_existing_normalized'
     ? {
         pidPath: CONTINUE_THROTTLE_PID_PATH,
         logPath: CONTINUE_THROTTLE_LOG_PATH,
@@ -561,14 +594,18 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
   const throttleRunning = (throttlePid !== null && isPidRunning(throttlePid)) || throttleProcess !== null;
   const rawDisk = diskUsage('/srv');
   const freeBytes = Math.max(0, rawDisk.total - rawDisk.used);
-  const phase: ServerNormalizationStatus['phase'] = continueJob.running
-    ? 'continue_running'
-    : fixJob.running
-      ? 'fix_running'
-      : fixJob.done
-        ? 'ready_for_continue'
-        : 'idle';
-  const canStartContinue = phase === 'ready_for_continue' && fixJob.counts.failed === 0;
+  const phase: ServerNormalizationStatus['phase'] = hajj10SourceJob.running
+    ? 'hajj10_source_running'
+    : priorityHajjJob.running
+      ? 'priority_hajj_running'
+      : continueJob.running
+        ? 'continue_running'
+        : fixJob.running
+          ? 'fix_running'
+          : fixJob.done
+            ? 'ready_for_continue'
+            : 'idle';
+  const canStartContinue = activeJob === null && phase === 'ready_for_continue' && fixJob.counts.failed === 0;
 
   return {
     mode: 'server-normalization-status',
@@ -605,10 +642,12 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     },
     fixJob,
     continueJob,
+    priorityHajjJob,
+    hajj10SourceJob,
     guidance: {
       canStartContinue,
-      reason: continueJob.running
-        ? 'Continue normalize is already running.'
+      reason: activeJob
+        ? `${activeJob.label} is already running.`
         : fixJob.running
           ? 'Wait for the fix_existing_normalized job to print DONE.'
           : !fixJob.done
@@ -1791,23 +1830,26 @@ interface ServerNormalizationJobDescriptor {
   pidPath: string;
   outputPath: string;
   reportPattern: RegExp;
+  inferFromScriptName?: boolean;
 }
 
 function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor): ServerNormalizationJobStatus {
   let pid = readPidFile(descriptor.pidPath);
+  if (pid !== null && !isPidRunning(pid)) pid = null;
   let pgid = pid ? getProcessGroupId(pid) : null;
-  let processes = readProcessesForJob(pgid, pid, descriptor.scriptPath, descriptor.alternateScriptPaths);
-  if (pid === null) {
+  const includeScriptMatch = descriptor.inferFromScriptName !== false;
+  let processes = readProcessesForJob(pgid, pid, descriptor.scriptPath, descriptor.alternateScriptPaths, includeScriptMatch);
+  if (pid === null && includeScriptMatch) {
     const inferred = inferMainProcess(processes, descriptor.scriptPath, descriptor.alternateScriptPaths);
     if (inferred) {
       pid = inferred.pid;
       pgid = inferred.pgid ?? getProcessGroupId(inferred.pid);
-      processes = readProcessesForJob(pgid, pid, descriptor.scriptPath, descriptor.alternateScriptPaths);
+      processes = readProcessesForJob(pgid, pid, descriptor.scriptPath, descriptor.alternateScriptPaths, includeScriptMatch);
     }
   }
   const running = (pid !== null && isPidRunning(pid)) || processes.length > 0;
   const outputText = readTextTail(descriptor.outputPath, 1024 * 1024);
-  const reportPath = latestReportPath(descriptor.reportPattern);
+  const reportPath = reportPathFromOutput(outputText, descriptor.reportPattern) ?? latestReportPath(descriptor.reportPattern);
   const logProgress = parseNormalizationProgress(outputText);
   const logCounts = parseNormalizationCounts(outputText);
   const reportCounts = reportPath ? parseNormalizationReportCounts(reportPath) : null;
@@ -1990,7 +2032,8 @@ function readProcessesForJob(
   pgid: number | null,
   pid: number | null,
   scriptPath: string,
-  alternateScriptPaths: string[] = []
+  alternateScriptPaths: string[] = [],
+  includeScriptMatch = true
 ): ServerNormalizationProcessInfo[] {
   try {
     const output = childProcess.execFileSync('ps', ['-eo', 'pid=,ppid=,pgid=,ni=,pcpu=,stat=,args='], {
@@ -2007,9 +2050,9 @@ function readProcessesForJob(
       .filter(processInfo => (
         (pgid !== null && processInfo.pgid === pgid)
         || (pid !== null && (processInfo.pid === pid || processInfo.ppid === pid))
-        || scriptPaths.some(script => processInfo.command.includes(script))
-        || scriptNames.some(scriptName => processInfo.command.includes(scriptName))
-        || (pgid !== null && scriptNames.some(scriptName => isLikelyNormalizationFfmpeg(processInfo.command, scriptName)))
+        || (includeScriptMatch && scriptPaths.some(script => processInfo.command.includes(script)))
+        || (includeScriptMatch && scriptNames.some(scriptName => processInfo.command.includes(scriptName)))
+        || (includeScriptMatch && pgid !== null && scriptNames.some(scriptName => isLikelyNormalizationFfmpeg(processInfo.command, scriptName)))
       ))
       .slice(0, 40);
   } catch {
@@ -2117,14 +2160,15 @@ function inferNormalizationProgress(
   jobKey: ServerNormalizationJobStatus['key']
 ): ServerNormalizationJobStatus['progress'] {
   if (progress.current !== null || progress.total !== null) return progress;
-  const processed = counts.ok
-    + counts.failed
+  const statusCount = counts.ok + counts.failed + counts.other;
+  const actionCount = counts.normalized
+    + counts.existingValid
+    + counts.promotedReady
+    + counts.needsNormalize
     + counts.fix
-    + counts.noAction
-    + counts.remux
-    + counts.audioOnly
-    + counts.fullTranscode
-    + counts.other;
+    + counts.noAction;
+  const decisionCount = counts.remux + counts.audioOnly + counts.fullTranscode;
+  const processed = Math.max(statusCount, actionCount, decisionCount);
   if (processed === 0) return progress;
   const total = jobKey === 'fix_existing_normalized' ? 178 : null;
   const percent = total !== null && total > 0 ? Number(((processed / total) * 100).toFixed(1)) : null;
@@ -2142,11 +2186,17 @@ function parseNormalizationCounts(text: string): ServerNormalizationJobStatus['c
     if (!normalized) continue;
     if (/^(ok|pass|valid)\b/.test(normalized)) counts.ok += 1;
     else if (/^(failed|fail|error)\b/.test(normalized)) counts.failed += 1;
-    else if (/^(fix|fixed|rewrite|recompress)\b/.test(normalized)) counts.fix += 1;
-    else if (/remux/.test(normalized)) counts.remux += 1;
-    else if (/audio[-_ ]only/.test(normalized)) counts.audioOnly += 1;
-    else if (/full[-_ ]transcode|transcode/.test(normalized)) counts.fullTranscode += 1;
-    else if (/no[-_ ]?action|skip/.test(normalized)) counts.noAction += 1;
+    else if (/^(unknown|other)\b/.test(normalized)) counts.other += 1;
+    if (/\bnormalized\b/.test(normalized)) counts.normalized += 1;
+    if (/existing[-_ ]valid/.test(normalized)) counts.existingValid += 1;
+    if (/promoted[-_ ]ready/.test(normalized)) counts.promotedReady += 1;
+    if (/needs[-_ ]normalize/.test(normalized)) counts.needsNormalize += 1;
+    if (/^(fix|fixed|rewrite|recompress)\b/.test(normalized)) counts.fix += 1;
+    if (/remux/.test(normalized)) counts.remux += 1;
+    if (/audio[-_ ]only/.test(normalized)) counts.audioOnly += 1;
+    if (/full[-_ ]transcode|transcode/.test(normalized)) counts.fullTranscode += 1;
+    if (/no[-_ ]?action|skip/.test(normalized)) counts.noAction += 1;
+    if (/deleted[_ ]original|original deleted/.test(normalized)) counts.deletedOriginal += 1;
   }
   return counts;
 }
@@ -2156,17 +2206,42 @@ function parseNormalizationReportCounts(reportPath: string): ServerNormalization
   if (!text.trim()) return null;
   const counts = emptyNormalizationCounts();
   const lines = text.split(/\r?\n/).filter(Boolean);
+  const headers = splitCsvLine(lines[0] ?? '').map(value => value.toLowerCase());
+  const columnIndex = (name: string, fallback: number) => {
+    const index = headers.indexOf(name);
+    return index >= 0 ? index : fallback;
+  };
+  const statusIndex = columnIndex('status', 1);
+  const actionIndex = columnIndex('action', 2);
+  const decisionIndex = columnIndex('decision', 3);
+  const deletedIndex = columnIndex('deleted_original', 7);
   for (const line of lines.slice(1)) {
     const columns = splitCsvLine(line);
-    const status = columns.slice(1, 4).join(' ').toLowerCase();
+    const status = (columns[statusIndex] ?? '').toLowerCase();
+    const action = (columns[actionIndex] ?? '').toLowerCase();
+    const decision = (columns[decisionIndex] ?? '').toLowerCase();
+    const deleted = (columns[deletedIndex] ?? '').toLowerCase();
     if (status.includes('failed') || status.includes('fail') || status.includes('error')) counts.failed += 1;
-    else if (status.includes('fix') || status.includes('fixed') || status.includes('rewrite')) counts.fix += 1;
-    else if (status.includes('remux')) counts.remux += 1;
-    else if (status.includes('audio')) counts.audioOnly += 1;
-    else if (status.includes('transcode')) counts.fullTranscode += 1;
-    else if (status.includes('skip') || status.includes('no_action') || status.includes('no action')) counts.noAction += 1;
     else if (status.includes('ok') || status.includes('valid') || status.includes('pass')) counts.ok += 1;
     else counts.other += 1;
+
+    if (action.includes('normalized')) counts.normalized += 1;
+    if (action.includes('existing_valid') || action.includes('existing valid')) {
+      counts.existingValid += 1;
+      counts.noAction += 1;
+    }
+    if (action.includes('promoted_ready') || action.includes('promoted ready')) {
+      counts.promotedReady += 1;
+      counts.noAction += 1;
+    }
+    if (action.includes('needs_normalize') || action.includes('needs normalize')) counts.needsNormalize += 1;
+    if (action.includes('fix') || action.includes('fixed') || action.includes('rewrite')) counts.fix += 1;
+    if (action.includes('skip') || action.includes('no_action') || action.includes('no action')) counts.noAction += 1;
+
+    if (decision.includes('remux')) counts.remux += 1;
+    if (decision.includes('audio')) counts.audioOnly += 1;
+    if (decision.includes('transcode')) counts.fullTranscode += 1;
+    if (deleted === 'yes' || deleted === 'true' || deleted === '1') counts.deletedOriginal += 1;
   }
   return counts;
 }
@@ -2180,6 +2255,11 @@ function emptyNormalizationCounts(): ServerNormalizationJobStatus['counts'] {
     remux: 0,
     audioOnly: 0,
     fullTranscode: 0,
+    normalized: 0,
+    existingValid: 0,
+    promotedReady: 0,
+    needsNormalize: 0,
+    deletedOriginal: 0,
     other: 0,
   };
 }
@@ -2205,6 +2285,16 @@ function splitCsvLine(line: string): string[] {
   }
   result.push(current);
   return result.map(value => value.trim());
+}
+
+function reportPathFromOutput(text: string, pattern: RegExp): string | null {
+  for (const match of text.matchAll(/\/srv\/daawah\/media\/normalized-ar\/reports\/[^\s'"<>]+\.csv/g)) {
+    const reportPath = match[0];
+    if (reportPath && pattern.test(path.posix.basename(reportPath)) && fs.existsSync(reportPath)) {
+      return reportPath;
+    }
+  }
+  return null;
 }
 
 function latestReportPath(pattern: RegExp): string | null {

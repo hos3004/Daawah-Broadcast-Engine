@@ -80,7 +80,7 @@ interface ServerNormalizationProcessInfo {
 }
 
 interface ServerNormalizationJobStatus {
-  key: 'fix_existing_normalized' | 'continue_original_ar';
+  key: 'fix_existing_normalized' | 'continue_original_ar' | 'priority_hajj_map' | 'hajj10_source';
   label: string;
   scriptPath: string;
   pidPath: string;
@@ -103,6 +103,11 @@ interface ServerNormalizationJobStatus {
     remux: number;
     audioOnly: number;
     fullTranscode: number;
+    normalized: number;
+    existingValid: number;
+    promotedReady: number;
+    needsNormalize: number;
+    deletedOriginal: number;
     other: number;
   };
   cpuPercent: number;
@@ -111,7 +116,7 @@ interface ServerNormalizationJobStatus {
 }
 
 interface ServerNormalizationStatus {
-  phase: 'fix_running' | 'continue_running' | 'ready_for_continue' | 'idle';
+  phase: 'fix_running' | 'continue_running' | 'priority_hajj_running' | 'hajj10_source_running' | 'ready_for_continue' | 'idle';
   generatedAt: string;
   server: {
     hostname: string;
@@ -144,6 +149,8 @@ interface ServerNormalizationStatus {
   };
   fixJob: ServerNormalizationJobStatus;
   continueJob: ServerNormalizationJobStatus;
+  priorityHajjJob: ServerNormalizationJobStatus;
+  hajj10SourceJob: ServerNormalizationJobStatus;
   guidance: {
     canStartContinue: boolean;
     reason: string;
@@ -482,7 +489,12 @@ export default function NormalizationManagerPage() {
   };
 
   const topItems = preflight?.items.slice(0, 80) ?? [];
-  const currentServerJob = serverStatus?.continueJob.running ? serverStatus.continueJob : serverStatus?.fixJob;
+  const serverJobs = serverStatus
+    ? [serverStatus.hajj10SourceJob, serverStatus.priorityHajjJob, serverStatus.continueJob, serverStatus.fixJob]
+      .filter((job): job is ServerNormalizationJobStatus => Boolean(job))
+    : [];
+  const currentServerJob = serverJobs.find(job => job.running)
+    ?? (serverStatus?.phase === 'ready_for_continue' ? serverStatus.fixJob : undefined);
   const summaryCards = buildSummaryCards(currentServerJob, preflight, status);
 
   return (
@@ -543,8 +555,7 @@ export default function NormalizationManagerPage() {
 
         {serverStatus && (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-            <ServerJobPanel job={serverStatus.fixJob} />
-            <ServerJobPanel job={serverStatus.continueJob} />
+            {serverJobs.map(job => <ServerJobPanel key={job.key} job={job} />)}
           </div>
         )}
 
@@ -942,11 +953,16 @@ function buildSummaryCards(
     const processed = jobProcessedCount(currentServerJob);
     const checked = currentServerJob.progress.current ?? (processed > 0 ? processed : 'running');
     const total = currentServerJob.progress.total ?? (processed > 0 ? processed : '-');
+    const workLabel = currentServerJob.key === 'fix_existing_normalized' ? 'fix' : 'normalized';
+    const workCount = currentServerJob.key === 'fix_existing_normalized'
+      ? currentServerJob.counts.fix
+      : currentServerJob.counts.normalized;
     return [
       { label: 'total', value: total },
       { label: 'checked', value: checked },
       { label: 'ok', value: jobOkCount(currentServerJob), tone: 'ready' },
-      { label: 'fix', value: currentServerJob.counts.fix, tone: 'warning' },
+      { label: workLabel, value: workCount, tone: 'warning' },
+      { label: 'deleted', value: currentServerJob.counts.deletedOriginal, tone: 'warning' },
       { label: 'failed', value: currentServerJob.counts.failed, tone: 'error' },
       { label: 'cpu', value: `${currentServerJob.cpuPercent.toFixed(1)}%` },
     ];
@@ -968,18 +984,19 @@ function isLiveJobSummaryAvailable(job: ServerNormalizationJobStatus): boolean {
 }
 
 function jobProcessedCount(job: ServerNormalizationJobStatus): number {
-  return job.counts.ok
-    + job.counts.noAction
+  const statusCount = job.counts.ok + job.counts.failed + job.counts.other;
+  const actionCount = job.counts.normalized
+    + job.counts.existingValid
+    + job.counts.promotedReady
+    + job.counts.needsNormalize
     + job.counts.fix
-    + job.counts.failed
-    + job.counts.remux
-    + job.counts.audioOnly
-    + job.counts.fullTranscode
-    + job.counts.other;
+    + job.counts.noAction;
+  const decisionCount = job.counts.remux + job.counts.audioOnly + job.counts.fullTranscode;
+  return Math.max(statusCount, actionCount, decisionCount);
 }
 
 function jobOkCount(job: ServerNormalizationJobStatus): number {
-  return job.counts.ok + job.counts.noAction;
+  return job.counts.ok > 0 ? job.counts.ok : job.counts.noAction;
 }
 
 function SummaryCard({ label, value, tone }: SummaryCardMetric) {
@@ -1040,6 +1057,7 @@ function ServerJobPanel({ job }: { job: ServerNormalizationJobStatus }) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Info label="progress" value={progressText} />
         <Info label="ok / failed" value={`${jobOkCount(job)} / ${job.counts.failed}`} />
+        <Info label="normalized / deleted" value={`${job.counts.normalized} / ${job.counts.deletedOriginal}`} />
         <Info label="fix / no action" value={`${job.counts.fix} / ${job.counts.noAction}`} />
         <Info label="cpu" value={`${job.cpuPercent.toFixed(1)}%`} />
         <Info label="pid" value={job.pid ?? '-'} />
@@ -1107,6 +1125,8 @@ function NumberField({
 function phaseLabel(phase: ServerNormalizationStatus['phase']): string {
   if (phase === 'fix_running') return 'fix running';
   if (phase === 'continue_running') return 'continue running';
+  if (phase === 'priority_hajj_running') return 'priority hajj running';
+  if (phase === 'hajj10_source_running') return 'hajj-10 source running';
   if (phase === 'ready_for_continue') return 'ready for continue';
   return 'idle';
 }
