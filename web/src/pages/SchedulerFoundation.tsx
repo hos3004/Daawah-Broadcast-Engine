@@ -1513,10 +1513,10 @@ function ScheduleWizardModal({
                 </div>
               )}
               <div className="overflow-x-auto rounded-md border" style={{ borderColor: 'var(--bg-border)' }}>
-                <table className="w-full text-sm min-w-[2200px]">
+                <table className="w-full text-sm min-w-[2360px]">
                   <thead>
                     <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
-                      {['حذف', 'البرنامج', 'المشكلة', 'المجلد', 'النوع', 'تشغيل', 'المدة', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count'].map(header => (
+                      {['حذف', 'البرنامج', 'المشكلة', 'المجلد', 'أطول ملف', 'النوع', 'تشغيل', 'مدة البث', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count'].map(header => (
                         <th key={header} className="text-right px-3 py-2 font-medium text-xs" style={{ color: 'var(--text-muted)' }}>{header}</th>
                       ))}
                     </tr>
@@ -1587,7 +1587,13 @@ function ScheduleWizardModal({
                             {row.folderRoot ? `${row.folderRoot}/${row.folderHint}` : 'لم يتم تحديد المجلد'}
                           </div>
                           <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-                            أطول حلقة: {formatDurationMs(row.longestDurationMs)} · الملفات: {row.fileCount ?? '-'}
+                            الملفات: {row.fileCount ?? '-'}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 align-top min-w-40">
+                          <div className="font-medium">{formatLongestFileDuration(row.longestDurationMs)}</div>
+                          <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                            {row.longestDurationMs ? 'مدة فعلية من مكتبة الوسائط' : 'غير مفهرسة بعد'}
                           </div>
                         </td>
                         <td className="px-3 py-2 align-top min-w-44">
@@ -2172,7 +2178,7 @@ function createWizardRow(entry: ParsedWizardProgramLine, folders: ProgramFolderO
   const matchedFolder = best && best.score >= 60 ? best.folder : null;
   const longestDurationMs = matchedFolder?.active_longest_file_duration_ms ?? matchedFolder?.longest_file_duration_ms ?? null;
   const fileCount = matchedFolder?.active_file_count ?? matchedFolder?.file_count ?? null;
-  const durationMinutes = entry.durationMinutes || roundDurationMsToMinutes(longestDurationMs) || 30;
+  const durationMinutes = roundDurationMsToMinutes(longestDurationMs) || entry.durationMinutes || 30;
 
   return {
     localId: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
@@ -2374,6 +2380,12 @@ function formatDurationMs(value: number | null | undefined): string {
   const seconds = totalSeconds % 60;
   if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatLongestFileDuration(value: number | null | undefined): string {
+  const minutes = roundDurationMsToMinutes(value);
+  if (!minutes) return 'غير مفهرسة';
+  return `${minutes} دقيقة`;
 }
 
 function todayDateInputValue(): string {
