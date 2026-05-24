@@ -1415,10 +1415,11 @@ function ScheduleWizardModal({
 }) {
   const fieldClass = 'w-full rounded-md border px-2 py-1.5 bg-transparent';
   const fieldStyle = { borderColor: 'var(--bg-border)' };
+  const wizardIssueMap = preview ? buildWizardIssueMap(rows, preview) : new Map<string, WizardRowIssueSummary>();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.72)' }}>
-      <div className="w-full max-w-7xl max-h-[92vh] overflow-hidden rounded-lg" style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2" style={{ background: 'rgba(0,0,0,0.72)' }}>
+      <div className="w-full max-h-[96vh] overflow-hidden rounded-lg" style={{ width: '98vw', maxWidth: 'none', background: 'var(--bg-card)', border: '1px solid var(--bg-border)' }}>
         <div className="flex items-start justify-between gap-4 px-5 py-4" style={{ borderBottom: '1px solid var(--bg-border)' }}>
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1443,7 +1444,7 @@ function ScheduleWizardModal({
           </div>
         </div>
 
-        <div className="p-5 overflow-y-auto max-h-[72vh]">
+        <div className="p-5 overflow-y-auto max-h-[78vh]">
           {step === 1 && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1504,25 +1505,58 @@ function ScheduleWizardModal({
                   إضافة برنامج
                 </button>
               </div>
+              {preview && preview.issues.length > 0 && (
+                <div className="rounded-md border p-3 text-xs" style={{ borderColor: preview.summary.errors > 0 ? 'var(--danger)' : 'var(--warning)', background: preview.summary.errors > 0 ? 'rgba(255,85,85,0.08)' : 'rgba(232,160,32,0.08)' }}>
+                  الصفوف المظللة مأخوذة من آخر معاينة. الأحمر يعني خطأ يمنع الاعتماد، والأصفر تحذير لا يمنع الاعتماد.
+                </div>
+              )}
               <div className="overflow-x-auto rounded-md border" style={{ borderColor: 'var(--bg-border)' }}>
-                <table className="w-full text-sm min-w-[1280px]">
+                <table className="w-full text-sm min-w-[1760px]">
                   <thead>
                     <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
-                      {['البرنامج', 'المجلد', 'النوع', 'تشغيل', 'المدة', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count', ''].map(header => (
+                      {['البرنامج', 'المشكلة', 'المجلد', 'النوع', 'تشغيل', 'المدة', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count', ''].map(header => (
                         <th key={header} className="text-right px-3 py-2 font-medium text-xs" style={{ color: 'var(--text-muted)' }}>{header}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map(row => (
-                      <tr key={row.localId} style={{ borderBottom: '1px solid var(--bg-border)' }}>
-                        <td className="px-3 py-2 align-top min-w-56">
+                    {rows.map(row => {
+                      const rowIssues = wizardIssueMap.get(row.localId);
+                      const issueTone = rowIssues && rowIssues.errors.length > 0 ? 'error' : rowIssues && rowIssues.warnings.length > 0 ? 'warning' : null;
+                      const rowBackground = issueTone === 'error'
+                        ? 'rgba(255,85,85,0.10)'
+                        : issueTone === 'warning'
+                          ? 'rgba(232,160,32,0.10)'
+                          : 'transparent';
+                      return (
+                      <tr key={row.localId} style={{ borderBottom: '1px solid var(--bg-border)', background: rowBackground }}>
+                        <td className="px-3 py-2 align-top min-w-60">
                           <input className={fieldClass} style={fieldStyle} value={row.name} onChange={event => onUpdateRow(row.localId, { name: event.target.value })} />
                           <div className="mt-1">
                             <span className={`badge ${row.matchStatus === 'needs_review' ? 'badge-warning' : 'badge-ready'}`}>
                               {row.matchStatus === 'needs_review' ? 'مراجعة' : `${row.matchConfidence}%`}
                             </span>
                           </div>
+                        </td>
+                        <td className="px-3 py-2 align-top min-w-80 max-w-sm">
+                          {rowIssues && rowIssues.issues.length > 0 ? (
+                            <div className="space-y-1">
+                              {rowIssues.issues.slice(0, 3).map((issue, issueIndex) => (
+                                <div
+                                  key={`${issue.code}-${issueIndex}`}
+                                  className={`rounded-md border px-2 py-1 ${issue.severity === 'error' ? 'badge-error' : 'badge-warning'}`}
+                                  style={{ whiteSpace: 'normal' }}
+                                >
+                                  {preview ? formatCompactWizardIssue(issue, preview) : issue.message}
+                                </div>
+                              ))}
+                              {rowIssues.issues.length > 3 && (
+                                <div style={{ color: 'var(--text-muted)' }}>+{rowIssues.issues.length - 3} ملاحظة أخرى</div>
+                              )}
+                            </div>
+                          ) : (
+                            <span style={{ color: 'var(--text-muted)' }}>-</span>
+                          )}
                         </td>
                         <td className="px-3 py-2 align-top min-w-80">
                           <select className={fieldClass} style={fieldStyle} value={row.folderId} onChange={event => onApplyFolder(row.localId, event.target.value)}>
@@ -1554,16 +1588,16 @@ function ScheduleWizardModal({
                           </select>
                         </td>
                         <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={fieldStyle} type="number" min={1} value={row.durationMinutes} onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })} />
+                          <input className={fieldClass} style={wizardFieldStyle(rowIssues, 'duration_minutes')} type="number" min={1} value={row.durationMinutes} onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })} />
                         </td>
                         <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={fieldStyle} type="time" value={row.startTime} onChange={event => onUpdateRow(row.localId, { startTime: event.target.value })} />
+                          <input className={fieldClass} style={wizardTimeFieldStyle(rowIssues, row.startTime)} type="time" value={row.startTime} onChange={event => onUpdateRow(row.localId, { startTime: event.target.value })} />
                         </td>
                         <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={fieldStyle} type="time" value={row.repeatTime} onChange={event => onUpdateRow(row.localId, { repeatTime: event.target.value })} />
+                          <input className={fieldClass} style={wizardTimeFieldStyle(rowIssues, row.repeatTime)} type="time" value={row.repeatTime} onChange={event => onUpdateRow(row.localId, { repeatTime: event.target.value })} />
                         </td>
                         <td className="px-3 py-2 align-top w-28">
-                          <input className={fieldClass} style={fieldStyle} type="time" value={row.secondRepeatTime} onChange={event => onUpdateRow(row.localId, { secondRepeatTime: event.target.value })} />
+                          <input className={fieldClass} style={wizardTimeFieldStyle(rowIssues, row.secondRepeatTime)} type="time" value={row.secondRepeatTime} onChange={event => onUpdateRow(row.localId, { secondRepeatTime: event.target.value })} />
                         </td>
                         <td className="px-3 py-2 align-top min-w-72">
                           <div className="flex flex-wrap gap-1">
@@ -1593,7 +1627,8 @@ function ScheduleWizardModal({
                           </button>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1685,6 +1720,113 @@ function WizardStepPill({ label, index, active, done, onClick }: { label: string
       {label}
     </button>
   );
+}
+
+interface WizardRowIssueSummary {
+  issues: ExcelIssue[];
+  errors: ExcelIssue[];
+  warnings: ExcelIssue[];
+  fields: Record<string, 'error' | 'warning'>;
+  times: Record<string, 'error' | 'warning'>;
+}
+
+function buildWizardIssueMap(rows: WizardProgramDraft[], preview: ExcelPreview): Map<string, WizardRowIssueSummary> {
+  const result = new Map<string, WizardRowIssueSummary>();
+  const programKeyToLocalId = new Map<string, string>();
+  const programByRow = new Map<number, ProgramRow>();
+  const slotByRow = new Map<number, SlotRow>();
+
+  rows.forEach((row, index) => {
+    result.set(row.localId, createEmptyWizardRowIssueSummary());
+    programKeyToLocalId.set(safeProgramKey(row.name, index), row.localId);
+    const previewProgram = preview.programs[index];
+    if (previewProgram) programKeyToLocalId.set(previewProgram.program_key, row.localId);
+  });
+
+  preview.programs.forEach(program => programByRow.set(program.row, program));
+  preview.slots.forEach(slot => slotByRow.set(slot.row, slot));
+
+  preview.issues.forEach(issue => {
+    let localId = '';
+    let time = '';
+
+    if (issue.sheet === 'Programs' && issue.row) {
+      const program = programByRow.get(issue.row);
+      localId = program ? programKeyToLocalId.get(program.program_key) ?? '' : '';
+    }
+
+    if (issue.sheet === 'Slots' && issue.row) {
+      const slot = slotByRow.get(issue.row);
+      localId = slot ? programKeyToLocalId.get(slot.program_key) ?? '' : '';
+      time = slot?.start_time ?? '';
+    }
+
+    if (!localId) return;
+    const summary = result.get(localId);
+    if (!summary) return;
+
+    summary.issues.push(issue);
+    if (issue.severity === 'error') summary.errors.push(issue);
+    if (issue.severity === 'warning') summary.warnings.push(issue);
+    if (issue.field) {
+      summary.fields[issue.field] = mergeWizardIssueTone(summary.fields[issue.field], issue.severity);
+    }
+    if (time) {
+      summary.times[time] = mergeWizardIssueTone(summary.times[time], issue.severity);
+    }
+  });
+
+  return result;
+}
+
+function createEmptyWizardRowIssueSummary(): WizardRowIssueSummary {
+  return {
+    issues: [],
+    errors: [],
+    warnings: [],
+    fields: {},
+    times: {},
+  };
+}
+
+function mergeWizardIssueTone(current: 'error' | 'warning' | undefined, severity: ExcelIssue['severity']): 'error' | 'warning' {
+  if (current === 'error' || severity === 'error') return 'error';
+  return 'warning';
+}
+
+function wizardFieldStyle(summary: WizardRowIssueSummary | undefined, field: string) {
+  const tone = summary?.fields[field];
+  return wizardInputStyle(tone);
+}
+
+function wizardTimeFieldStyle(summary: WizardRowIssueSummary | undefined, time: string) {
+  const tone = time ? summary?.times[time] : undefined;
+  return wizardInputStyle(tone);
+}
+
+function wizardInputStyle(tone: 'error' | 'warning' | undefined) {
+  if (tone === 'error') {
+    return { borderColor: 'var(--danger)', background: 'rgba(255,85,85,0.10)' };
+  }
+  if (tone === 'warning') {
+    return { borderColor: 'var(--warning)', background: 'rgba(232,160,32,0.10)' };
+  }
+  return { borderColor: 'var(--bg-border)' };
+}
+
+function formatCompactWizardIssue(issue: ExcelIssue, preview: ExcelPreview): string {
+  const label = issue.severity === 'error' ? 'خطأ' : issue.severity === 'warning' ? 'تحذير' : 'معلومة';
+  return `${label} - ${previewIssueLocation(issue, preview)}: ${issue.message}`;
+}
+
+function previewIssueLocation(issue: ExcelIssue, preview: ExcelPreview): string {
+  if (issue.sheet === 'Slots' && issue.row) {
+    const slot = preview.slots.find(row => row.row === issue.row);
+    if (slot) return `موعد ${slot.start_time}`;
+  }
+  if (issue.sheet === 'Programs') return 'بيانات البرنامج';
+  if (issue.field) return issue.field;
+  return issue.sheet;
 }
 
 function PreviewIssueSummary({ preview }: { preview: ExcelPreview }) {
