@@ -1247,10 +1247,11 @@ function rejectForbiddenString(value: string, keyPath: string): void {
   if (normalized.includes('/srv/daawah/media')) {
     const allowedRealMediaRoot =
       normalized.startsWith('/srv/daawah/media/source/') ||
+      normalized.startsWith('/srv/daawah/media/normalized-ar/') ||
       normalized.startsWith('/srv/daawah/media/bumpers/');
     if (!allowedRealMediaRoot) {
       throw new DraftValidationError(
-        'Only /srv/daawah/media/source and /srv/daawah/media/bumpers are allowed for isolated real-media test playout',
+        'Only /srv/daawah/media/source, /srv/daawah/media/normalized-ar, and /srv/daawah/media/bumpers are allowed for isolated real-media test playout',
         'MEDIA_PATH_FORBIDDEN'
       );
     }
