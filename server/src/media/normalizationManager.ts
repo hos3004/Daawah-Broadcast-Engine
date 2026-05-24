@@ -463,10 +463,13 @@ const FIX_NORMALIZED_SCRIPT_PATH = '/tmp/fix_normalized_ar_server.sh';
 const FIX_NORMALIZED_PID_PATH = '/tmp/fix_normalized_ar_server.pid';
 const FIX_NORMALIZED_OUTPUT_PATH = '/tmp/fix_normalized_ar_server.out';
 const CONTINUE_NORMALIZE_SCRIPT_PATH = '/tmp/continue_normalize_ar_server.sh';
+const CONTINUE_NORMALIZE_PYTHON_PATH = '/tmp/continue_normalize_ar_server.py';
 const CONTINUE_NORMALIZE_PID_PATH = '/tmp/continue_normalize_ar_server.pid';
 const CONTINUE_NORMALIZE_OUTPUT_PATH = '/tmp/continue_normalize_ar_server.out';
 const FIX_THROTTLE_PID_PATH = '/tmp/fix_normalized_ar_throttle.pid';
 const FIX_THROTTLE_LOG_PATH = '/tmp/fix_normalized_ar_throttle.out';
+const CONTINUE_THROTTLE_PID_PATH = '/tmp/continue_normalize_ar_throttle.pid';
+const CONTINUE_THROTTLE_LOG_PATH = '/tmp/continue_normalize_ar_throttle.out';
 const NORMALIZATION_NEXT_TASK_SETTING_KEY = 'normalization_next_task_config';
 const DECISIONS: NormalizationDecision[] = ['ok', 'remux', 'audio-only', 'full-transcode', 'failed'];
 const REASONS: NormalizationReason[] = [
@@ -537,12 +540,24 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
     key: 'continue_original_ar',
     label: 'Continue original-ar normalize',
     scriptPath: CONTINUE_NORMALIZE_SCRIPT_PATH,
+    alternateScriptPaths: [CONTINUE_NORMALIZE_PYTHON_PATH],
     pidPath: CONTINUE_NORMALIZE_PID_PATH,
     outputPath: CONTINUE_NORMALIZE_OUTPUT_PATH,
     reportPattern: /^(continue|normalize).*\.csv$/,
   });
-  const throttleProcess = readThrottleProcess();
-  const throttlePid = throttleProcess?.pid ?? readPidFile(FIX_THROTTLE_PID_PATH);
+  const throttlePaths = continueJob.running
+    ? {
+        pidPath: CONTINUE_THROTTLE_PID_PATH,
+        logPath: CONTINUE_THROTTLE_LOG_PATH,
+        scriptPath: '/tmp/throttle_continue_normalize_ar.sh',
+      }
+    : {
+        pidPath: FIX_THROTTLE_PID_PATH,
+        logPath: FIX_THROTTLE_LOG_PATH,
+        scriptPath: '/tmp/throttle_fix_normalized_ar.sh',
+      };
+  const throttleProcess = readThrottleProcess(throttlePaths.scriptPath);
+  const throttlePid = throttleProcess?.pid ?? readPidFile(throttlePaths.pidPath);
   const throttleRunning = (throttlePid !== null && isPidRunning(throttlePid)) || throttleProcess !== null;
   const rawDisk = diskUsage('/srv');
   const freeBytes = Math.max(0, rawDisk.total - rawDisk.used);
@@ -582,11 +597,11 @@ export function getServerNormalizationStatus(): ServerNormalizationStatus {
       freeLabel: formatBytes(freeBytes),
     },
     throttle: {
-      pidPath: FIX_THROTTLE_PID_PATH,
-      logPath: FIX_THROTTLE_LOG_PATH,
+      pidPath: throttlePaths.pidPath,
+      logPath: throttlePaths.logPath,
       pid: throttlePid,
       running: throttleRunning,
-      lastLines: tailLines(FIX_THROTTLE_LOG_PATH, 12),
+      lastLines: tailLines(throttlePaths.logPath, 12),
     },
     fixJob,
     continueJob,
@@ -1772,6 +1787,7 @@ interface ServerNormalizationJobDescriptor {
   key: ServerNormalizationJobStatus['key'];
   label: string;
   scriptPath: string;
+  alternateScriptPaths?: string[];
   pidPath: string;
   outputPath: string;
   reportPattern: RegExp;
@@ -1780,13 +1796,13 @@ interface ServerNormalizationJobDescriptor {
 function readServerNormalizationJob(descriptor: ServerNormalizationJobDescriptor): ServerNormalizationJobStatus {
   let pid = readPidFile(descriptor.pidPath);
   let pgid = pid ? getProcessGroupId(pid) : null;
-  let processes = readProcessesForJob(pgid, pid, descriptor.scriptPath);
+  let processes = readProcessesForJob(pgid, pid, descriptor.scriptPath, descriptor.alternateScriptPaths);
   if (pid === null) {
-    const inferred = inferMainProcess(processes, descriptor.scriptPath);
+    const inferred = inferMainProcess(processes, descriptor.scriptPath, descriptor.alternateScriptPaths);
     if (inferred) {
       pid = inferred.pid;
       pgid = inferred.pgid ?? getProcessGroupId(inferred.pid);
-      processes = readProcessesForJob(pgid, pid, descriptor.scriptPath);
+      processes = readProcessesForJob(pgid, pid, descriptor.scriptPath, descriptor.alternateScriptPaths);
     }
   }
   const running = (pid !== null && isPidRunning(pid)) || processes.length > 0;
@@ -1970,14 +1986,20 @@ function getProcessGroupId(pid: number): number | null {
   }
 }
 
-function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath: string): ServerNormalizationProcessInfo[] {
+function readProcessesForJob(
+  pgid: number | null,
+  pid: number | null,
+  scriptPath: string,
+  alternateScriptPaths: string[] = []
+): ServerNormalizationProcessInfo[] {
   try {
     const output = childProcess.execFileSync('ps', ['-eo', 'pid=,ppid=,pgid=,ni=,pcpu=,stat=,args='], {
       encoding: 'utf8',
       timeout: 3000,
       windowsHide: true,
     });
-    const scriptName = path.basename(scriptPath);
+    const scriptPaths = [scriptPath, ...alternateScriptPaths];
+    const scriptNames = scriptPaths.map(script => path.basename(script));
     const hasProcessGroup = pgid !== null || pid !== null;
     return output
       .split(/\r?\n/)
@@ -1986,8 +2008,9 @@ function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath
       .filter(processInfo => (
         (pgid !== null && processInfo.pgid === pgid)
         || (pid !== null && (processInfo.pid === pid || processInfo.ppid === pid))
-        || processInfo.command.includes(scriptName)
-        || (hasProcessGroup && isLikelyNormalizationFfmpeg(processInfo.command, scriptName))
+        || scriptPaths.some(script => processInfo.command.includes(script))
+        || scriptNames.some(scriptName => processInfo.command.includes(scriptName))
+        || (hasProcessGroup && scriptNames.some(scriptName => isLikelyNormalizationFfmpeg(processInfo.command, scriptName)))
       ))
       .slice(0, 40);
   } catch {
@@ -1997,19 +2020,26 @@ function readProcessesForJob(pgid: number | null, pid: number | null, scriptPath
 
 function inferMainProcess(
   processes: ServerNormalizationProcessInfo[],
-  scriptPath: string
+  scriptPath: string,
+  alternateScriptPaths: string[] = []
 ): ServerNormalizationProcessInfo | null {
-  const scriptName = path.basename(scriptPath);
+  const scriptPaths = [scriptPath, ...alternateScriptPaths];
+  const scriptNames = scriptPaths.map(script => path.basename(script));
   return processes.find(processInfo => (
-    processInfo.command.includes(scriptPath)
-    || processInfo.command.includes(scriptName)
+    scriptPaths.some(script => processInfo.command.includes(script))
+    || scriptNames.some(scriptName => processInfo.command.includes(scriptName))
   )) ?? null;
 }
 
-function readThrottleProcess(): ServerNormalizationProcessInfo | null {
-  const processes = readProcessesForJob(null, null, '/tmp/throttle_fix_normalized_ar.sh');
-  return processes.find(processInfo => /\bbash\s+\/tmp\/throttle_fix_normalized_ar\.sh\b/.test(processInfo.command))
-    ?? inferMainProcess(processes, '/tmp/throttle_fix_normalized_ar.sh');
+function readThrottleProcess(scriptPath: string): ServerNormalizationProcessInfo | null {
+  const processes = readProcessesForJob(null, null, scriptPath);
+  const directWatcher = new RegExp(`\\bbash\\s+${escapeRegExp(scriptPath)}\\b`);
+  return processes.find(processInfo => directWatcher.test(processInfo.command))
+    ?? inferMainProcess(processes, scriptPath);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function isLikelyNormalizationFfmpeg(command: string, scriptName: string): boolean {
