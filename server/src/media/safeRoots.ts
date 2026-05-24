@@ -34,6 +34,13 @@ export const DEFAULT_MEDIA_ROOTS: MediaRootDefinition[] = [
     is_original_library: false,
   },
   {
+    id: 'root-normalized-ar',
+    root_key: 'normalized-ar',
+    absolute_path: '/srv/daawah/media/normalized-ar',
+    is_readonly: false,
+    is_original_library: false,
+  },
+  {
     id: 'root-bumpers',
     root_key: 'bumpers',
     absolute_path: '/srv/daawah/media/bumpers',
