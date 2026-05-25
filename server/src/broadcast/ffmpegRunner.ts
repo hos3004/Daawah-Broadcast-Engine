@@ -20,6 +20,8 @@ interface BroadcastState {
   startedAt: string | null;
   currentItem: PlaylistItem | null;
   nextItem: PlaylistItem | null;
+  playlistArtifactRunId: string | null;
+  artifactItems: PlaylistItem[] | null;
   restartCount: number;
   lastError: string | null;
   isEmergency: boolean;
@@ -32,6 +34,8 @@ const state: BroadcastState = {
   startedAt: null,
   currentItem: null,
   nextItem: null,
+  playlistArtifactRunId: null,
+  artifactItems: null,
   restartCount: 0,
   lastError: null,
   isEmergency: false,
@@ -45,6 +49,14 @@ let restartTimeout: NodeJS.Timeout | null = null;
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_DELAY_MS = 5000;
 const RESTART_BACKOFF_MULTIPLIER = 1.5;
+
+interface PreparedArtifactBroadcast {
+  runId: string;
+  items: PlaylistItem[];
+  current: PlaylistItem | null;
+  next: PlaylistItem | null;
+  command: { args: string[] };
+}
 
 export function getBroadcastState(): BroadcastState {
   return { ...state };
@@ -72,11 +84,42 @@ export async function startBroadcast(emergency = false): Promise<void> {
   }
 
   state.isEmergency = emergency;
+  state.playlistArtifactRunId = null;
+  state.artifactItems = null;
   state.status = 'starting';
   state.restartCount = 0;
   emitStatus();
 
   await launchFfmpeg(emergency);
+}
+
+export async function startPlaylistArtifactBroadcast(playlistRunId: string): Promise<void> {
+  if (state.status === 'running' || state.status === 'starting') {
+    throw new Error('Broadcast already running');
+  }
+
+  const prepared = preparePlaylistArtifactBroadcast(playlistRunId);
+
+  const emergencyCheck = checkEmergencyReadiness();
+  if (!emergencyCheck.ok) {
+    const msg = emergencyCheck.dbCount === 0
+      ? 'Preflight failed: no emergency media in DB (run a media scan first)'
+      : `Preflight failed: ${emergencyCheck.missingPaths.length} emergency file(s) in DB are missing from disk — rescan needed`;
+    logger.error(msg);
+    state.status = 'error';
+    state.lastError = msg;
+    emitStatus();
+    throw new Error(msg);
+  }
+
+  state.isEmergency = false;
+  state.playlistArtifactRunId = prepared.runId;
+  state.artifactItems = prepared.items;
+  state.status = 'starting';
+  state.restartCount = 0;
+  emitStatus();
+
+  await launchFfmpeg(false, prepared);
 }
 
 export async function stopBroadcast(reason = 'manual'): Promise<void> {
@@ -113,6 +156,8 @@ export async function stopBroadcast(reason = 'manual'): Promise<void> {
   state.runId = null;
   state.currentItem = null;
   state.nextItem = null;
+  state.playlistArtifactRunId = null;
+  state.artifactItems = null;
   emitStatus();
 
   logger.info(`Broadcast stopped: ${reason}`);
@@ -172,13 +217,27 @@ function cleanHlsOutput(): void {
   }
 }
 
-async function launchFfmpeg(emergency: boolean): Promise<void> {
+async function launchFfmpeg(emergency: boolean, preparedArtifact?: PreparedArtifactBroadcast): Promise<void> {
   const date = dayjs().format('YYYY-MM-DD');
-  const { current, next } = getCurrentAndNext(date);
+  let current: PlaylistItem | null = null;
+  let next: PlaylistItem | null = null;
+  let cmd: { args: string[] } | null = null;
 
-  const cmd = emergency
-    ? buildEmergencyCommand()
-    : buildBroadcastCommand(date, current);
+  if (!emergency && (preparedArtifact || state.playlistArtifactRunId)) {
+    const prepared = preparedArtifact ?? preparePlaylistArtifactBroadcast(state.playlistArtifactRunId!);
+    state.playlistArtifactRunId = prepared.runId;
+    state.artifactItems = prepared.items;
+    current = prepared.current;
+    next = prepared.next;
+    cmd = prepared.command;
+  } else {
+    const live = getCurrentAndNext(date);
+    current = live.current;
+    next = live.next;
+    cmd = emergency
+      ? buildEmergencyCommand()
+      : buildBroadcastCommand(date, current);
+  }
 
   if (!cmd) {
     logger.error('Could not build FFmpeg command — no media available');
@@ -306,8 +365,12 @@ function buildBroadcastCommand(date: string, current: PlaylistItem | null): { ar
     return buildEmergencyCommand();
   }
 
+  return buildBroadcastCommandFromItems(playlist.items, current, date);
+}
+
+function buildBroadcastCommandFromItems(items: PlaylistItem[], current: PlaylistItem | null, date: string): { args: string[] } | null {
   const now = Date.now();
-  const remaining = playlist.items.filter(i => i.end_time_ms > now);
+  const remaining = items.filter(i => i.end_time_ms > now);
 
   if (remaining.length === 0) {
     return buildEmergencyCommand();
@@ -498,6 +561,22 @@ function formatSeconds(ms: number): string {
 }
 
 function updateCurrentItem(): void {
+  if (state.playlistArtifactRunId && state.artifactItems) {
+    const now = Date.now();
+    const current = state.artifactItems.find(item => item.start_time_ms <= now && item.end_time_ms > now) ?? null;
+    const next = state.artifactItems.find(item => item.start_time_ms > now) ?? null;
+    const changed = current?.id !== state.currentItem?.id;
+
+    state.currentItem = current;
+    state.nextItem = next;
+
+    if (changed) {
+      emitStatus();
+      broadcastWs({ type: 'now_playing', data: { current, next } });
+    }
+    return;
+  }
+
   const date = dayjs().format('YYYY-MM-DD');
   const { current, next } = getCurrentAndNext(date);
   const changed = current?.id !== state.currentItem?.id;
@@ -509,6 +588,134 @@ function updateCurrentItem(): void {
     emitStatus();
     broadcastWs({ type: 'now_playing', data: { current, next } });
   }
+}
+
+function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadcast {
+  const safeRunId = sanitizePlaylistRunId(runId);
+  const playlistRoot = path.join(getProjectRoot(), 'generated', 'playlists');
+  const runDir = path.join(playlistRoot, safeRunId);
+  const playlistPath = path.join(runDir, 'playlist.json');
+  const reportPath = path.join(runDir, 'report.json');
+
+  if (!path.resolve(runDir).startsWith(`${path.resolve(playlistRoot)}${path.sep}`)) {
+    throw new Error('Unsafe playlist run id');
+  }
+  if (!fs.existsSync(playlistPath)) {
+    throw new Error(`Prepared playlist not found: ${safeRunId}`);
+  }
+
+  if (fs.existsSync(reportPath)) {
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as {
+      summary?: {
+        status?: string;
+        testPlayoutEligible?: boolean;
+        missingMediaFileCount?: number;
+        itemCount?: number;
+      };
+      errors?: Array<{ code?: string; message?: string }>;
+    };
+    const summary = report.summary;
+    if (summary?.status && summary.status !== 'completed') {
+      throw new Error(`Prepared playlist is not playable: ${summary.missingMediaFileCount ?? 0} media items are missing.`);
+    }
+    if (summary?.testPlayoutEligible === false) {
+      throw new Error('Prepared playlist is not eligible for playout. Review materialization errors first.');
+    }
+    if (report.errors && report.errors.length > 0) {
+      throw new Error(report.errors[0]?.message ?? 'Prepared playlist has errors.');
+    }
+  }
+
+  const artifact = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as {
+    items?: Array<{
+      id?: string;
+      type?: string;
+      sourceRole?: string;
+      mediaFileId?: string | null;
+      absolutePath?: string | null;
+      title?: string;
+      durationSeconds?: number;
+      timelineStartSeconds?: number;
+      timelineEndSeconds?: number;
+      isTrimmed?: boolean;
+      trimEndSeconds?: number | null;
+    }>;
+  };
+
+  const baseMs = Date.now();
+  const items: PlaylistItem[] = [];
+  let cursorMs = baseMs;
+  let skipped = 0;
+
+  for (const [index, item] of (artifact.items ?? []).entries()) {
+    const mediaPath = item.absolutePath;
+    if (!mediaPath || !fs.existsSync(mediaPath)) {
+      skipped++;
+      continue;
+    }
+
+    const durationMs = Math.max(
+      1000,
+      Math.round(
+        (typeof item.durationSeconds === 'number' && item.durationSeconds > 0
+          ? item.durationSeconds
+          : Math.max(1, (item.timelineEndSeconds ?? 0) - (item.timelineStartSeconds ?? 0))) * 1000
+      )
+    );
+    const startMs = cursorMs;
+    const endMs = startMs + durationMs;
+    cursorMs = endMs;
+
+    items.push({
+      id: item.id ?? `${safeRunId}-${index}`,
+      position: index,
+      start_time_ms: startMs,
+      end_time_ms: endMs,
+      type: item.type ?? 'program',
+      program_id: null,
+      media_file_id: item.mediaFileId ?? item.id ?? `${safeRunId}-${index}`,
+      media_path: mediaPath,
+      title: item.title ?? path.basename(mediaPath),
+      title_ar: item.title ?? null,
+      duration_ms: durationMs,
+      show_lower_third: false,
+      lower_third_path: null,
+      is_emergency: false,
+      source_role: (item.sourceRole as PlaylistItem['source_role']) ?? 'program',
+      is_trimmed: item.isTrimmed === true,
+      trim_out_ms: item.isTrimmed === true ? durationMs : null,
+      forced_duration_ms: item.isTrimmed === true ? durationMs : null,
+    });
+  }
+
+  if (items.length === 0) {
+    throw new Error(`Prepared playlist has no playable media files${skipped > 0 ? ` (${skipped} missing)` : ''}.`);
+  }
+
+  const current = items[0] ?? null;
+  const next = items[1] ?? null;
+  const command = buildBroadcastCommandFromItems(items, current, dayjs().format('YYYY-MM-DD'));
+  if (!command) {
+    throw new Error('Could not build FFmpeg command for prepared playlist.');
+  }
+
+  return { runId: safeRunId, items, current, next, command };
+}
+
+function sanitizePlaylistRunId(runId: string): string {
+  const safe = runId.trim();
+  if (!/^[a-zA-Z0-9._-]+$/.test(safe) || safe.includes('..')) {
+    throw new Error('Invalid playlist run id');
+  }
+  return safe;
+}
+
+function getProjectRoot(): string {
+  return path.resolve(
+    process.env['PLAYLIST_MATERIALIZATION_PROJECT_ROOT'] ??
+    process.env['TEST_PLAYOUT_PROJECT_ROOT'] ??
+    path.resolve(__dirname, '../../..')
+  );
 }
 
 function emitStatus(): void {

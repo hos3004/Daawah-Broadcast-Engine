@@ -82,6 +82,7 @@ import {
   type TestPlayoutPlanInput,
   type TestPlayoutRunInput,
 } from '../../playout/testPlayout';
+import { getBroadcastState, startPlaylistArtifactBroadcast } from '../../broadcast/ffmpegRunner';
 import {
   previewExcelImport,
   previewExcelImportFromXlsx,
@@ -611,6 +612,30 @@ schedulerFoundationRouter.get(
       mode: 'playlist-materialization-run',
       run,
     });
+  }
+);
+
+schedulerFoundationRouter.post(
+  '/playlist-materialization/runs/:id/start-hls',
+  requireRole('admin', 'operator'),
+  async (req: Request, res: Response): Promise<void> => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Playlist materialization run id is required', code: 'MATERIALIZATION_RUN_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      await startPlaylistArtifactBroadcast(id);
+      res.json({
+        mode: 'playlist-materialization-hls-started',
+        runId: id,
+        status: getBroadcastState(),
+        hlsUrl: '/hls/stream.m3u8',
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
   }
 );
 

@@ -10,6 +10,9 @@ import {
   FileSpreadsheet,
   FolderSearch,
   ListChecks,
+  Play,
+  Radio,
+  RefreshCw,
   Save,
   ShieldCheck,
   Upload,
@@ -267,6 +270,8 @@ interface MaterializationRun {
     originalSafeFallbackCount: number;
     missingNormalizedCount: number;
     originalNotNormalizedCount: number;
+    missingMediaFileCount?: number;
+    testPlayoutEligible?: boolean;
     concatRiskCount: number;
     safety: {
       cursorMutation: false;
@@ -363,6 +368,9 @@ export default function SchedulerFoundationPage() {
   const [materializationMessage, setMaterializationMessage] = useState('');
   const [materializationError, setMaterializationError] = useState('');
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [quickBroadcastStarting, setQuickBroadcastStarting] = useState(false);
+  const [quickBroadcastMessage, setQuickBroadcastMessage] = useState('');
+  const [quickBroadcastError, setQuickBroadcastError] = useState('');
   const [testPlayoutPlans, setTestPlayoutPlans] = useState<TestPlayoutPlan[]>([]);
   const [testPlayoutLoading, setTestPlayoutLoading] = useState(false);
   const [testPlayoutPreparing, setTestPlayoutPreparing] = useState(false);
@@ -396,6 +404,15 @@ export default function SchedulerFoundationPage() {
   const canApproveSchedule = Boolean(hasScheduleSource && preview && preview.summary.errors === 0 && !approvedSchedule);
   const canActivateApprovedSchedule = Boolean(approvedSchedule && !approvedSchedule.isActive && !activeSchedule);
   const issueGroups = useMemo(() => groupIssues(preview?.issues ?? []), [preview]);
+  const activeMaterializationRuns = useMemo(
+    () => activeSchedule
+      ? materializationRuns.filter(run => run.publishedScheduleId === activeSchedule.id)
+      : [],
+    [activeSchedule, materializationRuns]
+  );
+  const latestActiveMaterializationRun = activeMaterializationRuns[0] ?? null;
+  const readyActiveMaterializationRun = activeMaterializationRuns.find(isPlayableMaterializationRun) ?? null;
+  const quickBroadcastCanStart = Boolean(activeSchedule && !quickBroadcastStarting);
 
   useEffect(() => {
     void loadActiveSchedule();
@@ -770,6 +787,43 @@ export default function SchedulerFoundationPage() {
     }
   };
 
+  const startQuickBroadcast = async () => {
+    if (!activeSchedule || quickBroadcastStarting) return;
+
+    setQuickBroadcastStarting(true);
+    setQuickBroadcastMessage('');
+    setQuickBroadcastError('');
+    setMaterializationError('');
+    setMaterializationMessage('');
+
+    try {
+      let run = readyActiveMaterializationRun;
+      if (!run) {
+        const response = await schedulerFoundationApi.createPlaylistMaterializationDryRun({
+          confirmDryRun: true,
+          publishedScheduleId: activeSchedule.id,
+        });
+        run = (response.data as { run: MaterializationRun }).run;
+        await loadMaterializationRuns();
+      }
+
+      if (!isPlayableMaterializationRun(run)) {
+        throw new Error(describeMaterializationRunProblem(run));
+      }
+
+      const response = await schedulerFoundationApi.startMaterializationRunHls(run.id);
+      const body = response.data as { hlsUrl?: string };
+      const hlsUrl = body.hlsUrl ?? '/hls/stream.m3u8';
+      setQuickBroadcastMessage(`تم تشغيل البث. رابط المشاهدة: ${window.location.origin}${hlsUrl}`);
+      setExpandedRunId(run.id);
+      await Promise.all([loadMaterializationRuns(), loadTestPlayoutPlans()]);
+    } catch (err) {
+      setQuickBroadcastError(describeQuickBroadcastError(err));
+    } finally {
+      setQuickBroadcastStarting(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       {wizardOpen && (
@@ -897,6 +951,53 @@ export default function SchedulerFoundationPage() {
         )}
       </section>
 
+      <section className="card">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Radio size={18} style={{ color: 'var(--accent)' }} />
+              <h3 className="font-semibold">تشغيل البث</h3>
+              <span className={activeSchedule ? 'badge badge-ready' : 'badge badge-warning'}>
+                {activeSchedule ? 'جدول مفعل' : 'لا يوجد جدول مفعل'}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Info label="الجدول" value={activeSchedule?.name ?? 'فعّل جدولًا أولًا'} />
+              <Info label="ملف التشغيل" value={readyActiveMaterializationRun ? readyActiveMaterializationRun.id : latestActiveMaterializationRun ? `${latestActiveMaterializationRun.id} (${latestActiveMaterializationRun.status})` : 'سيتم تجهيزه تلقائيًا'} />
+              <Info label="HLS" value="/hls/stream.m3u8" />
+            </div>
+            {latestActiveMaterializationRun && !isPlayableMaterializationRun(latestActiveMaterializationRun) && (
+              <p className="text-xs" style={{ color: 'var(--danger)' }}>
+                آخر تجهيز غير قابل للتشغيل: {describeMaterializationRunProblem(latestActiveMaterializationRun)}
+              </p>
+            )}
+            {quickBroadcastMessage && <p className="text-xs" style={{ color: 'var(--success)' }}>{quickBroadcastMessage}</p>}
+            {quickBroadcastError && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--danger)' }}>{quickBroadcastError}</p>}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="btn-ghost flex items-center gap-2 text-sm"
+              disabled={materializationLoading}
+              onClick={() => {
+                void loadActiveSchedule();
+                void loadMaterializationRuns();
+              }}
+            >
+              <RefreshCw size={14} />
+              تحديث
+            </button>
+            <button
+              className="btn-primary flex items-center gap-2 text-sm"
+              disabled={!quickBroadcastCanStart}
+              onClick={() => void startQuickBroadcast()}
+            >
+              <Play size={14} />
+              {quickBroadcastStarting ? 'جاري التشغيل...' : readyActiveMaterializationRun ? 'تشغيل الآن' : 'تجهيز وتشغيل'}
+            </button>
+          </div>
+        </div>
+      </section>
+
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <SummaryCard label="عدد البرامج" value={summary?.programCount ?? 0} />
         <SummaryCard label="البرامج المطابقة" value={summary?.matchedPrograms ?? 0} tone="ready" />
@@ -966,54 +1067,56 @@ export default function SchedulerFoundationPage() {
         </div>
       </section>
 
-      <section className="card">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <ShieldCheck size={18} style={{ color: 'var(--accent)' }} />
-              <h3 className="font-semibold">تجهيز ملفات التشغيل</h3>
-              <span className="badge badge-info">ملفات مراجعة</span>
-              <span className="badge badge-info">بدون بث مباشر</span>
-              <span className="badge badge-info">لا يغير ملفات الفيديو</span>
+      <details className="rounded-md border p-4" style={{ borderColor: 'var(--bg-border)' }}>
+        <summary className="cursor-pointer text-sm font-semibold">خيارات متقدمة ومراجعة تفصيلية</summary>
+        <div className="space-y-5 mt-4">
+          <section className="rounded-md border p-4" style={{ borderColor: 'var(--bg-border)' }}>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <ShieldCheck size={18} style={{ color: 'var(--accent)' }} />
+                  <h3 className="font-semibold">تجهيز ملفات التشغيل</h3>
+                  <span className="badge badge-info">ملفات مراجعة</span>
+                  <span className="badge badge-info">بدون بث مباشر</span>
+                  <span className="badge badge-info">لا يغير ملفات الفيديو</span>
+                </div>
+                <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+                  يجهز ملفات playlist داخل generated/playlists حتى تستخدمها في تجربة البث أو المراجعة.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
+                  <Info label="active schedule" value={activeSchedule?.name ?? 'No active schedule'} />
+                  <Info label="date range" value={activeSchedule ? `${activeSchedule.scheduleStartDate} to ${activeSchedule.scheduleEndDate}` : '-'} />
+                  <Info label="timezone" value={activeSchedule?.timezone ?? '-'} />
+                  <Info label="slots" value={activeSchedule?.slotCount ?? 0} />
+                </div>
+                {materializationMessage && <p className="text-xs mt-3" style={{ color: 'var(--success)' }}>{materializationMessage}</p>}
+                {materializationError && <p className="text-xs mt-3" style={{ color: 'var(--danger)' }}>{materializationError}</p>}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className="btn-ghost flex items-center gap-2 text-sm"
+                  disabled={materializationLoading}
+                  onClick={() => {
+                    void loadActiveSchedule();
+                    void loadMaterializationRuns();
+                  }}
+                >
+                  <ListChecks size={14} />
+                  {materializationLoading ? 'جاري التحديث...' : 'تحديث الحالة'}
+                </button>
+                <button
+                  className="btn-primary flex items-center gap-2 text-sm"
+                  disabled={!activeSchedule || materializing}
+                  onClick={() => void runMaterializationDryRun()}
+                >
+                  <CheckCircle2 size={14} />
+                  {materializing ? 'جاري التجهيز...' : 'تجهيز ملفات التشغيل'}
+                </button>
+              </div>
             </div>
-            <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
-              يجهز ملفات playlist داخل generated/playlists حتى تستخدمها في تجربة البث أو المراجعة.
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
-              <Info label="active schedule" value={activeSchedule?.name ?? 'No active schedule'} />
-              <Info label="date range" value={activeSchedule ? `${activeSchedule.scheduleStartDate} to ${activeSchedule.scheduleEndDate}` : '-'} />
-              <Info label="timezone" value={activeSchedule?.timezone ?? '-'} />
-              <Info label="slots" value={activeSchedule?.slotCount ?? 0} />
-            </div>
-            {materializationMessage && <p className="text-xs mt-3" style={{ color: 'var(--success)' }}>{materializationMessage}</p>}
-            {materializationError && <p className="text-xs mt-3" style={{ color: 'var(--danger)' }}>{materializationError}</p>}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              className="btn-ghost flex items-center gap-2 text-sm"
-              disabled={materializationLoading}
-              onClick={() => {
-                void loadActiveSchedule();
-                void loadMaterializationRuns();
-              }}
-            >
-              <ListChecks size={14} />
-              {materializationLoading ? 'جاري التحديث...' : 'تحديث الحالة'}
-            </button>
-            <button
-              className="btn-primary flex items-center gap-2 text-sm"
-              disabled={!activeSchedule || materializing}
-              onClick={() => void runMaterializationDryRun()}
-            >
-              <CheckCircle2 size={14} />
-              {materializing ? 'جاري التجهيز...' : 'تجهيز ملفات التشغيل'}
-            </button>
-          </div>
-        </div>
+          </section>
 
-      </section>
-
-      <section className="space-y-3">
+          <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <h3 className="font-semibold">ملفات التشغيل المجهزة</h3>
           <span className="badge badge-info">generated/playlists</span>
@@ -1075,9 +1178,9 @@ export default function SchedulerFoundationPage() {
             )
           ))}
         </div>
-      </section>
+          </section>
 
-      <section className="space-y-3">
+          <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <h3 className="font-semibold">تجربة البث</h3>
           <span className="badge badge-warning">تحضير تجربة محلية فقط</span>
@@ -1190,7 +1293,9 @@ export default function SchedulerFoundationPage() {
             </div>
           )
         ))}
-      </section>
+          </section>
+        </div>
+      </details>
 
       {(drafts.length > 0 || draftsLoading) && (
         <section className="space-y-3">
@@ -2441,6 +2546,32 @@ function todayDateInputValue(): string {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function isPlayableMaterializationRun(run: MaterializationRun): boolean {
+  return run.status === 'completed' &&
+    run.errors.length === 0 &&
+    run.summary.itemCount > 0 &&
+    (run.summary.missingMediaFileCount ?? 0) === 0 &&
+    run.summary.testPlayoutEligible !== false;
+}
+
+function describeMaterializationRunProblem(run: MaterializationRun): string {
+  if (run.errors[0]?.message) return run.errors[0].message;
+  if (run.summary.missingMediaFileCount && run.summary.missingMediaFileCount > 0) {
+    return `${run.summary.missingMediaFileCount} ملف وسائط غير مربوط داخل الخطة. راجع مطابقة البرامج مع normalized-ar.`;
+  }
+  if (run.summary.testPlayoutEligible === false) return 'ملف التشغيل غير صالح للتشغيل بعد. راجع تفاصيل التجهيز.';
+  if (run.status === 'failed') return 'تجهيز ملفات التشغيل فشل. راجع تفاصيل التجهيز.';
+  return 'ملف التشغيل غير جاهز بعد.';
+}
+
+function describeQuickBroadcastError(err: unknown): string {
+  const response = isRecord(err) && isRecord(err['response']) ? err['response'] : null;
+  const data = response && isRecord(response['data']) ? response['data'] : null;
+  const serverMessage = data ? (textValue(data['error']) || textValue(data['message'])) : '';
+  if (serverMessage) return serverMessage;
+  return err instanceof Error ? err.message : String(err);
 }
 
 function describeWizardPreviewError(err: unknown): string {

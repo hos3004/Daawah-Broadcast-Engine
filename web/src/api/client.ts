@@ -135,6 +135,8 @@ export const schedulerFoundationApi = {
   }) => api.post('/scheduler-foundation/playlist-materialization/dry-run', payload),
   listPlaylistMaterializationRuns: () => api.get('/scheduler-foundation/playlist-materialization/runs'),
   getPlaylistMaterializationRun: (id: string) => api.get(`/scheduler-foundation/playlist-materialization/runs/${id}`),
+  startMaterializationRunHls: (id: string) =>
+    api.post(`/scheduler-foundation/playlist-materialization/runs/${id}/start-hls`),
   createTestPlayoutPlan: (payload: {
     confirmPrepareOnly: boolean;
     sourcePlaylistPath: string;
