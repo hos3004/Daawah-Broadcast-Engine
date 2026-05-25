@@ -10,6 +10,7 @@ import { getDb } from '../db/schema';
 import { getPlaylistForDate, getCurrentAndNext, type PlaylistItem } from '../playlist/builder';
 import { checkEmergencyReadiness } from '../media/scanner';
 import { broadcastWs } from '../ws';
+import { buildAudioNormAf } from '../media/normalizer';
 
 export type BroadcastStatus = 'idle' | 'starting' | 'running' | 'stopping' | 'error' | 'emergency';
 
@@ -427,7 +428,7 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
     '-re', '-f', 'concat', '-safe', '0', '-i', concatListPath,
   ];
 
-  let filterComplex = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},settb=1/${config.broadcast.fps}[base]`;
+  let filterComplex = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},setpts=N/(${config.broadcast.fps}*TB),settb=1/${config.broadcast.fps}[base]`;
   let lastLabel = '[base]';
   let inputIdx = 1;
 
@@ -462,6 +463,11 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
     '-filter_complex', filterComplex,
     '-map', '[vout]',
     '-map', '0:a?',
+    // Normalise audio timestamps so audio never drifts ahead of video.
+    // Source bumpers/episodes often have audio tails (audio longer than video)
+    // or non-zero start_pts; without this the audio PTS accumulates a large
+    // positive offset relative to video (observed: 13+ s ahead after 5 min).
+    '-af', buildAudioNormAf({ audioRate: config.broadcast.audioRate }),
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-tune', 'zerolatency',
@@ -516,10 +522,11 @@ function buildEmergencyCommand(): { args: string[] } | null {
       '-y',
       '-stream_loop', '-1',
       '-re', '-f', 'concat', '-safe', '0', '-i', concatPath,
-      '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},settb=1/${config.broadcast.fps}`,
+      '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},setpts=N/(${config.broadcast.fps}*TB),settb=1/${config.broadcast.fps}`,
       '-c:v', 'libx264', '-preset', 'veryfast',
       '-b:v', config.broadcast.videoBitrate,
       '-pix_fmt', 'yuv420p',
+      '-af', buildAudioNormAf({ audioRate: config.broadcast.audioRate }),
       '-c:a', 'aac', '-b:a', config.broadcast.audioBitrate,
       '-ar', String(config.broadcast.audioRate), '-ac', '2',
       '-f', 'hls',
@@ -533,17 +540,25 @@ function buildEmergencyCommand(): { args: string[] } | null {
 }
 
 export function buildConcatFileContents(items: PlaylistItem[]): string {
-  const hasTrimmedItems = items.some(item => getTrimDurationMs(item) !== null);
-  const lines: string[] = hasTrimmedItems ? ['ffconcat version 1.0'] : [];
+  // Always write the ffconcat header so we can always include duration lines.
+  // duration lines are critical: without them the concat demuxer reads audio
+  // tails (audio longer than video in source MP4s) which accumulates a large
+  // positive audio PTS offset relative to video over many clips.
+  const lines: string[] = ['ffconcat version 1.0'];
 
   for (const item of items) {
     lines.push(formatConcatFileLine(item.media_path));
 
     const trimDurationMs = getTrimDurationMs(item);
     if (trimDurationMs !== null) {
+      // Trimmed clip: use outpoint+duration to crop to the trimmed length
       const seconds = formatSeconds(trimDurationMs);
       lines.push(`outpoint ${seconds}`);
       lines.push(`duration ${seconds}`);
+    } else if (item.duration_ms != null && item.duration_ms > 0) {
+      // Non-trimmed clip: still emit duration so audio tails are clamped to
+      // the file's declared video duration, preventing inter-file A/V drift.
+      lines.push(`duration ${formatSeconds(item.duration_ms)}`);
     }
   }
 
