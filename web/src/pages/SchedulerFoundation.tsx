@@ -13,7 +13,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { mediaApi, schedulerFoundationApi } from '../api/client';
+import { broadcastApi, mediaApi, schedulerFoundationApi } from '../api/client';
 
 interface ExcelIssue {
   severity: 'error' | 'warning' | 'info';
@@ -247,6 +247,11 @@ interface ActiveScheduleStatus {
   slotCount: number;
 }
 
+interface BroadcastStatus {
+  status?: 'idle' | 'starting' | 'running' | 'stopping' | 'error' | 'emergency';
+  lastError?: string | null;
+}
+
 interface MaterializationRun {
   id: string;
   publishedScheduleId: string;
@@ -318,6 +323,8 @@ export default function SchedulerFoundationPage() {
   const [materializationRuns, setMaterializationRuns] = useState<MaterializationRun[]>([]);
   const [materializationLoading, setMaterializationLoading] = useState(false);
   const [startingPublishedScheduleId, setStartingPublishedScheduleId] = useState<string | null>(null);
+  const [broadcastStatus, setBroadcastStatus] = useState<BroadcastStatus | null>(null);
+  const [stoppingBroadcast, setStoppingBroadcast] = useState(false);
   const [quickBroadcastMessage, setQuickBroadcastMessage] = useState('');
   const [quickBroadcastError, setQuickBroadcastError] = useState('');
   const [approvedSchedule, setApprovedSchedule] = useState<PublishedListItem | null>(null);
@@ -346,6 +353,7 @@ export default function SchedulerFoundationPage() {
     void loadDrafts();
     void loadPublishedSchedules();
     void loadMaterializationRuns();
+    void loadBroadcastStatus();
   }, []);
 
   const loadWizardFolders = async (force = false): Promise<ProgramFolderOption[]> => {
@@ -580,6 +588,15 @@ export default function SchedulerFoundationPage() {
     }
   };
 
+  const loadBroadcastStatus = async () => {
+    try {
+      const response = await broadcastApi.status();
+      setBroadcastStatus(response.data as BroadcastStatus);
+    } catch {
+      setBroadcastStatus(null);
+    }
+  };
+
   const editDraftInWizard = async (draftId: string) => {
     if (editingDraftId) return;
     setEditingDraftId(draftId);
@@ -668,11 +685,30 @@ export default function SchedulerFoundationPage() {
       const body = response.data as { hlsUrl?: string };
       const hlsUrl = body.hlsUrl ?? '/hls/stream.m3u8';
       setQuickBroadcastMessage(`تم تشغيل البث. رابط المشاهدة: ${window.location.origin}${hlsUrl}`);
-      await Promise.all([loadActiveSchedule(), loadPublishedSchedules(), loadMaterializationRuns()]);
+      await Promise.all([loadActiveSchedule(), loadPublishedSchedules(), loadMaterializationRuns(), loadBroadcastStatus()]);
     } catch (err) {
       setQuickBroadcastError(describeQuickBroadcastError(err));
     } finally {
       setStartingPublishedScheduleId(null);
+    }
+  };
+
+  const stopLiveBroadcast = async () => {
+    if (stoppingBroadcast) return;
+    const confirmed = window.confirm('إيقاف البث المباشر الآن؟');
+    if (!confirmed) return;
+
+    setStoppingBroadcast(true);
+    setQuickBroadcastMessage('');
+    setQuickBroadcastError('');
+    try {
+      await broadcastApi.stop();
+      setQuickBroadcastMessage('تم إيقاف البث المباشر.');
+      await loadBroadcastStatus();
+    } catch (err) {
+      setQuickBroadcastError(describeQuickBroadcastError(err));
+    } finally {
+      setStoppingBroadcast(false);
     }
   };
 
@@ -787,12 +823,23 @@ export default function SchedulerFoundationPage() {
               <Radio size={18} style={{ color: 'var(--accent)' }} />
               <h3 className="font-semibold">3. البث المباشر</h3>
               {activeSchedule && <span className="badge badge-ready">النشط الآن: {activeSchedule.name}</span>}
+              {broadcastStatus?.status && <span className="badge badge-info">حالة البث: {broadcastStatusLabel(broadcastStatus.status)}</span>}
             </div>
             <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
               الجداول المعتمدة مرتبة من الأحدث إلى الأقدم. زر التشغيل يفعّل الجدول ويجهز ملف التشغيل ثم يبدأ HLS.
             </p>
           </div>
-          {materializationLoading && <span className="badge badge-info">جاري تحديث حالة التشغيل</span>}
+          <div className="flex flex-wrap items-center gap-2">
+            {materializationLoading && <span className="badge badge-info">جاري تحديث حالة التشغيل</span>}
+            <button
+              className="btn-ghost inline-flex items-center gap-2 text-sm"
+              disabled={stoppingBroadcast || startingPublishedScheduleId !== null}
+              onClick={() => void stopLiveBroadcast()}
+            >
+              <XCircle size={14} />
+              {stoppingBroadcast ? 'جاري الإيقاف...' : 'إيقاف البث'}
+            </button>
+          </div>
         </div>
 
         <DataTable
@@ -1887,6 +1934,15 @@ function describeMaterializationRunProblem(run: MaterializationRun): string {
   if (run.summary.testPlayoutEligible === false) return 'ملف التشغيل غير صالح للتشغيل بعد. راجع تفاصيل التجهيز.';
   if (run.status === 'failed') return 'تجهيز ملفات التشغيل فشل. راجع تفاصيل التجهيز.';
   return 'ملف التشغيل غير جاهز بعد.';
+}
+
+function broadcastStatusLabel(status: NonNullable<BroadcastStatus['status']>): string {
+  if (status === 'running') return 'يعمل';
+  if (status === 'starting') return 'جاري التشغيل';
+  if (status === 'stopping') return 'جاري الإيقاف';
+  if (status === 'emergency') return 'طوارئ';
+  if (status === 'error') return 'خطأ';
+  return 'متوقف';
 }
 
 function describeQuickBroadcastError(err: unknown): string {
