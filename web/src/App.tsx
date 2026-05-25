@@ -6,7 +6,6 @@ import LoginPage from './pages/Login';
 import DashboardPage from './pages/Dashboard';
 import MediaLibraryPage from './pages/MediaLibrary';
 import MediaBrowserPage from './pages/MediaBrowser';
-import SchedulePage from './pages/Schedule';
 import SchedulerFoundationPage from './pages/SchedulerFoundation';
 import SchedulerDraftReviewPage from './pages/SchedulerDraftReview';
 import SchedulerPublishedReviewPage from './pages/SchedulerPublishedReview';
@@ -14,7 +13,6 @@ import NormalizationManagerPage from './pages/NormalizationManager';
 import TestPlayoutPage from './pages/TestPlayout';
 import OverlaysPage from './pages/Overlays';
 import SafeNamingPage from './pages/SafeNaming';
-import BroadcastPage from './pages/BroadcastControl';
 import LogsPage from './pages/Logs';
 import TrashPage from './pages/Trash';
 
@@ -57,7 +55,7 @@ export default function App() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/media" element={<MediaLibraryPage />} />
         <Route path="/media-browser" element={<MediaBrowserPage />} />
-        <Route path="/schedule" element={<SchedulePage />} />
+        <Route path="/schedule" element={<Navigate to="/scheduler-foundation" replace />} />
         <Route path="/scheduler-foundation" element={<SchedulerFoundationPage />} />
         <Route path="/scheduler-foundation/drafts/:draftId" element={<SchedulerDraftReviewPage />} />
         <Route path="/scheduler-foundation/published/:publishedId" element={<SchedulerPublishedReviewPage />} />
@@ -65,7 +63,7 @@ export default function App() {
         <Route path="/test-playout" element={<TestPlayoutPage />} />
         <Route path="/overlays" element={<OverlaysPage />} />
         <Route path="/safe-naming" element={<SafeNamingPage />} />
-        <Route path="/broadcast" element={<BroadcastPage />} />
+        <Route path="/broadcast" element={<Navigate to="/scheduler-foundation" replace />} />
         <Route path="/trash" element={<TrashPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

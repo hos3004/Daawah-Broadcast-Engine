@@ -57,6 +57,7 @@ import {
 } from '../../overlays/controlPanel';
 import {
   activatePublishedSchedule,
+  deleteSchedulerDraft,
   DraftValidationError,
   getPublishedSchedule,
   getSchedulerDraft,
@@ -506,6 +507,29 @@ schedulerFoundationRouter.get(
       mode: 'draft',
       draft,
     });
+  }
+);
+
+schedulerFoundationRouter.delete(
+  '/draft-schedules/:id',
+  requireRole('admin', 'editor'),
+  (req: Request, res: Response): void => {
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Draft schedule id is required', code: 'DRAFT_ID_REQUIRED' });
+      return;
+    }
+
+    try {
+      deleteSchedulerDraft(id);
+      res.json({
+        mode: 'draft-deleted',
+        id,
+        ok: true,
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
   }
 );
 

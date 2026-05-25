@@ -281,6 +281,42 @@ export function getSchedulerDraft(id: string): SchedulerDraftDetail | null {
   return row ? rowToDetail(row) : null;
 }
 
+export function deleteSchedulerDraft(id: string): void {
+  const db = getDb();
+  const draftId = cleanString(id);
+  if (!draftId) {
+    throw new DraftValidationError('Draft schedule id is required', 'DRAFT_ID_REQUIRED');
+  }
+
+  const existing = db.prepare('SELECT id FROM scheduler_drafts WHERE id=?').get(draftId) as { id: string } | undefined;
+  if (!existing) {
+    throw new DraftValidationError('Draft schedule not found', 'DRAFT_NOT_FOUND', 404);
+  }
+
+  const published = db.prepare('SELECT id FROM scheduler_published_schedules WHERE source_draft_id=? LIMIT 1').get(draftId) as
+    | { id: string }
+    | undefined;
+  if (published) {
+    throw new DraftValidationError('Draft schedule is already published and cannot be deleted from the prepared list', 'DRAFT_ALREADY_PUBLISHED', 409);
+  }
+
+  const remove = db.transaction(() => {
+    db.prepare('DELETE FROM scheduler_drafts WHERE id=?').run(draftId);
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, entity_type, entity_id, detail)
+      VALUES (@id, @action, @entity_type, @entity_id, @detail)
+    `).run({
+      id: uuidv4(),
+      action: 'scheduler_foundation.delete_draft_schedule',
+      entity_type: 'scheduler_draft',
+      entity_id: draftId,
+      detail: JSON.stringify({ draftId }),
+    });
+  });
+
+  remove();
+}
+
 export function publishSchedulerDraft(input: PublishSchedulerDraftInput): PublishedScheduleDetail {
   const db = getDb();
   const draftId = cleanString(input.draftId);

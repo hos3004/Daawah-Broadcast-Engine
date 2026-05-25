@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Film, FolderTree, Calendar, CalendarClock, FileCog, PlaySquare, Tag, Layers, Radio, ScrollText, Trash2, LogOut, Wifi, WifiOff } from 'lucide-react';
+import { LayoutDashboard, Film, FolderTree, CalendarClock, FileCog, PlaySquare, Tag, Layers, ScrollText, Trash2, LogOut, Wifi, WifiOff } from 'lucide-react';
 import { useState, useCallback } from 'react';
 import { authApi } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -16,13 +16,11 @@ const navItems = [
   { to: '/',          label: 'لوحة التحكم',   icon: LayoutDashboard },
   { to: '/media',     label: 'مكتبة الوسائط', icon: Film },
   { to: '/media-browser', label: 'متصفح الوسائط', icon: FolderTree },
-  { to: '/schedule',  label: 'الجدول',        icon: Calendar },
   { to: '/scheduler-foundation', label: 'تأسيس الجدولة', icon: CalendarClock },
   { to: '/normalization', label: 'تجهيز الوسائط', icon: FileCog },
   { to: '/test-playout', label: 'اختبار التشغيل', icon: PlaySquare },
   { to: '/safe-naming', label: 'التسمية الآمنة', icon: Tag },
   { to: '/overlays',  label: 'الطبقات',       icon: Layers },
-  { to: '/broadcast', label: 'التحكم بالبث',  icon: Radio },
   { to: '/trash',     label: 'سلة المحذوفات', icon: Trash2 },
   { to: '/logs',      label: 'السجلات',       icon: ScrollText },
 ];
