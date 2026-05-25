@@ -10,9 +10,26 @@ import { getDb } from '../db/schema';
 import { getPlaylistForDate, getCurrentAndNext, type PlaylistItem } from '../playlist/builder';
 import { checkEmergencyReadiness } from '../media/scanner';
 import { broadcastWs } from '../ws';
-import { buildAudioNormAf } from '../media/normalizer';
+import { buildAudioSyncAf } from '../media/normalizer';
 
 export type BroadcastStatus = 'idle' | 'starting' | 'running' | 'stopping' | 'error' | 'emergency';
+
+/** Thrown when a playlist cannot be safely broadcast (e.g. items with no trusted duration). */
+export class BroadcastPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BroadcastPreflightError';
+  }
+}
+
+export interface BroadcastDurationReport {
+  total: number;
+  trustedReal: number;
+  slotOrAssumedOnly: number;
+  missingUnknown: number;
+  fillersNullDuration: number;
+  blocking: Array<{ position: number; path: string; reason: string }>;
+}
 
 interface BroadcastState {
   status: BroadcastStatus;
@@ -230,20 +247,31 @@ async function launchFfmpeg(emergency: boolean, preparedArtifact?: PreparedArtif
   let next: PlaylistItem | null = null;
   let cmd: { args: string[] } | null = null;
 
-  if (!emergency && (preparedArtifact || state.playlistArtifactRunId)) {
-    const prepared = preparedArtifact ?? preparePlaylistArtifactBroadcast(state.playlistArtifactRunId!);
-    state.playlistArtifactRunId = prepared.runId;
-    state.artifactItems = prepared.items;
-    current = prepared.current;
-    next = prepared.next;
-    cmd = prepared.command;
-  } else {
-    const live = getCurrentAndNext(date);
-    current = live.current;
-    next = live.next;
-    cmd = emergency
-      ? buildEmergencyCommand()
-      : buildBroadcastCommand(date, current);
+  try {
+    if (!emergency && (preparedArtifact || state.playlistArtifactRunId)) {
+      const prepared = preparedArtifact ?? preparePlaylistArtifactBroadcast(state.playlistArtifactRunId!);
+      state.playlistArtifactRunId = prepared.runId;
+      state.artifactItems = prepared.items;
+      current = prepared.current;
+      next = prepared.next;
+      cmd = prepared.command;
+    } else {
+      const live = getCurrentAndNext(date);
+      current = live.current;
+      next = live.next;
+      cmd = emergency
+        ? buildEmergencyCommand()
+        : buildBroadcastCommand(date, current);
+    }
+  } catch (err) {
+    if (err instanceof BroadcastPreflightError) {
+      logger.error(`Broadcast preflight blocked start: ${err.message}`);
+      state.status = 'error';
+      state.lastError = err.message;
+      emitStatus();
+      return;
+    }
+    throw err;
   }
 
   if (!cmd) {
@@ -401,6 +429,19 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
     logger.warn(`Preflight: ${remaining.length - available.length} of ${remaining.length} playlist items missing`);
   }
 
+  // Duration preflight: refuse to start if any item lacks a trusted real duration
+  // (e.g. a filler with NULL duration_sec) instead of silently assuming 60s.
+  const durationReport = analyzeBroadcastDurations(available);
+  logDurationReport(durationReport);
+  if (durationReport.blocking.length > 0) {
+    const first = durationReport.blocking[0];
+    throw new BroadcastPreflightError(
+      `Refusing to start: ${durationReport.blocking.length} playlist item(s) have no trusted duration. ` +
+        `First: pos ${first?.position} — ${first?.reason} — ${first?.path}. ` +
+        `Run a media scan so media_files.duration_sec is populated.`
+    );
+  }
+
   // Build FFmpeg concat input — -re for real-time pacing
   const concatListPath = path.join(config.paths.data, 'current-concat.txt');
   fs.writeFileSync(concatListPath, buildConcatFileContents(available), 'utf-8');
@@ -467,7 +508,7 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
     // Source bumpers/episodes often have audio tails (audio longer than video)
     // or non-zero start_pts; without this the audio PTS accumulates a large
     // positive offset relative to video (observed: 13+ s ahead after 5 min).
-    '-af', buildAudioNormAf({ audioRate: config.broadcast.audioRate }),
+    '-af', buildAudioSyncAf({ audioRate: config.broadcast.audioRate }),
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-tune', 'zerolatency',
@@ -526,7 +567,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
       '-c:v', 'libx264', '-preset', 'veryfast',
       '-b:v', config.broadcast.videoBitrate,
       '-pix_fmt', 'yuv420p',
-      '-af', buildAudioNormAf({ audioRate: config.broadcast.audioRate }),
+      '-af', buildAudioSyncAf({ audioRate: config.broadcast.audioRate }),
       '-c:a', 'aac', '-b:a', config.broadcast.audioBitrate,
       '-ar', String(config.broadcast.audioRate), '-ac', '2',
       '-f', 'hls',
@@ -540,25 +581,27 @@ function buildEmergencyCommand(): { args: string[] } | null {
 }
 
 export function buildConcatFileContents(items: PlaylistItem[]): string {
-  // Always write the ffconcat header so we can always include duration lines.
-  // duration lines are critical: without them the concat demuxer reads audio
-  // tails (audio longer than video in source MP4s) which accumulates a large
-  // positive audio PTS offset relative to video over many clips.
-  const lines: string[] = ['ffconcat version 1.0'];
+  // ffconcat `duration` MUST only come from a trusted real duration.
+  // For trimmed items the trim length is the intended (real, bounded) duration,
+  // so we emit outpoint+duration. For non-trimmed items we emit NO duration and
+  // let the demuxer play each file to its natural EOF — this can never freeze
+  // (EOF is always the true end). Any A/V drift from audio tails is corrected
+  // downstream by aresample=async=1 in the encode filter.
+  //
+  // We deliberately do NOT use item.duration_ms here: for fillers it is the
+  // slot/gap length (or an assumed 60s), not the real file duration, and trusting
+  // it caused frozen-frame gaps when duration_ms > the real file length.
+  const hasTrimmedItems = items.some(item => getTrimDurationMs(item) !== null);
+  const lines: string[] = hasTrimmedItems ? ['ffconcat version 1.0'] : [];
 
   for (const item of items) {
     lines.push(formatConcatFileLine(item.media_path));
 
     const trimDurationMs = getTrimDurationMs(item);
     if (trimDurationMs !== null) {
-      // Trimmed clip: use outpoint+duration to crop to the trimmed length
       const seconds = formatSeconds(trimDurationMs);
       lines.push(`outpoint ${seconds}`);
       lines.push(`duration ${seconds}`);
-    } else if (item.duration_ms != null && item.duration_ms > 0) {
-      // Non-trimmed clip: still emit duration so audio tails are clamped to
-      // the file's declared video duration, preventing inter-file A/V drift.
-      lines.push(`duration ${formatSeconds(item.duration_ms)}`);
     }
   }
 
@@ -571,6 +614,110 @@ function getTrimDurationMs(item: PlaylistItem): number | null {
   }
 
   return item.trim_out_ms ?? item.forced_duration_ms ?? item.duration_ms;
+}
+
+/**
+ * Classifies each playlist item by how trustworthy its real duration is.
+ *
+ * "Trusted real" = trimmed (intentional bounded cut), OR media_files.duration_sec > 0,
+ * OR an artifact item (no media_files row) that carries a positive declared duration.
+ *
+ * Items that are neither trimmed nor have a real known duration are reported and,
+ * when they are fillers/programs backed by a media record with NULL duration_sec,
+ * marked as BLOCKING — we refuse to start rather than silently assume 60s.
+ */
+export function analyzeBroadcastDurations(items: PlaylistItem[]): BroadcastDurationReport {
+  const ids = [...new Set(items.map(i => i.media_file_id).filter((v): v is string => !!v))];
+  const durById = new Map<string, number | null>();
+  const knownIds = new Set<string>();
+
+  if (ids.length > 0) {
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = getDb()
+        .prepare(`SELECT id, duration_sec FROM media_files WHERE id IN (${placeholders})`)
+        .all(...ids) as Array<{ id: string; duration_sec: number | null }>;
+      for (const r of rows) {
+        knownIds.add(r.id);
+        durById.set(r.id, r.duration_sec);
+      }
+    } catch (err) {
+      logger.warn(`Duration preflight DB lookup failed (continuing without DB durations): ${err}`);
+    }
+  }
+
+  const report: BroadcastDurationReport = {
+    total: items.length,
+    trustedReal: 0,
+    slotOrAssumedOnly: 0,
+    missingUnknown: 0,
+    fillersNullDuration: 0,
+    blocking: [],
+  };
+
+  for (const item of items) {
+    const trimmed = getTrimDurationMs(item) !== null;
+    const hasDbRow = knownIds.has(item.media_file_id);
+    const dbDur = durById.get(item.media_file_id);
+    const dbDurOk = typeof dbDur === 'number' && dbDur > 0;
+    const isFiller = item.source_role === 'filler' || item.type === 'filler';
+
+    if (trimmed || dbDurOk) {
+      report.trustedReal++;
+      continue;
+    }
+
+    if (!hasDbRow) {
+      // No media_files record (e.g. prepared artifact item). Trust a positive
+      // declared duration; otherwise it is genuinely unknown.
+      if (item.duration_ms > 0) {
+        report.trustedReal++;
+      } else {
+        report.missingUnknown++;
+        report.blocking.push({
+          position: item.position,
+          path: item.media_path,
+          reason: 'no media record and no declared duration',
+        });
+      }
+      continue;
+    }
+
+    // Has a media_files record but duration_sec is NULL/0 → cannot be trusted.
+    report.slotOrAssumedOnly++;
+    if (isFiller) {
+      report.fillersNullDuration++;
+      report.blocking.push({
+        position: item.position,
+        path: item.media_path,
+        reason: 'filler has NULL duration_sec in media library (rescan needed)',
+      });
+    } else {
+      report.missingUnknown++;
+      report.blocking.push({
+        position: item.position,
+        path: item.media_path,
+        reason: 'media has no known duration_sec (rescan needed)',
+      });
+    }
+  }
+
+  return report;
+}
+
+function logDurationReport(report: BroadcastDurationReport): void {
+  logger.info(
+    '[Preflight] duration report — ' +
+      `total=${report.total}, trustedReal=${report.trustedReal}, ` +
+      `slotOrAssumedOnly=${report.slotOrAssumedOnly}, missingUnknown=${report.missingUnknown}, ` +
+      `fillersNullDuration=${report.fillersNullDuration}, blocking=${report.blocking.length}`
+  );
+  for (const b of report.blocking.slice(0, 10)) {
+    logger.warn(`[Preflight] BLOCKING item pos=${b.position} — ${b.reason} — ${b.path}`);
+  }
+  if (report.blocking.length > 10) {
+    logger.warn(`[Preflight] …and ${report.blocking.length - 10} more blocking item(s)`);
+  }
 }
 
 function formatConcatFileLine(filePath: string): string {

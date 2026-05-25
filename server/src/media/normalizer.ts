@@ -51,9 +51,24 @@ export function buildVideoNormVf(video: VideoNormOpts): string {
 /**
  * Returns an -af string: resample to target rate, reset audio timestamps, packed stereo.
  * Safe to apply even when source already matches target.
+ *
+ * Uses asetpts=N/SR/TB to force a perfectly linear PTS. Best for the test/normalize
+ * path where each input is decoded separately and already length-matched to video.
  */
 export function buildAudioNormAf(audio: AudioNormOpts): string {
   return `aresample=${audio.audioRate}:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo`;
+}
+
+/**
+ * Returns an -af string for the LIVE broadcast (concat demuxer) path.
+ *
+ * Uses aresample async=1 so FFmpeg stretches/squeezes audio to track the video
+ * timeline by inserting/dropping samples at gaps — correcting A/V drift WITHOUT
+ * relying on ffconcat `duration` hints (which can be wrong for fillers).
+ * first_pts=0 normalises the start; no asetpts, so async is free to compensate.
+ */
+export function buildAudioSyncAf(audio: AudioNormOpts): string {
+  return `aresample=${audio.audioRate}:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo`;
 }
 
 /**
