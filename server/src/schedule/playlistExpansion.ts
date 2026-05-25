@@ -503,10 +503,19 @@ function getReadyFilesForFolder(folderId: string, context: ExpansionContext): Me
   if (cached) return cached;
 
   const files = context.db.prepare(`
+    WITH RECURSIVE folder_tree(id) AS (
+      SELECT id FROM media_folders WHERE id=?
+      UNION ALL
+      SELECT child.id
+      FROM media_folders child
+      JOIN folder_tree parent ON child.parent_folder_id=parent.id
+    )
     SELECT id, path, relative_path, filename, type, status, duration_sec, duration_ms, modified_at
     FROM media_files
-    WHERE folder_id=? AND status='ready'
-    ORDER BY filename, id
+    WHERE folder_id IN (SELECT id FROM folder_tree)
+      AND status='ready'
+      AND COALESCE(trash_status, 'active') = 'active'
+    ORDER BY relative_path, filename, id
   `).all(folderId) as MediaFileRow[];
   context.filesByFolderId.set(folderId, files);
   return files;

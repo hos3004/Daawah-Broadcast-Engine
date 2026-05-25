@@ -401,7 +401,8 @@ export default function SchedulerFoundationPage() {
   const hasScheduleSource = Boolean(selectedFile || previewSource);
   const completedStep = activeSchedule ? 4 : approvedSchedule ? 3 : preview ? 2 : hasScheduleSource ? 1 : 0;
   const summary = preview?.summary;
-  const canApproveSchedule = Boolean(hasScheduleSource && preview && preview.summary.errors === 0 && !approvedSchedule);
+  const approvalBlockers = useMemo(() => preview ? scheduleApprovalBlockers(preview) : [], [preview]);
+  const canApproveSchedule = Boolean(hasScheduleSource && preview && approvalBlockers.length === 0 && !approvedSchedule);
   const canActivateApprovedSchedule = Boolean(approvedSchedule && !approvedSchedule.isActive && !activeSchedule);
   const issueGroups = useMemo(() => groupIssues(preview?.issues ?? []), [preview]);
   const activeMaterializationRuns = useMemo(
@@ -616,7 +617,12 @@ export default function SchedulerFoundationPage() {
   };
 
   const approveSchedule = async () => {
-    if (!canApproveSchedule || approvingSchedule) return;
+    if (!canApproveSchedule || approvingSchedule) {
+      if (approvalBlockers.length > 0) {
+        setWorkflowError(`لا يمكن اعتماد الجدول قبل حل هذه النقاط:\n${approvalBlockers.slice(0, 8).map(item => `- ${item}`).join('\n')}`);
+      }
+      return;
+    }
     const confirmed = window.confirm('اعتماد هذا الجدول؟ بعد الاعتماد يمكن تفعيله للبث من نفس الصفحة.');
     if (!confirmed) return;
 
@@ -630,8 +636,8 @@ export default function SchedulerFoundationPage() {
       setApprovedSchedule(body.publishedSchedule);
       setWorkflowMessage(`تم اعتماد الجدول: ${body.publishedSchedule.name}`);
       await Promise.all([loadDrafts(), loadPublishedSchedules()]);
-    } catch {
-      setWorkflowError('تعذر اعتماد الجدول. تأكد أن الخريطة بلا أخطاء وأنها لم تعتمد من قبل.');
+    } catch (err) {
+      setWorkflowError(describeWorkflowError(err, 'تعذر اعتماد الجدول. تأكد أن الخريطة بلا أخطاء وأنها لم تعتمد من قبل.'));
     } finally {
       setApprovingSchedule(false);
     }
@@ -664,8 +670,8 @@ export default function SchedulerFoundationPage() {
       });
       setWorkflowMessage('تم تفعيل الجدول للبث. الخطوة التالية هي تجهيز ملفات التشغيل أو تشغيل تجربة البث.');
       await Promise.all([loadActiveSchedule(), loadPublishedSchedules()]);
-    } catch {
-      setWorkflowError('تعذر تفعيل الجدول. تأكد أنه معتمد وصالح ولم يكن مفعلاً من قبل.');
+    } catch (err) {
+      setWorkflowError(describeWorkflowError(err, 'تعذر تفعيل الجدول. تأكد أنه معتمد وصالح ولم يكن مفعلاً من قبل.'));
     } finally {
       setActivatingSchedule(false);
     }
@@ -839,6 +845,7 @@ export default function SchedulerFoundationPage() {
           error={wizardError}
           preview={preview}
           canApprove={canApproveSchedule}
+          approvalBlockers={approvalBlockers}
           approving={approvingSchedule}
           onClose={() => setWizardOpen(false)}
           onStep={setWizardStep}
@@ -1092,6 +1099,14 @@ export default function SchedulerFoundationPage() {
                 {materializationMessage && <p className="text-xs mt-3" style={{ color: 'var(--success)' }}>{materializationMessage}</p>}
                 {materializationError && <p className="text-xs mt-3" style={{ color: 'var(--danger)' }}>{materializationError}</p>}
               </div>
+              {approvalBlockers.length > 0 && (
+                <div className="rounded-md border p-3 text-xs whitespace-pre-line" style={{ borderColor: 'var(--danger)', background: 'rgba(255,85,85,0.08)', color: 'var(--danger)' }}>
+                  لا يمكن اعتماد الجدول قبل حل هذه النقاط:
+                  {'\n'}
+                  {approvalBlockers.slice(0, 8).map(item => `- ${item}`).join('\n')}
+                  {approvalBlockers.length > 8 ? `\n... و${approvalBlockers.length - 8} ملاحظة أخرى` : ''}
+                </div>
+              )}
               <div className="flex flex-wrap gap-2">
                 <button
                   className="btn-ghost flex items-center gap-2 text-sm"
@@ -1477,6 +1492,7 @@ function ScheduleWizardModal({
   error,
   preview,
   canApprove,
+  approvalBlockers,
   approving,
   onClose,
   onStep,
@@ -1504,6 +1520,7 @@ function ScheduleWizardModal({
   error: string;
   preview: ExcelPreview | null;
   canApprove: boolean;
+  approvalBlockers: string[];
   approving: boolean;
   onClose: () => void;
   onStep: (step: number) => void;
@@ -1769,7 +1786,7 @@ function ScheduleWizardModal({
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <SummaryCard label="البرامج" value={rows.length} />
                 <SummaryCard label="مجلدات محددة" value={rows.filter(row => row.folderId).length} tone="ready" />
-                <SummaryCard label="تحتاج مراجعة" value={rows.filter(row => !row.folderId).length} tone="warning" />
+                <SummaryCard label="تحتاج مراجعة" value={rows.filter(row => !row.folderId || row.matchStatus === 'needs_review' || (row.fileCount ?? 0) <= 0 || !row.longestDurationMs).length} tone="warning" />
                 <SummaryCard label="المواعيد" value={rows.reduce((sum, row) => sum + wizardSlotTimes(row).length, 0)} />
               </div>
               <DataTable
@@ -1808,6 +1825,14 @@ function ScheduleWizardModal({
               </div>
               <div className="flex flex-wrap gap-2">
                 <button className="btn-ghost text-sm" onClick={() => onStep(3)}>رجوع للتعديل</button>
+                {approvalBlockers.length > 0 && (
+                  <div className="w-full rounded-md border p-3 text-xs whitespace-pre-line" style={{ borderColor: 'var(--danger)', background: 'rgba(255,85,85,0.08)', color: 'var(--danger)' }}>
+                    لا يمكن اعتماد الجدول قبل حل هذه النقاط:
+                    {'\n'}
+                    {approvalBlockers.slice(0, 8).map(item => `- ${item}`).join('\n')}
+                    {approvalBlockers.length > 8 ? `\n... و${approvalBlockers.length - 8} ملاحظة أخرى` : ''}
+                  </div>
+                )}
                 <button className="btn-primary flex items-center gap-2 text-sm" disabled={!canApprove || approving} onClick={onApprove}>
                   <ShieldCheck size={14} />
                   {approving ? 'جاري الاعتماد...' : 'اعتماد الجدول'}
@@ -2421,6 +2446,9 @@ function validateWizardRows(startDate: string, endDate: string, rows: WizardProg
     const label = `السطر ${index + 1}${row.name.trim() ? ` (${row.name.trim()})` : ''}`;
     if (!row.name.trim()) issues.push(`${label}: اسم البرنامج فارغ.`);
     if (!row.folderId || !row.folderRoot || !row.folderHint) issues.push(`${label}: لم يتم اختيار مجلد البرنامج من مكتبة الوسائط.`);
+    if (row.matchStatus === 'needs_review') issues.push(`${label}: المطابقة غير مؤكدة. اختر المجلد الصحيح يدويًا من القائمة قبل إنشاء المعاينة.`);
+    if ((row.fileCount ?? 0) <= 0) issues.push(`${label}: المجلد المختار لا يحتوي على ملفات جاهزة.`);
+    if (!row.longestDurationMs || row.longestDurationMs <= 0) issues.push(`${label}: مدة الحلقات غير مفهرسة. شغّل فحص المدد أو اختر مجلدًا مفهرسًا.`);
     if (!row.startTime) issues.push(`${label}: وقت البث غير محدد.`);
     if (row.durationMinutes <= 0) issues.push(`${label}: مدة الفترة يجب أن تكون أكبر من صفر.`);
     if (row.days.length === 0) issues.push(`${label}: اختر يوم بث واحدًا على الأقل.`);
@@ -2556,6 +2584,31 @@ function isPlayableMaterializationRun(run: MaterializationRun): boolean {
     run.summary.testPlayoutEligible !== false;
 }
 
+function scheduleApprovalBlockers(preview: ExcelPreview): string[] {
+  const blockers: string[] = [];
+  if (preview.summary.errors > 0) {
+    blockers.push(`يوجد ${preview.summary.errors} خطأ في المعاينة يجب حله قبل الاعتماد.`);
+  }
+
+  const programNames = new Map(preview.programs.map(program => [program.program_key, program.program_name || program.program_key]));
+  const scheduledProgramKeys = new Set(preview.slots.map(slot => slot.program_key).filter(Boolean));
+  const matchesByProgramKey = new Map(preview.folderMatches.map(match => [match.program_key, match]));
+
+  scheduledProgramKeys.forEach(programKey => {
+    const match = matchesByProgramKey.get(programKey);
+    const label = programNames.get(programKey) || programKey;
+    if (!match) {
+      blockers.push(`البرنامج "${label}" غير مربوط بمجلد ميديا.`);
+      return;
+    }
+    if (match.status !== 'matched' || !match.matched_relative_path) {
+      blockers.push(`البرنامج "${label}" يحتاج اختيار مجلد مؤكد. الحالة الحالية: ${match.status_ar || match.status}.`);
+    }
+  });
+
+  return Array.from(new Set(blockers));
+}
+
 function describeMaterializationRunProblem(run: MaterializationRun): string {
   if (run.errors[0]?.message) return run.errors[0].message;
   if (run.summary.missingMediaFileCount && run.summary.missingMediaFileCount > 0) {
@@ -2572,6 +2625,12 @@ function describeQuickBroadcastError(err: unknown): string {
   const serverMessage = data ? (textValue(data['error']) || textValue(data['message'])) : '';
   if (serverMessage) return serverMessage;
   return err instanceof Error ? err.message : String(err);
+}
+
+function describeWorkflowError(err: unknown, fallback: string): string {
+  const serverMessage = describeQuickBroadcastError(err);
+  if (serverMessage && serverMessage !== '[object Object]') return serverMessage;
+  return fallback;
 }
 
 function describeWizardPreviewError(err: unknown): string {

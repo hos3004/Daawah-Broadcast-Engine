@@ -506,7 +506,11 @@ function assertDraftCanPublish(draft: SchedulerDraftDetail): void {
     throw new DraftValidationError('Active schedules cannot be published from the draft workflow', 'DRAFT_MUST_BE_INACTIVE');
   }
   if (draft.validationStatus !== 'draft_valid') {
-    throw new DraftValidationError('Only valid drafts can be published', 'DRAFT_NOT_PUBLISHABLE');
+    const firstError = draft.validationErrors[0];
+    throw new DraftValidationError(
+      firstError ? `Draft cannot be published: ${firstError.message}` : 'Only valid drafts can be published',
+      firstError?.code ?? 'DRAFT_NOT_PUBLISHABLE'
+    );
   }
   if (draft.validationErrors.length > 0) {
     throw new DraftValidationError('Draft validation errors must be resolved before publishing', 'DRAFT_VALIDATION_ERRORS_PRESENT');
@@ -545,7 +549,11 @@ function assertPublishedCanActivate(schedule: PublishedScheduleDetail): void {
     throw new DraftValidationError('Only published schedules can be activated', 'PUBLISHED_STATUS_REQUIRED');
   }
   if (schedule.validationStatus !== 'draft_valid') {
-    throw new DraftValidationError('Only valid published schedules can be activated', 'PUBLISHED_NOT_ACTIVATABLE');
+    const firstError = schedule.validationErrors[0];
+    throw new DraftValidationError(
+      firstError ? `Published schedule cannot be activated: ${firstError.message}` : 'Only valid published schedules can be activated',
+      firstError?.code ?? 'PUBLISHED_NOT_ACTIVATABLE'
+    );
   }
   if (schedule.validationErrors.length > 0) {
     throw new DraftValidationError('Published schedule validation errors must be resolved before activation', 'PUBLISHED_VALIDATION_ERRORS_PRESENT');
@@ -1039,9 +1047,11 @@ function validateFolderMatches(
 ): void {
   const knownFolderIds = getKnownFolderIds();
   if (knownFolderIds === null) return;
+  const matchesByProgramKey = new Map<string, ExcelImportPreviewResult['folderMatches'][number]>();
 
   for (const match of preview.folderMatches) {
     const programKey = cleanString(match.program_key);
+    if (programKey) matchesByProgramKey.set(programKey, match);
     if (programKey && !programKeys.has(programKey)) {
       pushValidationError(errors, {
         code: 'DRAFT_FOLDER_MATCH_PROGRAM_NOT_FOUND',
@@ -1071,6 +1081,61 @@ function validateFolderMatches(
       });
     }
   }
+
+  const scheduledProgramKeys = new Set(
+    preview.slots
+      .map(slot => cleanString(slot.program_key))
+      .filter(programKey => programKey && programKeys.has(programKey))
+  );
+
+  for (const programKey of scheduledProgramKeys) {
+    const program = preview.programs.find(row => cleanString(row.program_key) === programKey);
+    const match = matchesByProgramKey.get(programKey);
+    const row = numberOrUndefined(program?.row);
+    const label = cleanString(program?.program_name) || programKey;
+
+    if (!match) {
+      pushValidationError(errors, {
+        code: 'DRAFT_FOLDER_MATCH_REQUIRED',
+        field: 'folderMatches.program_key',
+        row,
+        message: `Scheduled program "${label}" has no approved matched media folder.`,
+      });
+      continue;
+    }
+
+    if (match.status !== 'matched') {
+      pushValidationError(errors, {
+        code: 'DRAFT_FOLDER_MATCH_NOT_APPROVED',
+        field: 'folderMatches.status',
+        row: numberOrUndefined(match.row) ?? row,
+        message: `Scheduled program "${label}" must be matched to one approved media folder before publishing. Current status: ${match.status}.`,
+      });
+      continue;
+    }
+
+    const matchedFolderId = cleanString(match.matched_folder_id);
+    if (!matchedFolderId || !knownFolderIds.has(matchedFolderId)) continue;
+
+    const stats = getFolderPlaybackStats(matchedFolderId);
+    if (stats.readyFileCount <= 0) {
+      pushValidationError(errors, {
+        code: 'DRAFT_FOLDER_READY_MEDIA_REQUIRED',
+        field: 'folderMatches.matched_folder_id',
+        row: numberOrUndefined(match.row) ?? row,
+        message: `Scheduled program "${label}" is matched to a folder, but that folder has no ready media files.`,
+      });
+      continue;
+    }
+    if (stats.knownDurationCount <= 0) {
+      pushValidationError(errors, {
+        code: 'DRAFT_FOLDER_DURATION_REQUIRED',
+        field: 'folderMatches.matched_folder_id',
+        row: numberOrUndefined(match.row) ?? row,
+        message: `Scheduled program "${label}" is matched to a folder, but its media files have no indexed durations.`,
+      });
+    }
+  }
 }
 
 function getKnownFolderIds(): Set<string> | null {
@@ -1079,6 +1144,36 @@ function getKnownFolderIds(): Set<string> | null {
   if (count === 0) return null;
   const rows = db.prepare('SELECT id FROM media_folders').all() as Array<{ id: string }>;
   return new Set(rows.map(row => row.id));
+}
+
+function getFolderPlaybackStats(folderId: string): { readyFileCount: number; knownDurationCount: number } {
+  const db = getDb();
+  const row = db.prepare(`
+    WITH RECURSIVE folder_tree(id) AS (
+      SELECT id FROM media_folders WHERE id=?
+      UNION ALL
+      SELECT child.id
+      FROM media_folders child
+      JOIN folder_tree parent ON child.parent_folder_id=parent.id
+    )
+    SELECT
+      COUNT(*) as readyFileCount,
+      SUM(
+        CASE
+          WHEN COALESCE(duration_ms, CAST(duration_sec * 1000 AS INTEGER)) > 0 THEN 1
+          ELSE 0
+        END
+      ) as knownDurationCount
+    FROM media_files
+    WHERE folder_id IN (SELECT id FROM folder_tree)
+      AND status='ready'
+      AND COALESCE(trash_status, 'active') = 'active'
+  `).get(folderId) as { readyFileCount: number; knownDurationCount: number | null } | undefined;
+
+  return {
+    readyFileCount: row?.readyFileCount ?? 0,
+    knownDurationCount: row?.knownDurationCount ?? 0,
+  };
 }
 
 function normalizeDraftName(name: string | undefined, preview: ExcelImportPreviewResult): string {

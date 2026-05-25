@@ -144,7 +144,7 @@ export function previewSafeNaming(names: string[]) {
 
 export function getFolderMatchCandidates(): FolderMatchCandidate[] {
   const db = getDb();
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT
       mf.id as folder_id,
       mr.root_key as root_key,
@@ -157,8 +157,31 @@ export function getFolderMatchCandidates(): FolderMatchCandidate[] {
     FROM media_folders mf
     JOIN media_roots mr ON mr.id = mf.root_id
     LEFT JOIN program_candidates pc ON pc.folder_id = mf.id
+    WHERE COALESCE(mf.trash_status, 'active') = 'active'
     ORDER BY mr.root_key, mf.original_relative_path
   `).all() as FolderMatchCandidate[];
+
+  for (const row of rows) {
+    const stats = db.prepare(`
+      WITH RECURSIVE folder_tree(id) AS (
+        SELECT id FROM media_folders WHERE id=?
+        UNION ALL
+        SELECT child.id
+        FROM media_folders child
+        JOIN folder_tree parent ON child.parent_folder_id=parent.id
+      )
+      SELECT COUNT(*) as readyFileCount
+      FROM media_files
+      WHERE folder_id IN (SELECT id FROM folder_tree)
+        AND status='ready'
+        AND COALESCE(trash_status, 'active') = 'active'
+    `).get(row.folder_id) as { readyFileCount: number } | undefined;
+    const readyFileCount = stats?.readyFileCount ?? 0;
+    row.file_count = readyFileCount;
+    row.episode_count = readyFileCount;
+  }
+
+  return rows;
 }
 
 export function scanMediaRegistry(options: RegistryScanOptions = {}): RegistryScanResult {

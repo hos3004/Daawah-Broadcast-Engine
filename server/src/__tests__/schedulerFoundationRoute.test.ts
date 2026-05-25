@@ -35,6 +35,23 @@ describe('scheduler foundation routes', () => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run('folder-1', 'root-original-ar', 'Tafseer/Season 01', 'برنامج التفسير', 'season 01', 'tafseer-season-01', 12, 'provisional');
 
+    fs.writeFileSync(path.join(tempDir, 'episode-01.mp4'), 'media-1');
+    db.prepare(`
+      INSERT INTO media_files
+        (id, path, relative_path, filename, type, status, root_id, folder_id, duration_sec)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'media-1',
+      path.join(tempDir, 'episode-01.mp4'),
+      'Tafseer/Season 01/episode-01.mp4',
+      'episode-01.mp4',
+      'program',
+      'ready',
+      'root-original-ar',
+      'folder-1',
+      1800
+    );
+
     const app = express();
     app.use(express.json({ limit: '2mb' }));
     app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -508,6 +525,7 @@ describe('scheduler foundation routes', () => {
     db.prepare('INSERT INTO cursors (key, value) VALUES (?, ?)').run('program:test', 'file-1');
     const published = await saveAndPublishValidDraft(baseUrl, 'Materialization schedule', 'materialize.xlsx');
     await activatePublishedScheduleForTest(baseUrl, published.publishedId);
+    db.prepare("UPDATE media_files SET status='missing' WHERE id='media-1'").run();
     const cursorCountBefore = (db.prepare('SELECT COUNT(*) as cnt FROM cursors').get() as { cnt: number }).cnt;
 
     const missingConfirmResponse = await fetch(`${baseUrl}/api/scheduler-foundation/playlist-materialization/dry-run`, {

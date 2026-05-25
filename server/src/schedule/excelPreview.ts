@@ -597,26 +597,30 @@ function buildFolderMatches(
 
     const exact = scored.filter(item => item.score === 100);
     if (exact.length === 1) {
+      if ((exact[0]!.candidate.file_count ?? 0) <= 0) {
+        addIssue(issues, 'error', 'MATCHED_FOLDER_HAS_NO_READY_FILES', 'Programs', program.row, 'folder_hint', 'تم العثور على المجلد المطابق لكنه لا يحتوي على ملفات جاهزة للتشغيل.');
+        return folderMatch(program, 'error', 100, [toSuggestion(exact[0]!, 'تطابق مباشر مع folder_hint')], 'تم العثور على المجلد المطابق لكنه لا يحتوي على ملفات جاهزة للتشغيل.');
+      }
       return folderMatch(program, 'matched', 100, [toSuggestion(exact[0]!, 'تطابق مباشر مع folder_hint')], 'تم العثور على مجلد مطابق.');
     }
     if (exact.length > 1) {
-      addIssue(issues, 'warning', 'MULTIPLE_FOLDER_MATCHES', 'Programs', program.row, 'folder_hint', 'تم العثور على أكثر من مجلد مطابق ويحتاج البرنامج إلى مراجعة.');
+      addIssue(issues, 'error', 'MULTIPLE_FOLDER_MATCHES', 'Programs', program.row, 'folder_hint', 'تم العثور على أكثر من مجلد مطابق ويحتاج البرنامج إلى مراجعة.');
       return folderMatch(program, 'needs_review', 75, exact.slice(0, 5).map(item => toSuggestion(item, 'أكثر من تطابق مباشر')), 'يوجد أكثر من مجلد مطابق. اختر المجلد الصحيح لاحقًا.');
     }
 
     const suggestions = scored.filter(item => item.score >= 50).slice(0, 5);
     if (suggestions.length > 1) {
-      addIssue(issues, 'warning', 'MULTIPLE_FOLDER_MATCHES', 'Programs', program.row, 'folder_hint', 'تم العثور على أكثر من اقتراح قريب ويحتاج البرنامج إلى مراجعة.');
+      addIssue(issues, 'error', 'MULTIPLE_FOLDER_MATCHES', 'Programs', program.row, 'folder_hint', 'تم العثور على أكثر من اقتراح قريب ويحتاج البرنامج إلى مراجعة.');
       return folderMatch(program, 'needs_review', Math.min(79, suggestions[0]?.score ?? 50), suggestions.map(item => toSuggestion(item, 'اقتراح قريب')), 'يوجد أكثر من اقتراح قريب لهذا المجلد.');
     }
     if (suggestions.length === 1) {
       const confidence = suggestions[0]!.score;
-      addIssue(issues, 'warning', 'FUZZY_FOLDER_MATCH', 'Programs', program.row, 'folder_hint', 'تم العثور على اقتراح قريب للمجلد ويحتاج إلى مراجعة قبل التفعيل.');
+      addIssue(issues, 'error', 'FUZZY_FOLDER_MATCH', 'Programs', program.row, 'folder_hint', 'تم العثور على اقتراح قريب للمجلد ويحتاج إلى مراجعة قبل التفعيل.');
       return folderMatch(program, 'needs_review', confidence, suggestions.map(item => toSuggestion(item, 'اقتراح قريب')), 'تم العثور على اقتراح قريب، لكنه ليس تطابقًا نهائيًا.');
     }
 
-    addIssue(issues, 'warning', 'FOLDER_MISSING', 'Programs', program.row, 'folder_hint', 'لم يتم العثور على مجلد مطابق لهذا البرنامج. يمكن حفظه كمسودة، لكن يجب ربطه بالميديا لاحقًا.');
-    return folderMatch(program, 'folder_missing', 0, [], 'لم يتم العثور على مجلد مطابق لهذا البرنامج. يمكن حفظه كمسودة، لكن يجب ربطه بالميديا لاحقًا.');
+    addIssue(issues, 'error', 'FOLDER_MISSING', 'Programs', program.row, 'folder_hint', 'لم يتم العثور على مجلد مطابق لهذا البرنامج. يجب ربطه بمجلد ميديا قبل الاعتماد.');
+    return folderMatch(program, 'folder_missing', 0, [], 'لم يتم العثور على مجلد مطابق لهذا البرنامج. يجب ربطه بمجلد ميديا قبل الاعتماد.');
   });
 }
 
