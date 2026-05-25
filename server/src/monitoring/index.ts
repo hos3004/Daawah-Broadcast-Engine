@@ -30,6 +30,15 @@ async function checkHlsStatus(): Promise<void> {
   const broadcast = getBroadcastState();
 
   if (broadcast.status === 'running' && !hls.ok) {
+    const startedAtMs = broadcast.startedAt ? Date.parse(broadcast.startedAt) : 0;
+    const startupGraceMs = Math.max(
+      45000,
+      (config.monitoring.hlsStaleThreshold + config.broadcast.hlsSegmentDuration * 3) * 1000
+    );
+    if (startedAtMs && Date.now() - startedAtMs < startupGraceMs) {
+      return;
+    }
+
     logger.warn(`HLS stale: ${Math.round(hls.ageSeconds)}s — triggering reaction`);
     try {
       await sendTelegramAlert({

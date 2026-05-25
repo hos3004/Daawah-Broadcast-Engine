@@ -15,7 +15,7 @@ import { initWs } from './ws';
 import { logger } from './utils/logger';
 import { ensureDir } from './utils/fileUtils';
 import { buildDailyPlaylist, getCurrentAndNext } from './playlist/builder';
-import { checkHlsHealth, getBroadcastState } from './broadcast/ffmpegRunner';
+import { checkHlsHealth, getBroadcastState, stopBroadcast } from './broadcast/ffmpegRunner';
 import { checkFfmpeg, checkFfprobe } from './media/ffprobe';
 import { startMonitoring } from './monitoring';
 import { startTranscodeWorker } from './workers/transcodeWorker';
@@ -162,6 +162,14 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`Received ${signal} — shutting down gracefully`);
+    try {
+      const broadcast = getBroadcastState();
+      if (broadcast.status !== 'idle') {
+        await stopBroadcast('shutdown');
+      }
+    } catch (err) {
+      logger.error('Broadcast shutdown cleanup failed', err);
+    }
     server.close(() => process.exit(0));
   };
 
