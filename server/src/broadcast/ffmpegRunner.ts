@@ -164,9 +164,15 @@ export async function stopBroadcast(reason = 'manual'): Promise<void> {
 }
 
 export async function restartBroadcast(): Promise<void> {
+  const restartPlaylistArtifactRunId = state.playlistArtifactRunId;
+  const restartEmergency = state.isEmergency;
   await stopBroadcast('restart');
   await new Promise(r => setTimeout(r, 1000));
-  await startBroadcast(state.isEmergency);
+  if (restartPlaylistArtifactRunId && !restartEmergency) {
+    await startPlaylistArtifactBroadcast(restartPlaylistArtifactRunId);
+    return;
+  }
+  await startBroadcast(restartEmergency);
 }
 
 export async function switchToEmergency(): Promise<void> {
