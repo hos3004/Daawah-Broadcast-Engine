@@ -98,6 +98,19 @@ export interface PlaylistMaterializationRunDetail {
   createdAt: string;
 }
 
+export interface PlaylistMaterializationSnapshot {
+  runId: string;
+  scheduleId: string;
+  scheduleName: string;
+  timezone: string;
+  generatedAt: string;
+  dryRun: true;
+  mediaExpansionAvailable: boolean;
+  ffconcatPath: string | null;
+  days: Array<{ date: string; itemCount: number }>;
+  items: MaterializedPlaylistItem[];
+}
+
 interface PlaylistMaterializationRunRow {
   id: string;
   published_schedule_id: string;
@@ -292,6 +305,46 @@ export function getPlaylistMaterializationRun(id: string): PlaylistMaterializati
     | PlaylistMaterializationRunRow
     | undefined;
   return row ? rowToRun(row) : null;
+}
+
+export function readPlaylistMaterializationRunPlaylist(id: string): {
+  run: PlaylistMaterializationRunDetail;
+  playlist: PlaylistMaterializationSnapshot;
+} | null {
+  const run = getPlaylistMaterializationRun(id);
+  if (!run) return null;
+
+  const generatedRoot = getDefaultPlaylistMaterializationRoot();
+  const outputPath = path.resolve(run.outputPath);
+  if (!isPathInside(outputPath, generatedRoot)) {
+    throw new DraftValidationError('Refusing to read playlist artifact outside generated/playlists', 'UNSAFE_OUTPUT_PATH');
+  }
+
+  const playlistPath = path.join(outputPath, 'playlist.json');
+  if (!fs.existsSync(playlistPath)) {
+    throw new DraftValidationError('Playlist artifact JSON not found', 'PLAYLIST_ARTIFACT_NOT_FOUND', 404);
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as Partial<PlaylistMaterializationSnapshot>;
+  if (!Array.isArray(parsed.items)) {
+    throw new DraftValidationError('Playlist artifact is invalid: missing items', 'PLAYLIST_ARTIFACT_INVALID');
+  }
+
+  return {
+    run,
+    playlist: {
+      runId: String(parsed.runId ?? run.id),
+      scheduleId: String(parsed.scheduleId ?? run.publishedScheduleId),
+      scheduleName: String(parsed.scheduleName ?? run.summary.scheduleName),
+      timezone: String(parsed.timezone ?? run.summary.timezone),
+      generatedAt: String(parsed.generatedAt ?? run.createdAt),
+      dryRun: true,
+      mediaExpansionAvailable: parsed.mediaExpansionAvailable === true,
+      ffconcatPath: typeof parsed.ffconcatPath === 'string' ? parsed.ffconcatPath : null,
+      days: Array.isArray(parsed.days) ? parsed.days as Array<{ date: string; itemCount: number }> : [],
+      items: parsed.items,
+    },
+  };
 }
 
 export function getDefaultPlaylistMaterializationRoot(): string {

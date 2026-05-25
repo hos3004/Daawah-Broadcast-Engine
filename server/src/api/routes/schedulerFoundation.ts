@@ -71,6 +71,7 @@ import {
   createPlaylistMaterializationDryRun,
   getPlaylistMaterializationRun,
   listPlaylistMaterializationRuns,
+  readPlaylistMaterializationRunPlaylist,
 } from '../../schedule/playlistMaterialization';
 import {
   listTestPlayoutPlans,
@@ -565,6 +566,55 @@ schedulerFoundationRouter.get(
         broadcast: false,
       },
     });
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/current-broadcast-schedule',
+  requireRole('admin', 'editor', 'operator'),
+  (_req: Request, res: Response): void => {
+    try {
+      const activeState = getActiveScheduleState();
+      const broadcast = getBroadcastState();
+      const broadcastRunId = broadcast.playlistArtifactRunId;
+      const activeScheduleId = activeState?.publishedScheduleId ?? null;
+
+      let selectedRunId = broadcastRunId;
+      if (!selectedRunId && activeScheduleId) {
+        selectedRunId = listPlaylistMaterializationRuns(100)
+          .find(run => run.publishedScheduleId === activeScheduleId && run.status === 'completed')
+          ?.id ?? null;
+      }
+
+      const artifact = selectedRunId ? readPlaylistMaterializationRunPlaylist(selectedRunId) : null;
+      const mismatch = Boolean(broadcast.status === 'running' && !broadcastRunId && artifact);
+
+      res.json({
+        mode: 'current-broadcast-schedule',
+        source: broadcastRunId ? 'running-broadcast' : artifact ? 'active-schedule-latest' : 'none',
+        activeScheduleId,
+        broadcast: {
+          status: broadcast.status,
+          runId: broadcast.runId,
+          pid: broadcast.pid,
+          startedAt: broadcast.startedAt,
+          currentItem: broadcast.currentItem,
+          nextItem: broadcast.nextItem,
+          playlistArtifactRunId: broadcast.playlistArtifactRunId,
+          restartCount: broadcast.restartCount,
+          lastError: broadcast.lastError,
+          isEmergency: broadcast.isEmergency,
+        },
+        run: artifact?.run ?? null,
+        playlist: artifact?.playlist ?? null,
+        mismatch,
+        message: mismatch
+          ? 'البث الحالي يعمل من مسار تشغيل قديم، والجدول المعروض هو آخر تجهيز للجدول النشط.'
+          : '',
+      });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
   }
 );
 

@@ -7,6 +7,7 @@ import {
   ListChecks,
   Play,
   Radio,
+  RefreshCw,
   ShieldCheck,
   Wand2,
   X,
@@ -288,6 +289,52 @@ interface MaterializationRun {
   createdAt: string;
 }
 
+interface CurrentScheduleItem {
+  id: string;
+  date: string;
+  type: 'program' | 'gap_filler' | string;
+  source?: string;
+  sourceRole?: string;
+  programKey: string | null;
+  title: string;
+  startTime: string;
+  endTime: string;
+  timelineStartSeconds?: number;
+  timelineEndSeconds?: number;
+  durationMinutes?: number;
+  durationSeconds?: number;
+  absolutePath: string | null;
+  relativePath: string | null;
+  validationStatus?: 'ready' | 'missing_media' | 'unknown_duration' | string;
+}
+
+interface CurrentBroadcastSchedule {
+  source: 'running-broadcast' | 'active-schedule-latest' | 'none';
+  activeScheduleId: string | null;
+  broadcast: BroadcastStatus & {
+    runId?: string | null;
+    pid?: number | null;
+    startedAt?: string | null;
+    currentItem?: unknown;
+    nextItem?: unknown;
+    playlistArtifactRunId?: string | null;
+    restartCount?: number;
+    isEmergency?: boolean;
+  };
+  run: MaterializationRun | null;
+  playlist: {
+    runId: string;
+    scheduleId: string;
+    scheduleName: string;
+    timezone: string;
+    generatedAt: string;
+    items: CurrentScheduleItem[];
+    days: Array<{ date: string; itemCount: number }>;
+  } | null;
+  mismatch: boolean;
+  message?: string;
+}
+
 const dayLabels: Record<string, string> = {
   sat: 'السبت',
   sun: 'الأحد',
@@ -327,6 +374,10 @@ export default function SchedulerFoundationPage() {
   const [stoppingBroadcast, setStoppingBroadcast] = useState(false);
   const [quickBroadcastMessage, setQuickBroadcastMessage] = useState('');
   const [quickBroadcastError, setQuickBroadcastError] = useState('');
+  const [currentSchedule, setCurrentSchedule] = useState<CurrentBroadcastSchedule | null>(null);
+  const [currentScheduleLoading, setCurrentScheduleLoading] = useState(false);
+  const [currentScheduleError, setCurrentScheduleError] = useState('');
+  const [showScheduleFillers, setShowScheduleFillers] = useState(false);
   const [approvedSchedule, setApprovedSchedule] = useState<PublishedListItem | null>(null);
   const [approvingSchedule, setApprovingSchedule] = useState(false);
   const [workflowMessage, setWorkflowMessage] = useState('');
@@ -347,6 +398,18 @@ export default function SchedulerFoundationPage() {
   const canApproveSchedule = Boolean(previewSource && preview && approvalBlockers.length === 0 && !approvedSchedule);
   const publishedDraftIds = useMemo(() => new Set(publishedSchedules.map(schedule => schedule.sourceDraftId)), [publishedSchedules]);
   const preparedDrafts = useMemo(() => drafts.filter(draft => !publishedDraftIds.has(draft.id)), [drafts, publishedDraftIds]);
+  const currentScheduleItems = useMemo(() => {
+    const items = currentSchedule?.playlist?.items ?? [];
+    return showScheduleFillers ? items : items.filter(item => !isScheduleFillerItem(item));
+  }, [currentSchedule, showScheduleFillers]);
+  const currentScheduleCounts = useMemo(() => {
+    const items = currentSchedule?.playlist?.items ?? [];
+    return {
+      total: items.length,
+      programs: items.filter(item => !isScheduleFillerItem(item)).length,
+      fillers: items.filter(isScheduleFillerItem).length,
+    };
+  }, [currentSchedule]);
 
   useEffect(() => {
     void loadActiveSchedule();
@@ -354,6 +417,7 @@ export default function SchedulerFoundationPage() {
     void loadPublishedSchedules();
     void loadMaterializationRuns();
     void loadBroadcastStatus();
+    void loadCurrentBroadcastSchedule();
   }, []);
 
   const loadWizardFolders = async (force = false): Promise<ProgramFolderOption[]> => {
@@ -597,6 +661,20 @@ export default function SchedulerFoundationPage() {
     }
   };
 
+  const loadCurrentBroadcastSchedule = async () => {
+    setCurrentScheduleLoading(true);
+    setCurrentScheduleError('');
+    try {
+      const response = await schedulerFoundationApi.currentBroadcastSchedule();
+      setCurrentSchedule(response.data as CurrentBroadcastSchedule);
+    } catch (err) {
+      setCurrentScheduleError(describeQuickBroadcastError(err));
+      setCurrentSchedule(null);
+    } finally {
+      setCurrentScheduleLoading(false);
+    }
+  };
+
   const editDraftInWizard = async (draftId: string) => {
     if (editingDraftId) return;
     setEditingDraftId(draftId);
@@ -685,7 +763,13 @@ export default function SchedulerFoundationPage() {
       const body = response.data as { hlsUrl?: string };
       const hlsUrl = body.hlsUrl ?? '/hls/stream.m3u8';
       setQuickBroadcastMessage(`تم تشغيل البث. رابط المشاهدة: ${window.location.origin}${hlsUrl}`);
-      await Promise.all([loadActiveSchedule(), loadPublishedSchedules(), loadMaterializationRuns(), loadBroadcastStatus()]);
+      await Promise.all([
+        loadActiveSchedule(),
+        loadPublishedSchedules(),
+        loadMaterializationRuns(),
+        loadBroadcastStatus(),
+        loadCurrentBroadcastSchedule(),
+      ]);
     } catch (err) {
       setQuickBroadcastError(describeQuickBroadcastError(err));
     } finally {
@@ -704,7 +788,7 @@ export default function SchedulerFoundationPage() {
     try {
       await broadcastApi.stop();
       setQuickBroadcastMessage('تم إيقاف البث المباشر.');
-      await loadBroadcastStatus();
+      await Promise.all([loadBroadcastStatus(), loadCurrentBroadcastSchedule()]);
     } catch (err) {
       setQuickBroadcastError(describeQuickBroadcastError(err));
     } finally {
@@ -869,8 +953,94 @@ export default function SchedulerFoundationPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex flex-wrap items-center gap-2">
+              <ListChecks size={18} style={{ color: 'var(--accent)' }} />
+              <h3 className="font-semibold">4. جدول البث العامل</h3>
+              {currentSchedule?.playlist && <span className="badge badge-ready">{currentSchedule.playlist.scheduleName}</span>}
+              {currentSchedule?.source === 'running-broadcast' && <span className="badge badge-info">من البث الجاري الآن</span>}
+              {currentSchedule?.source === 'active-schedule-latest' && <span className="badge badge-info">آخر تجهيز للجدول النشط</span>}
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              يعرض البرامج والفواصل الموجودة داخل ملف التشغيل. أظهر الفواصل عند مراجعة الخريطة كاملة، وأخفها عند مراجعة أسماء البرامج ومواعيدها فقط.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="btn-ghost inline-flex items-center gap-2 text-xs"
+              disabled={currentScheduleLoading}
+              onClick={() => void loadCurrentBroadcastSchedule()}
+            >
+              <RefreshCw size={13} />
+              {currentScheduleLoading ? 'جاري التحديث...' : 'تحديث'}
+            </button>
+            <button
+              className="btn-primary inline-flex items-center gap-2 text-xs"
+              disabled={!currentSchedule?.playlist}
+              onClick={() => setShowScheduleFillers(value => !value)}
+            >
+              <Eye size={13} />
+              {showScheduleFillers ? 'إخفاء الفواصل' : 'إظهار الفواصل'}
+            </button>
+          </div>
+        </div>
+
+        {currentSchedule?.playlist && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
+            <div className="card">
+              <div style={{ color: 'var(--text-muted)' }}>كل العناصر</div>
+              <div className="text-lg font-bold">{currentScheduleCounts.total}</div>
+            </div>
+            <div className="card">
+              <div style={{ color: 'var(--text-muted)' }}>البرامج</div>
+              <div className="text-lg font-bold" style={{ color: 'var(--success)' }}>{currentScheduleCounts.programs}</div>
+            </div>
+            <div className="card">
+              <div style={{ color: 'var(--text-muted)' }}>الفواصل</div>
+              <div className="text-lg font-bold" style={{ color: 'var(--warning)' }}>{currentScheduleCounts.fillers}</div>
+            </div>
+            <div className="card">
+              <div style={{ color: 'var(--text-muted)' }}>Run ID</div>
+              <div className="text-xs font-mono break-all">{currentSchedule.playlist.runId}</div>
+            </div>
+          </div>
+        )}
+
+        {currentSchedule?.mismatch && (
+          <p className="text-xs whitespace-pre-line" style={{ color: 'var(--warning)' }}>
+            {currentSchedule.message || 'البث الحالي لا يشير إلى ملف تشغيل الجدول المعروض.'}
+          </p>
+        )}
+        {currentScheduleError && <p className="text-xs whitespace-pre-line" style={{ color: 'var(--danger)' }}>{currentScheduleError}</p>}
+
+        <DataTable
+          minWidth={1180}
+          empty={currentScheduleLoading ? 'جاري قراءة جدول البث...' : 'لا يوجد جدول تشغيل جاهز للعرض الآن'}
+          headers={['النوع', 'اليوم', 'البداية', 'النهاية', 'المدة', 'العنوان', 'الملف', 'الحالة']}
+          rows={currentScheduleItems.map(item => [
+            <span key="type" className={isScheduleFillerItem(item) ? 'badge badge-info' : 'badge badge-ready'}>
+              {scheduleItemTypeLabel(item)}
+            </span>,
+            item.date,
+            item.startTime,
+            item.endTime,
+            formatScheduleItemDuration(item),
+            <div key="title" className="space-y-1">
+              <div className="font-medium">{item.title}</div>
+              {item.programKey && <div className="text-[11px] font-mono" style={{ color: 'var(--text-muted)' }}>{item.programKey}</div>}
+            </div>,
+            <span key="file" title={item.absolutePath ?? item.relativePath ?? ''} className="text-xs break-all" style={{ color: 'var(--text-muted)' }}>
+              {shortMediaPath(item.absolutePath ?? item.relativePath)}
+            </span>,
+            scheduleItemStatusLabel(item.validationStatus),
+          ])}
+        />
+      </section>
+
+      <section className="card space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
               <XCircle size={18} style={{ color: 'var(--danger)' }} />
-              <h3 className="font-semibold">4. إيقاف البث الحالي</h3>
+              <h3 className="font-semibold">5. إيقاف البث الحالي</h3>
               {broadcastStatus?.status && <span className="badge badge-info">الحالة: {broadcastStatusLabel(broadcastStatus.status)}</span>}
             </div>
             <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
@@ -1451,10 +1621,20 @@ function PreviewIssueSummary({ preview }: { preview: ExcelPreview }) {
   );
 }
 
-function DataTable({ headers, rows, empty }: { headers: string[]; rows: Array<Array<ReactNode>>; empty: string }) {
+function DataTable({
+  headers,
+  rows,
+  empty,
+  minWidth = 980,
+}: {
+  headers: string[];
+  rows: Array<Array<ReactNode>>;
+  empty: string;
+  minWidth?: number;
+}) {
   return (
     <div className="card p-0 overflow-x-auto">
-      <table className="w-full text-sm min-w-[980px]">
+      <table className="w-full text-sm" style={{ minWidth }}>
         <thead>
           <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
             {headers.map(header => (
@@ -1953,6 +2133,47 @@ function describeMaterializationRunProblem(run: MaterializationRun): string {
   if (run.summary.testPlayoutEligible === false) return 'ملف التشغيل غير صالح للتشغيل بعد. راجع تفاصيل التجهيز.';
   if (run.status === 'failed') return 'تجهيز ملفات التشغيل فشل. راجع تفاصيل التجهيز.';
   return 'ملف التشغيل غير جاهز بعد.';
+}
+
+function isScheduleFillerItem(item: CurrentScheduleItem): boolean {
+  return item.type !== 'program' || item.sourceRole === 'filler' || item.sourceRole === 'emergency';
+}
+
+function scheduleItemTypeLabel(item: CurrentScheduleItem): string {
+  if (item.type === 'program') return 'برنامج';
+  if (item.sourceRole === 'emergency') return 'طوارئ';
+  return 'فاصل';
+}
+
+function formatScheduleItemDuration(item: CurrentScheduleItem): string {
+  const seconds = typeof item.durationSeconds === 'number'
+    ? item.durationSeconds
+    : typeof item.durationMinutes === 'number'
+      ? item.durationMinutes * 60
+      : typeof item.timelineEndSeconds === 'number' && typeof item.timelineStartSeconds === 'number'
+        ? Math.max(0, item.timelineEndSeconds - item.timelineStartSeconds)
+        : 0;
+  if (!seconds) return '-';
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  if (minutes <= 0) return `${remainder} ث`;
+  if (remainder === 0) return `${minutes} د`;
+  return `${minutes} د ${remainder} ث`;
+}
+
+function scheduleItemStatusLabel(status?: CurrentScheduleItem['validationStatus']): string {
+  if (status === 'ready') return 'جاهز';
+  if (status === 'missing_media') return 'ملف مفقود';
+  if (status === 'unknown_duration') return 'مدة غير معروفة';
+  return status || '-';
+}
+
+function shortMediaPath(value?: string | null): string {
+  if (!value) return '-';
+  const normalized = value.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 3) return normalized;
+  return `.../${parts.slice(-3).join('/')}`;
 }
 
 function broadcastStatusLabel(status: NonNullable<BroadcastStatus['status']>): string {
