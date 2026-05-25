@@ -829,17 +829,7 @@ export default function SchedulerFoundationPage() {
               الجداول المعتمدة مرتبة من الأحدث إلى الأقدم. زر التشغيل يفعّل الجدول ويجهز ملف التشغيل ثم يبدأ HLS.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {materializationLoading && <span className="badge badge-info">جاري تحديث حالة التشغيل</span>}
-            <button
-              className="btn-ghost inline-flex items-center gap-2 text-sm"
-              disabled={stoppingBroadcast || startingPublishedScheduleId !== null}
-              onClick={() => void stopLiveBroadcast()}
-            >
-              <XCircle size={14} />
-              {stoppingBroadcast ? 'جاري الإيقاف...' : 'إيقاف البث'}
-            </button>
-          </div>
+          {materializationLoading && <span className="badge badge-info">جاري تحديث حالة التشغيل</span>}
         </div>
 
         <DataTable
@@ -873,6 +863,35 @@ export default function SchedulerFoundationPage() {
 
         {quickBroadcastMessage && <p className="text-xs" style={{ color: 'var(--success)' }}>{quickBroadcastMessage}</p>}
         {quickBroadcastError && <p className="text-xs whitespace-pre-line" style={{ color: 'var(--danger)' }}>{quickBroadcastError}</p>}
+      </section>
+
+      <section className="card space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <XCircle size={18} style={{ color: 'var(--danger)' }} />
+              <h3 className="font-semibold">4. إيقاف البث الحالي</h3>
+              {broadcastStatus?.status && <span className="badge badge-info">الحالة: {broadcastStatusLabel(broadcastStatus.status)}</span>}
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              هذا الزر يوقف أي بث HLS يعمل الآن، سواء بدأ من جدول معتمد أو من بث قديم.
+            </p>
+          </div>
+          <button
+            className="btn-primary inline-flex items-center gap-2 text-sm"
+            disabled={stoppingBroadcast || startingPublishedScheduleId !== null}
+            onClick={() => void stopLiveBroadcast()}
+            style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}
+          >
+            <XCircle size={14} />
+            {stoppingBroadcast ? 'جاري إيقاف البث...' : 'إيقاف البث الآن'}
+          </button>
+        </div>
+        {broadcastStatus?.lastError && (
+          <p className="text-xs whitespace-pre-line" style={{ color: 'var(--danger)' }}>
+            آخر خطأ: {broadcastStatus.lastError}
+          </p>
+        )}
       </section>
     </div>
   );
