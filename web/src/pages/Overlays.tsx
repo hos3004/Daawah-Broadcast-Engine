@@ -13,7 +13,7 @@ import {
   Type,
   Upload,
 } from 'lucide-react';
-import { schedulerFoundationApi } from '../api/client';
+import { schedulerFoundationApi, broadcastApi, api } from '../api/client';
 
 type TabKey = 'logo' | 'ticker' | 'today' | 'preview';
 
@@ -321,6 +321,22 @@ export default function OverlaysPage() {
     }
   }
 
+  async function applyToBroadcast() {
+    setLoading('apply');
+    setMessage('');
+    try {
+      // Step 1: regenerate ticker WebM for today with current settings
+      await api.post(`/overlays/ticker/generate/${todayDate}`);
+      // Step 2: restart broadcast so ffmpeg picks up the new WebM
+      await broadcastApi.restart();
+      setMessage('✅ تم إعادة توليد التيكر وإعادة تشغيل البث بالإعدادات الجديدة.');
+    } catch (err) {
+      setMessage(errorText(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
   async function loadTodaySchedule() {
     setLoading('today');
     try {
@@ -557,6 +573,7 @@ export default function OverlaysPage() {
               className="w-full rounded px-3 py-2"
               style={inputStyle}
             >
+              <option value="Tajawal">Tajawal (مثبّت)</option>
               <option value="Noto Naskh Arabic">Noto Naskh Arabic</option>
               <option value="Amiri">Amiri</option>
               <option value="Noto Sans Arabic">Noto Sans Arabic</option>
@@ -575,6 +592,18 @@ export default function OverlaysPage() {
             <button className="btn-ghost flex items-center gap-2" disabled={loading !== null} onClick={() => void exportAss()}>
               <Download size={16} />
               تصدير ASS
+            </button>
+          </div>
+          <div className="rounded-md border p-3" style={{ borderColor: 'var(--accent)', background: 'var(--bg-secondary)' }}>
+            <p className="mb-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+              يعيد توليد ملف التيكر لتاريخ اليوم ثم يعيد تشغيل البث مباشرةً.
+            </p>
+            <button
+              className="btn-primary flex items-center gap-2"
+              disabled={loading !== null}
+              onClick={() => void applyToBroadcast()}
+            >
+              {loading === 'apply' ? '⏳ جارٍ التطبيق...' : '📡 تطبيق على البث الآن'}
             </button>
           </div>
         </section>

@@ -92,6 +92,34 @@ function parseColor(colorStr: string): { r: number; g: number; b: number; a: num
   return { r: 0, g: 0, b: 0, a: 0.6 };
 }
 
+function drawTickerBackground(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  bgColor: string
+): void {
+  if (bgColor.toLowerCase() !== 'gradient-blue') {
+    const bg = parseColor(bgColor);
+    ctx.fillStyle = `rgba(${bg.r},${bg.g},${bg.b},${bg.a})`;
+    ctx.fillRect(0, 0, width, height);
+    return;
+  }
+
+  const gradient = ctx.createLinearGradient(0, 0, width, 0);
+  gradient.addColorStop(0, '#042B66');
+  gradient.addColorStop(0.45, '#0B69D1');
+  gradient.addColorStop(1, '#021A3D');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  const shine = ctx.createLinearGradient(0, 0, 0, height);
+  shine.addColorStop(0, 'rgba(255,255,255,0.22)');
+  shine.addColorStop(0.45, 'rgba(255,255,255,0.04)');
+  shine.addColorStop(1, 'rgba(0,0,0,0.24)');
+  ctx.fillStyle = shine;
+  ctx.fillRect(0, 0, width, height);
+}
+
 export async function generateTickerPng(
   date: string,
   tickerConfig?: Partial<TickerConfig>
@@ -129,9 +157,7 @@ export async function generateTickerPng(
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
 
   // Background
-  const bg = parseColor(cfg.bgColor);
-  ctx.fillStyle = `rgba(${bg.r},${bg.g},${bg.b},${bg.a})`;
-  ctx.fillRect(0, 0, totalWidth, cfg.height);
+  drawTickerBackground(ctx, totalWidth, cfg.height, cfg.bgColor);
 
   // Text — right-to-left Arabic
   ctx.font = `${cfg.fontSize}px "${fontFamily}"`;
@@ -160,13 +186,25 @@ export async function generateTickerWebm(date: string): Promise<TickerGeneration
 
   const webmPath = pngPath.replace('.png', '.webm');
 
+  // tickerSpeed is in px/sec. The scroll filter's `horizontal` value is a
+  // per-frame fraction of the source width, so we must divide by fps × width:
+  //   h = tickerSpeed_px_per_sec / (fps * src_width_px)
+  // Without this correction the old formula (1/speed) ran ~fps× too fast.
+  const fps = config.broadcast.fps;
+  const h = (config.overlay.tickerSpeed / (fps * width)).toFixed(8);
+
+  // Double hflip reverses scroll direction so Arabic text moves RIGHT-to-LEFT
+  // (enters from the right, exits left) matching standard Arabic broadcast convention.
+  // Characters are un-mirrored because the flip is applied twice.
+  const scrollVf = `hflip,scroll=horizontal=${h}:v=0,hflip,crop=${broadcastWidth}:${height},format=yuva420p`;
+
   // Use FFmpeg scroll filter: scrolls the PNG horizontally
   const args = [
     '-y',
     '-loop', '1',
     '-t', String(scrollDuration),
     '-i', pngPath,
-    '-vf', `scroll=horizontal=1/${config.overlay.tickerSpeed}:v=0,crop=${broadcastWidth}:${height},format=yuva420p`,
+    '-vf', scrollVf,
     '-c:v', 'libvpx-vp9',
     '-b:v', '0',
     '-crf', '18',
