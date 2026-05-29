@@ -1,3 +1,4 @@
+import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
 import fs from 'fs';
 import path from 'path';
 import { config } from '../config';
@@ -10,9 +11,17 @@ export interface ProgramBadgeRange {
   endSeconds: number;
 }
 
+export interface ProgramBadgeTextLayer {
+  /** Full-frame transparent PNG with the program title rendered by canvas. */
+  pngPath: string;
+  /** Time ranges during which this title is visible. */
+  ranges: ProgramBadgeRange[];
+}
+
 export interface ProgramBadgeOverlayAssets {
   templatePath: string;
-  assPath: string;
+  /** One transparent PNG per program title, overlaid via ffmpeg `overlay`. */
+  textLayers: ProgramBadgeTextLayer[];
   backgroundRanges: ProgramBadgeRange[];
   eventCount: number;
 }
@@ -25,7 +34,7 @@ export interface ProgramBadgeOverlayOptions {
   templatePath?: string;
   outputDir?: string;
   maxWords?: number;
-  fontFamily?: string;
+  fontPath?: string;
   fontSize?: number;
 }
 
@@ -34,24 +43,41 @@ interface ProgramBadgeGroup {
   ranges: ProgramBadgeRange[];
 }
 
-// NOTE: The badge is rendered by libass (ffmpeg `subtitles` filter), NOT node-canvas.
-// Tajawal renders as .notdef boxes (tofu) for several contextual Arabic forms
-// (آ ت ق ى …) under this libass/harfbuzz build — confirmed even with the official
-// Google font. "Noto Sans Arabic" is a modern geometric sans-serif that shapes
-// correctly with libass, is installed system-wide, and visually matches Tajawal.
-// (The ticker keeps Tajawal because it uses node-canvas, a different text engine.)
-const DEFAULT_FONT_FAMILY = 'Noto Sans Arabic';
+// NOTE: The badge text is rendered by @napi-rs/canvas (Skia + a modern HarfBuzz),
+// the SAME engine the ticker uses, then composited over the video with ffmpeg's
+// `overlay` filter. The previous implementation drew the text with libass (ffmpeg
+// `subtitles` filter); under this server's older libass/HarfBuzz build several
+// contextual Arabic forms (آ ت ق ى …) rendered as .notdef boxes (tofu) for Tajawal
+// and every other modern Arabic font we tried. Canvas shapes the identical text
+// correctly, so the badge now uses the project's Tajawal font like the ticker does.
+// FFmpeg only ever sees a pre-rendered PNG, never raw text needing shaping.
+const DEFAULT_FONT_PATH = config.overlay.fontPath;
+const FONT_FAMILY = 'ProgramBadgeFont';
 const DEFAULT_MAX_WORDS = 3;
 const DEFAULT_FONT_SIZE = 30;
-// Bold weight for a thicker badge. Tried Lalezar, Noto Kufi Arabic, Almarai
-// ExtraBold, Cairo Bold and Changa Bold per request — all tofu the ق and a
-// contextual alef under this libass/harfbuzz build. Noto Sans Arabic is the only
-// family that shapes correctly, and its Bold weight (installed:
-// NotoSansArabic-Bold.ttf) gives the heavier look without breaking glyphs.
-const DEFAULT_BOLD = 1;
 const BADGE_TEXT_RIGHT = 137;
 const BADGE_HEIGHT = 45;
 const BADGE_Y_MARGIN_ABOVE_TICKER = 8;
+const TEXT_COLOR = '#FFFFFF';
+
+let fontLoaded = false;
+let fontAvailable = false;
+
+function ensureFontLoaded(fontPath: string): boolean {
+  if (fontLoaded) return fontAvailable;
+  fontLoaded = true;
+  try {
+    if (fs.existsSync(fontPath)) {
+      GlobalFonts.registerFromPath(fontPath, FONT_FAMILY);
+      fontAvailable = true;
+    } else {
+      logger.warn(`Program badge font was not found: ${fontPath}`);
+    }
+  } catch (err) {
+    logger.warn(`Could not register program badge font ${fontPath}: ${err}`);
+  }
+  return fontAvailable;
+}
 
 export function prepareProgramBadgeOverlayAssets(
   items: PlaylistItem[],
@@ -71,15 +97,24 @@ export function prepareProgramBadgeOverlayAssets(
   );
   if (groups.length === 0) return null;
 
+  const fontPath = options.fontPath ?? DEFAULT_FONT_PATH;
+  const fontFamily = ensureFontLoaded(fontPath) ? FONT_FAMILY : 'sans-serif';
+
   const outputDir = options.outputDir ?? path.join(config.paths.data, 'overlays', 'program-badges');
   ensureDir(outputDir);
-  const assPath = path.join(outputDir, `current-${sanitizeFilePart(options.date)}.ass`);
-  const ass = renderProgramBadgeAss(groups, options);
-  fs.writeFileSync(assPath, ass, 'utf8');
+
+  const datePart = sanitizeFilePart(options.date);
+  const textLayers: ProgramBadgeTextLayer[] = [];
+  groups.forEach((group, index) => {
+    const pngPath = path.join(outputDir, `current-${datePart}-${index}.png`);
+    const buffer = renderProgramBadgeTextPng(group.title, options, fontFamily);
+    fs.writeFileSync(pngPath, buffer);
+    textLayers.push({ pngPath, ranges: group.ranges });
+  });
 
   return {
     templatePath,
-    assPath,
+    textLayers,
     backgroundRanges: mergeRanges(groups.flatMap(group => group.ranges)),
     eventCount: groups.reduce((count, group) => count + group.ranges.length, 0),
   };
@@ -125,40 +160,37 @@ export function buildOverlayEnableExpression(ranges: ProgramBadgeRange[]): strin
     .join('+');
 }
 
-function renderProgramBadgeAss(groups: ProgramBadgeGroup[], options: ProgramBadgeOverlayOptions): string {
-  const fontFamily = cleanAssStyleField(options.fontFamily ?? DEFAULT_FONT_FAMILY);
+/**
+ * Renders the program title as a full-frame transparent PNG, positioned exactly
+ * where the old ASS layout placed it: right-aligned at x=BADGE_TEXT_RIGHT, centred
+ * vertically inside the badge pill, growing leftward (RTL). Using full-frame
+ * coordinates keeps the placement identical to the previous libass behaviour and
+ * lets ffmpeg overlay the layer at 0:0.
+ */
+function renderProgramBadgeTextPng(
+  title: string,
+  options: ProgramBadgeOverlayOptions,
+  fontFamily: string
+): Buffer {
+  const width = Math.max(1, Math.round(options.width));
+  const height = Math.max(1, Math.round(options.height));
   const fontSize = Math.max(10, Math.round(options.fontSize ?? DEFAULT_FONT_SIZE));
-  const badgeY = programBadgeY(options.height, options.tickerHeight);
+  const badgeY = programBadgeY(height, options.tickerHeight);
   const textY = badgeY + Math.round(BADGE_HEIGHT / 2);
 
-  const dialogues: string[] = [];
-  for (const group of groups) {
-    const text = escapeAssText(group.title);
-    for (const range of group.ranges) {
-      dialogues.push(
-        `Dialogue: 1,${formatAssTime(range.startSeconds)},${formatAssTime(range.endSeconds)},ProgramBadge,,0,0,0,,{\\an6\\pos(${BADGE_TEXT_RIGHT},${textY})}${text}`
-      );
-    }
-  }
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
 
-  return [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    `PlayResX: ${Math.round(options.width)}`,
-    `PlayResY: ${Math.round(options.height)}`,
-    'WrapStyle: 2',
-    'ScaledBorderAndShadow: yes',
-    'YCbCr Matrix: TV.709',
-    '',
-    '[V4+ Styles]',
-    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: ProgramBadge,${fontFamily},${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,${DEFAULT_BOLD},0,0,0,100,100,0,0,1,0,0,6,0,0,0,1`,
-    '',
-    '[Events]',
-    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-    ...dialogues,
-    '',
-  ].join('\n');
+  // `bold` gives the thicker weight requested; Skia synthesises it when the
+  // registered face has no dedicated bold instance (Tajawal-Medium).
+  ctx.font = `bold ${fontSize}px "${fontFamily}"`;
+  ctx.fillStyle = TEXT_COLOR;
+  ctx.textBaseline = 'middle';
+  ctx.direction = 'rtl';
+  ctx.textAlign = 'right';
+  ctx.fillText(title, BADGE_TEXT_RIGHT, textY);
+
+  return canvas.toBuffer('image/png');
 }
 
 export function programBadgeY(height: number, tickerHeight: number): number {
@@ -185,36 +217,9 @@ function isProgramItem(item: PlaylistItem): boolean {
 
 function cleanTitle(value: string | null | undefined): string {
   return (value ?? '')
-    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu, '')
+    .replace(/[‎‏‪-‮⁦-⁩]/gu, '')
     .replace(/\s+/gu, ' ')
     .trim();
-}
-
-function cleanAssStyleField(value: string): string {
-  return value.replace(/,/g, ' ').replace(/\s+/g, ' ').trim() || DEFAULT_FONT_FAMILY;
-}
-
-function escapeAssText(value: string): string {
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/\{/g, '\\{')
-    .replace(/\}/g, '\\}')
-    .replace(/\r\n|\r|\n/g, '\\N');
-}
-
-function formatAssTime(secondsValue: number): string {
-  const totalCentiseconds = Math.max(0, Math.round(secondsValue * 100));
-  const centiseconds = totalCentiseconds % 100;
-  const totalSeconds = Math.floor(totalCentiseconds / 100);
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  return `${hours}:${pad2(minutes)}:${pad2(seconds)}.${pad2(centiseconds)}`;
-}
-
-function pad2(value: number): string {
-  return String(value).padStart(2, '0');
 }
 
 function sanitizeFilePart(value: string): string {

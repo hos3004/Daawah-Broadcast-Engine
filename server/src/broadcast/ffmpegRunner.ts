@@ -11,6 +11,11 @@ import { getPlaylistForDate, getCurrentAndNext, type PlaylistItem } from '../pla
 import { checkEmergencyReadiness } from '../media/scanner';
 import { broadcastWs } from '../ws';
 import { buildAudioSyncAf } from '../media/normalizer';
+import {
+  buildOverlayEnableExpression,
+  prepareProgramBadgeOverlayAssets,
+  programBadgeY,
+} from '../overlay/programBadgeOverlay';
 
 export type BroadcastStatus = 'idle' | 'starting' | 'running' | 'stopping' | 'error' | 'emergency';
 
@@ -76,6 +81,12 @@ interface PreparedArtifactBroadcast {
   command: { args: string[] };
 }
 
+interface BroadcastResumeState {
+  mode: 'playlist_artifact';
+  playlistArtifactRunId: string;
+  updatedAt: string;
+}
+
 export function getBroadcastState(): BroadcastState {
   return { ...state };
 }
@@ -109,6 +120,9 @@ export async function startBroadcast(emergency = false): Promise<void> {
   emitStatus();
 
   await launchFfmpeg(emergency);
+  if (getBroadcastState().status === 'running') {
+    clearBroadcastResumeState();
+  }
 }
 
 export async function startPlaylistArtifactBroadcast(playlistRunId: string): Promise<void> {
@@ -116,7 +130,7 @@ export async function startPlaylistArtifactBroadcast(playlistRunId: string): Pro
     throw new Error('Broadcast already running');
   }
 
-  const prepared = preparePlaylistArtifactBroadcast(playlistRunId);
+  const prepared = await preparePlaylistArtifactBroadcast(playlistRunId);
 
   const emergencyCheck = checkEmergencyReadiness();
   if (!emergencyCheck.ok) {
@@ -138,6 +152,13 @@ export async function startPlaylistArtifactBroadcast(playlistRunId: string): Pro
   emitStatus();
 
   await launchFfmpeg(false, prepared);
+  if (getBroadcastState().status === 'running') {
+    writeBroadcastResumeState({
+      mode: 'playlist_artifact',
+      playlistArtifactRunId: prepared.runId,
+      updatedAt: new Date().toISOString(),
+    });
+  }
 }
 
 export async function stopBroadcast(reason = 'manual'): Promise<void> {
@@ -178,7 +199,28 @@ export async function stopBroadcast(reason = 'manual'): Promise<void> {
   state.artifactItems = null;
   emitStatus();
 
+  if (reason === 'manual' || reason === 'emergency') {
+    clearBroadcastResumeState();
+  }
+
   logger.info(`Broadcast stopped: ${reason}`);
+}
+
+export async function tryAutoResumeBroadcastOnStartup(): Promise<void> {
+  const resume = readBroadcastResumeState();
+  if (!resume) return;
+  if (state.status !== 'idle') return;
+
+  logger.info(`Auto-resume broadcast requested for playlist artifact ${resume.playlistArtifactRunId}`);
+  try {
+    await startPlaylistArtifactBroadcast(resume.playlistArtifactRunId);
+    logger.info(`Auto-resume broadcast started for playlist artifact ${resume.playlistArtifactRunId}`);
+  } catch (err) {
+    logger.error('Auto-resume broadcast failed', err);
+    state.status = 'error';
+    state.lastError = err instanceof Error ? err.message : String(err);
+    emitStatus();
+  }
 }
 
 export async function restartBroadcast(): Promise<void> {
@@ -249,7 +291,7 @@ async function launchFfmpeg(emergency: boolean, preparedArtifact?: PreparedArtif
 
   try {
     if (!emergency && (preparedArtifact || state.playlistArtifactRunId)) {
-      const prepared = preparedArtifact ?? preparePlaylistArtifactBroadcast(state.playlistArtifactRunId!);
+      const prepared = preparedArtifact ?? await preparePlaylistArtifactBroadcast(state.playlistArtifactRunId!);
       state.playlistArtifactRunId = prepared.runId;
       state.artifactItems = prepared.items;
       current = prepared.current;
@@ -261,7 +303,7 @@ async function launchFfmpeg(emergency: boolean, preparedArtifact?: PreparedArtif
       next = live.next;
       cmd = emergency
         ? buildEmergencyCommand()
-        : buildBroadcastCommand(date, current);
+        : await buildBroadcastCommand(date, current);
     }
   } catch (err) {
     if (err instanceof BroadcastPreflightError) {
@@ -392,7 +434,7 @@ function handleFfmpegExit(code: number): void {
   }, delay);
 }
 
-function buildBroadcastCommand(date: string, current: PlaylistItem | null): { args: string[] } | null {
+async function buildBroadcastCommand(date: string, current: PlaylistItem | null): Promise<{ args: string[] } | null> {
   const playlist = getPlaylistForDate(date);
 
   if (!playlist || playlist.items.length === 0) {
@@ -403,7 +445,7 @@ function buildBroadcastCommand(date: string, current: PlaylistItem | null): { ar
   return buildBroadcastCommandFromItems(playlist.items, current, date);
 }
 
-function buildBroadcastCommandFromItems(items: PlaylistItem[], current: PlaylistItem | null, date: string): { args: string[] } | null {
+async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: PlaylistItem | null, date: string): Promise<{ args: string[] } | null> {
   const now = Date.now();
   const remaining = items.filter(i => i.end_time_ms > now);
 
@@ -444,16 +486,18 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
 
   // Build FFmpeg concat input — -re for real-time pacing
   const concatListPath = path.join(config.paths.data, 'current-concat.txt');
-  fs.writeFileSync(concatListPath, buildConcatFileContents(available), 'utf-8');
+  fs.writeFileSync(concatListPath, buildConcatFileContents(available, now), 'utf-8');
 
   const broadcastRes = config.broadcast.resolution.split('x');
   const w = broadcastRes[0] ?? '1280';
   const h = broadcastRes[1] ?? '720';
+  const width = parseInt(w, 10) || 1280;
+  const height = parseInt(h, 10) || 720;
 
   const hlsPath = path.join(config.paths.hlsOutput, 'stream.m3u8');
   const segPattern = path.join(config.paths.hlsOutput, 'seg%05d.ts');
 
-  const logoPath = config.overlay.logoLoopPath;
+  const logoPath = resolveLogoOverlayPath(config.overlay.logoLoopPath);
   const hasLogo = fs.existsSync(logoPath);
 
   const tickerPath = path.join(config.paths.assets, 'overlays', 'tickers', `${date}.webm`);
@@ -462,6 +506,7 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
   // Now-playing PNG (lower third): shown for first N seconds of the session
   const nowPlayingPath = current?.lower_third_path ?? null;
   const hasNowPlaying = nowPlayingPath !== null && fs.existsSync(nowPlayingPath);
+  const programBadgeOverlay = tryPrepareProgramBadgeOverlayAssets(available, now, date, width, height);
 
   // Build filter_complex
   // -re before -i for real-time pacing
@@ -481,15 +526,43 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
     inputIdx++;
   }
 
+  if (programBadgeOverlay) {
+    const enable = buildOverlayEnableExpression(programBadgeOverlay.backgroundRanges);
+    if (enable) {
+      // Badge background pill ("الآن" template) — shown whenever any program is on.
+      inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', programBadgeOverlay.templatePath);
+      filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=0:${programBadgeY(height, config.overlay.tickerHeight)}:enable='${enable}':shortest=0[program_badge_bg]`;
+      lastLabel = '[program_badge_bg]';
+      inputIdx++;
+
+      // Program title text — one full-frame transparent PNG per title (rendered by
+      // canvas with Tajawal, no libass), each enabled during its own time ranges.
+      programBadgeOverlay.textLayers.forEach((layer, layerIdx) => {
+        const layerEnable = buildOverlayEnableExpression(layer.ranges);
+        if (!layerEnable) return;
+        inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', layer.pngPath);
+        const outLabel = `[program_badge_text_${layerIdx}]`;
+        filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=0:0:enable='${layerEnable}':shortest=0${outLabel}`;
+        lastLabel = outLabel;
+        inputIdx++;
+      });
+    }
+  }
+
   if (hasLogo) {
-    inputs.push('-stream_loop', '-1', '-i', logoPath);
-    filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=${config.overlay.logoPosition}:shortest=0[logo]`;
+    if (isStaticImageOverlay(logoPath)) {
+      inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', logoPath);
+    } else {
+      inputs.push('-stream_loop', '-1', '-i', logoPath);
+    }
+    filterComplex += `;[${inputIdx}:v]scale=${config.overlay.logoWidth}:-1:force_original_aspect_ratio=decrease,format=rgba[logo_rgba]`;
+    filterComplex += `;${lastLabel}[logo_rgba]overlay=${config.overlay.logoPosition}:shortest=0[logo]`;
     lastLabel = '[logo]';
     inputIdx++;
   }
 
   if (hasTicker) {
-    const ty = parseInt(h, 10) - config.overlay.tickerHeight - 10;
+    const ty = Math.max(0, parseInt(h, 10) - config.overlay.tickerHeight);
     inputs.push('-stream_loop', '-1', '-i', tickerPath);
     filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=0:${ty}:shortest=0[ticker]`;
     lastLabel = '[ticker]';
@@ -510,7 +583,7 @@ function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Playlist
     // positive offset relative to video (observed: 13+ s ahead after 5 min).
     '-af', buildAudioSyncAf({ audioRate: config.broadcast.audioRate }),
     '-c:v', 'libx264',
-    '-preset', 'veryfast',
+    '-preset', config.broadcast.encoderPreset,
     '-tune', 'zerolatency',
     '-b:v', config.broadcast.videoBitrate,
     '-maxrate', config.broadcast.videoBitrate,
@@ -564,7 +637,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
       '-stream_loop', '-1',
       '-re', '-f', 'concat', '-safe', '0', '-i', concatPath,
       '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},setpts=N/(${config.broadcast.fps}*TB),settb=1/${config.broadcast.fps}`,
-      '-c:v', 'libx264', '-preset', 'veryfast',
+      '-c:v', 'libx264', '-preset', config.broadcast.encoderPreset,
       '-b:v', config.broadcast.videoBitrate,
       '-pix_fmt', 'yuv420p',
       '-af', buildAudioSyncAf({ audioRate: config.broadcast.audioRate }),
@@ -580,7 +653,7 @@ function buildEmergencyCommand(): { args: string[] } | null {
   };
 }
 
-export function buildConcatFileContents(items: PlaylistItem[]): string {
+export function buildConcatFileContents(items: PlaylistItem[], playbackStartMs?: number): string {
   // ffconcat `duration` MUST only come from a trusted real duration.
   // For trimmed items the trim length is the intended (real, bounded) duration,
   // so we emit outpoint+duration. For non-trimmed items we emit NO duration and
@@ -591,21 +664,45 @@ export function buildConcatFileContents(items: PlaylistItem[]): string {
   // We deliberately do NOT use item.duration_ms here: for fillers it is the
   // slot/gap length (or an assumed 60s), not the real file duration, and trusting
   // it caused frozen-frame gaps when duration_ms > the real file length.
+  const firstOffsetMs = playbackStartMs === undefined || items.length === 0
+    ? 0
+    : getPlaybackOffsetMs(items[0]!, playbackStartMs);
   const hasTrimmedItems = items.some(item => getTrimDurationMs(item) !== null);
-  const lines: string[] = hasTrimmedItems ? ['ffconcat version 1.0'] : [];
+  const needsFfconcatHeader = hasTrimmedItems || firstOffsetMs > 0;
+  const lines: string[] = needsFfconcatHeader ? ['ffconcat version 1.0'] : [];
 
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
+    const trimDurationMs = getTrimDurationMs(item);
+    const offsetMs = index === 0 && playbackStartMs !== undefined
+      ? getPlaybackOffsetMs(item, playbackStartMs)
+      : 0;
+
+    if (trimDurationMs !== null && offsetMs >= trimDurationMs) {
+      continue;
+    }
+
     lines.push(formatConcatFileLine(item.media_path));
 
-    const trimDurationMs = getTrimDurationMs(item);
+    if (offsetMs > 0) {
+      lines.push(`inpoint ${formatSeconds(offsetMs)}`);
+    }
+
     if (trimDurationMs !== null) {
-      const seconds = formatSeconds(trimDurationMs);
-      lines.push(`outpoint ${seconds}`);
-      lines.push(`duration ${seconds}`);
+      const outpointSeconds = formatSeconds(trimDurationMs);
+      const remainingSeconds = formatSeconds(trimDurationMs - offsetMs);
+      lines.push(`outpoint ${outpointSeconds}`);
+      lines.push(`duration ${remainingSeconds}`);
     }
   }
 
   return lines.join('\n');
+}
+
+function getPlaybackOffsetMs(item: PlaylistItem, playbackStartMs: number): number {
+  if (!Number.isFinite(item.start_time_ms) || playbackStartMs <= item.start_time_ms) {
+    return 0;
+  }
+  return Math.max(0, Math.round(playbackStartMs - item.start_time_ms));
 }
 
 function getTrimDurationMs(item: PlaylistItem): number | null {
@@ -614,6 +711,41 @@ function getTrimDurationMs(item: PlaylistItem): number | null {
   }
 
   return item.trim_out_ms ?? item.forced_duration_ms ?? item.duration_ms;
+}
+
+function resolveLogoOverlayPath(configuredPath: string): string {
+  const ext = path.extname(configuredPath);
+  if (ext) {
+    const pngCandidate = path.join(path.dirname(configuredPath), `${path.basename(configuredPath, ext)}.png`);
+    if (fs.existsSync(pngCandidate)) {
+      return pngCandidate;
+    }
+  }
+  return configuredPath;
+}
+
+function isStaticImageOverlay(filePath: string): boolean {
+  return ['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(filePath).toLowerCase());
+}
+
+function tryPrepareProgramBadgeOverlayAssets(
+  items: PlaylistItem[],
+  playbackStartMs: number,
+  date: string,
+  width: number,
+  height: number
+): ReturnType<typeof prepareProgramBadgeOverlayAssets> {
+  try {
+    return prepareProgramBadgeOverlayAssets(items, playbackStartMs, {
+      date,
+      width,
+      height,
+      tickerHeight: config.overlay.tickerHeight,
+    });
+  } catch (err) {
+    logger.warn(`Program badge overlay was skipped: ${err}`);
+    return null;
+  }
 }
 
 /**
@@ -758,7 +890,7 @@ function updateCurrentItem(): void {
   }
 }
 
-function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadcast {
+async function preparePlaylistArtifactBroadcast(runId: string): Promise<PreparedArtifactBroadcast> {
   const safeRunId = sanitizePlaylistRunId(runId);
   const playlistRoot = path.join(getProjectRoot(), 'generated', 'playlists');
   const runDir = path.join(playlistRoot, safeRunId);
@@ -795,8 +927,10 @@ function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadc
   }
 
   const artifact = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as {
+    days?: Array<{ date?: string; itemCount?: number }>;
     items?: Array<{
       id?: string;
+      date?: string;
       type?: string;
       sourceRole?: string;
       mediaFileId?: string | null;
@@ -810,9 +944,9 @@ function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadc
     }>;
   };
 
-  const baseMs = Date.now();
   const items: PlaylistItem[] = [];
-  let cursorMs = baseMs;
+  let fallbackCursorMs = Date.now();
+  const fallbackDate = findFirstArtifactDate(artifact);
   let skipped = 0;
 
   for (const [index, item] of (artifact.items ?? []).entries()) {
@@ -822,7 +956,7 @@ function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadc
       continue;
     }
 
-    const durationMs = Math.max(
+    const declaredDurationMs = Math.max(
       1000,
       Math.round(
         (typeof item.durationSeconds === 'number' && item.durationSeconds > 0
@@ -830,9 +964,11 @@ function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadc
           : Math.max(1, (item.timelineEndSeconds ?? 0) - (item.timelineStartSeconds ?? 0))) * 1000
       )
     );
-    const startMs = cursorMs;
-    const endMs = startMs + durationMs;
-    cursorMs = endMs;
+    const timelineMs = getArtifactTimelineMs(item, fallbackDate);
+    const startMs = timelineMs?.startMs ?? fallbackCursorMs;
+    const endMs = timelineMs?.endMs ?? (startMs + declaredDurationMs);
+    const durationMs = Math.max(1000, endMs - startMs);
+    fallbackCursorMs = endMs;
 
     items.push({
       id: item.id ?? `${safeRunId}-${index}`,
@@ -860,14 +996,70 @@ function preparePlaylistArtifactBroadcast(runId: string): PreparedArtifactBroadc
     throw new Error(`Prepared playlist has no playable media files${skipped > 0 ? ` (${skipped} missing)` : ''}.`);
   }
 
-  const current = items[0] ?? null;
-  const next = items[1] ?? null;
-  const command = buildBroadcastCommandFromItems(items, current, dayjs().format('YYYY-MM-DD'));
+  items.sort((a, b) => a.start_time_ms - b.start_time_ms || a.position - b.position);
+  items.forEach((item, index) => { item.position = index; });
+
+  const now = Date.now();
+  const current = items.find(item => item.start_time_ms <= now && item.end_time_ms > now) ?? null;
+  const next = items.find(item => item.start_time_ms > now) ?? null;
+  const command = await buildBroadcastCommandFromItems(items, current, dayjs().format('YYYY-MM-DD'));
   if (!command) {
     throw new Error('Could not build FFmpeg command for prepared playlist.');
   }
 
   return { runId: safeRunId, items, current, next, command };
+}
+
+function findFirstArtifactDate(artifact: {
+  days?: Array<{ date?: string }>;
+  items?: Array<{ date?: string }>;
+}): string | null {
+  for (const item of artifact.items ?? []) {
+    const date = normalizeArtifactDate(item.date);
+    if (date) return date;
+  }
+  for (const day of artifact.days ?? []) {
+    const date = normalizeArtifactDate(day.date);
+    if (date) return date;
+  }
+  return null;
+}
+
+function getArtifactTimelineMs(
+  item: { date?: string; timelineStartSeconds?: number; timelineEndSeconds?: number },
+  fallbackDate: string | null
+): { startMs: number; endMs: number } | null {
+  const date = normalizeArtifactDate(item.date) ?? fallbackDate;
+  const startSeconds = finiteNumber(item.timelineStartSeconds);
+  const endSeconds = finiteNumber(item.timelineEndSeconds);
+  if (!date || startSeconds === null || endSeconds === null || endSeconds <= startSeconds) {
+    return null;
+  }
+
+  const dayStartMs = getLocalDayStartMs(date);
+  if (dayStartMs === null) {
+    return null;
+  }
+
+  return {
+    startMs: dayStartMs + Math.round(startSeconds * 1000),
+    endMs: dayStartMs + Math.round(endSeconds * 1000),
+  };
+}
+
+function normalizeArtifactDate(date: unknown): string | null {
+  if (typeof date !== 'string') return null;
+  const trimmed = date.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function getLocalDayStartMs(date: string): number | null {
+  const parsed = dayjs(`${date}T00:00:00`);
+  return parsed.isValid() ? parsed.valueOf() : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function sanitizePlaylistRunId(runId: string): string {
@@ -884,6 +1076,52 @@ function getProjectRoot(): string {
     process.env['TEST_PLAYOUT_PROJECT_ROOT'] ??
     path.resolve(__dirname, '../../..')
   );
+}
+
+function getBroadcastResumeStatePath(): string {
+  return path.join(config.paths.data, 'broadcast-resume.json');
+}
+
+function writeBroadcastResumeState(resume: BroadcastResumeState): void {
+  try {
+    ensureDir(config.paths.data);
+    fs.writeFileSync(getBroadcastResumeStatePath(), `${JSON.stringify(resume, null, 2)}\n`, 'utf8');
+  } catch (err) {
+    logger.warn(`Could not write broadcast resume state: ${err}`);
+  }
+}
+
+function readBroadcastResumeState(): BroadcastResumeState | null {
+  const resumePath = getBroadcastResumeStatePath();
+  if (!fs.existsSync(resumePath)) return null;
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resumePath, 'utf8')) as Partial<BroadcastResumeState>;
+    if (
+      parsed.mode !== 'playlist_artifact' ||
+      typeof parsed.playlistArtifactRunId !== 'string' ||
+      !parsed.playlistArtifactRunId.trim()
+    ) {
+      return null;
+    }
+    return {
+      mode: 'playlist_artifact',
+      playlistArtifactRunId: parsed.playlistArtifactRunId.trim(),
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
+    };
+  } catch (err) {
+    logger.warn(`Could not read broadcast resume state: ${err}`);
+    return null;
+  }
+}
+
+function clearBroadcastResumeState(): void {
+  const resumePath = getBroadcastResumeStatePath();
+  try {
+    if (fs.existsSync(resumePath)) fs.unlinkSync(resumePath);
+  } catch (err) {
+    logger.warn(`Could not clear broadcast resume state: ${err}`);
+  }
 }
 
 function emitStatus(): void {
