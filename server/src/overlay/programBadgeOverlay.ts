@@ -43,6 +43,12 @@ interface ProgramBadgeGroup {
 const DEFAULT_FONT_FAMILY = 'Noto Sans Arabic';
 const DEFAULT_MAX_WORDS = 3;
 const DEFAULT_FONT_SIZE = 30;
+// Bold weight for a thicker badge. Tried Lalezar, Noto Kufi Arabic, Almarai
+// ExtraBold, Cairo Bold and Changa Bold per request — all tofu the ق and a
+// contextual alef under this libass/harfbuzz build. Noto Sans Arabic is the only
+// family that shapes correctly, and its Bold weight (installed:
+// NotoSansArabic-Bold.ttf) gives the heavier look without breaking glyphs.
+const DEFAULT_BOLD = 1;
 const BADGE_TEXT_RIGHT = 137;
 const BADGE_HEIGHT = 45;
 const BADGE_Y_MARGIN_ABOVE_TICKER = 8;
@@ -146,7 +152,7 @@ function renderProgramBadgeAss(groups: ProgramBadgeGroup[], options: ProgramBadg
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: ProgramBadge,${fontFamily},${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,6,0,0,0,1`,
+    `Style: ProgramBadge,${fontFamily},${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,${DEFAULT_BOLD},0,0,0,100,100,0,0,1,0,0,6,0,0,0,1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
