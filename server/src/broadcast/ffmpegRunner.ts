@@ -535,17 +535,17 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
       lastLabel = '[program_badge_bg]';
       inputIdx++;
 
-      // Program title text — one full-frame transparent PNG per title (rendered by
-      // canvas with Tajawal, no libass), each enabled during its own time ranges.
-      programBadgeOverlay.textLayers.forEach((layer, layerIdx) => {
-        const layerEnable = buildOverlayEnableExpression(layer.ranges);
-        if (!layerEnable) return;
-        inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', layer.pngPath);
-        const outLabel = `[program_badge_text_${layerIdx}]`;
-        filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=0:0:enable='${layerEnable}':shortest=0${outLabel}`;
-        lastLabel = outLabel;
-        inputIdx++;
-      });
+      // Program title text — ALL titles live in one transparent sprite PNG
+      // (rendered by canvas with Tajawal, no libass). A time-based `crop` selects
+      // the active row, so the text is composited with a single overlay regardless
+      // of how many programs the day has. The previous per-title overlay chain
+      // dropped the encoder to ~0.40x realtime; this keeps it above 5x.
+      const textLayerY = programBadgeOverlay.textLayerY;
+      inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', programBadgeOverlay.spritePath);
+      filterComplex += `;[${inputIdx}:v]crop=${programBadgeOverlay.spriteWidth}:${programBadgeOverlay.rowHeight}:0:'${programBadgeOverlay.cropYExpression}'[program_badge_text_src]`;
+      filterComplex += `;${lastLabel}[program_badge_text_src]overlay=0:${textLayerY}:shortest=0[program_badge_text]`;
+      lastLabel = '[program_badge_text]';
+      inputIdx++;
     }
   }
 

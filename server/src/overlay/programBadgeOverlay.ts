@@ -11,17 +11,25 @@ export interface ProgramBadgeRange {
   endSeconds: number;
 }
 
-export interface ProgramBadgeTextLayer {
-  /** Full-frame transparent PNG with the program title rendered by canvas. */
-  pngPath: string;
-  /** Time ranges during which this title is visible. */
-  ranges: ProgramBadgeRange[];
-}
-
 export interface ProgramBadgeOverlayAssets {
+  /** The "الآن" pill template, overlaid (statically positioned) while any program runs. */
   templatePath: string;
-  /** One transparent PNG per program title, overlaid via ffmpeg `overlay`. */
-  textLayers: ProgramBadgeTextLayer[];
+  /**
+   * A single transparent sprite PNG: row 0 is fully transparent (shown during
+   * gaps), and rows 1..N each hold one program title rendered by canvas. A
+   * time-based ffmpeg `crop` selects the active row, so the whole badge text is
+   * composited with ONE overlay regardless of how many programs the day has.
+   */
+  spritePath: string;
+  /** Width in px of the sprite (and of the crop window). */
+  spriteWidth: number;
+  /** Height in px of each sprite row (and of the crop window). */
+  rowHeight: number;
+  /** ffmpeg `crop` y-expression selecting the active row by playback time `t`. */
+  cropYExpression: string;
+  /** Y offset at which the cropped strip is overlaid (x is always 0). */
+  textLayerY: number;
+  /** Ranges during which the pill background is shown (any program on air). */
   backgroundRanges: ProgramBadgeRange[];
   eventCount: number;
 }
@@ -51,6 +59,12 @@ interface ProgramBadgeGroup {
 // and every other modern Arabic font we tried. Canvas shapes the identical text
 // correctly, so the badge now uses the project's Tajawal font like the ticker does.
 // FFmpeg only ever sees a pre-rendered PNG, never raw text needing shaping.
+//
+// PERFORMANCE: all titles share ONE sprite PNG (one transparent gap row + one row
+// per title). A time-based `crop` picks the active row and a single `overlay`
+// composites it. An earlier design overlaid one looped image input per title; with
+// ~19 titles that deep overlay chain dropped the encoder to ~0.40x realtime. The
+// single-input/single-overlay sprite restores >5x headroom.
 const DEFAULT_FONT_PATH = config.overlay.fontPath;
 const FONT_FAMILY = 'ProgramBadgeFont';
 const DEFAULT_MAX_WORDS = 3;
@@ -59,6 +73,11 @@ const BADGE_TEXT_RIGHT = 137;
 const BADGE_HEIGHT = 45;
 const BADGE_Y_MARGIN_ABOVE_TICKER = 8;
 const TEXT_COLOR = '#FFFFFF';
+// The sprite is a narrow strip (not full-frame) so ffmpeg only alpha-composites a
+// tiny region per frame. It is wide enough to cover the pill area up to
+// BADGE_TEXT_RIGHT and a bit taller than the pill to clear Arabic ascenders/descenders.
+const BADGE_TEXT_STRIP_WIDTH = 256;
+const BADGE_TEXT_STRIP_HEIGHT = 60;
 
 let fontLoaded = false;
 let fontAvailable = false;
@@ -104,17 +123,17 @@ export function prepareProgramBadgeOverlayAssets(
   ensureDir(outputDir);
 
   const datePart = sanitizeFilePart(options.date);
-  const textLayers: ProgramBadgeTextLayer[] = [];
-  groups.forEach((group, index) => {
-    const pngPath = path.join(outputDir, `current-${datePart}-${index}.png`);
-    const buffer = renderProgramBadgeTextPng(group.title, options, fontFamily);
-    fs.writeFileSync(pngPath, buffer);
-    textLayers.push({ pngPath, ranges: group.ranges });
-  });
+  const spritePath = path.join(outputDir, `current-${datePart}.png`);
+  const buffer = renderProgramBadgeSpritePng(groups.map(group => group.title), options, fontFamily);
+  fs.writeFileSync(spritePath, buffer);
 
   return {
     templatePath,
-    textLayers,
+    spritePath,
+    spriteWidth: BADGE_TEXT_STRIP_WIDTH,
+    rowHeight: BADGE_TEXT_STRIP_HEIGHT,
+    cropYExpression: buildBadgeCropYExpression(groups, BADGE_TEXT_STRIP_HEIGHT),
+    textLayerY: programBadgeTextLayerY(options.height, options.tickerHeight),
     backgroundRanges: mergeRanges(groups.flatMap(group => group.ranges)),
     eventCount: groups.reduce((count, group) => count + group.ranges.length, 0),
   };
@@ -161,24 +180,37 @@ export function buildOverlayEnableExpression(ranges: ProgramBadgeRange[]): strin
 }
 
 /**
- * Renders the program title as a full-frame transparent PNG, positioned exactly
- * where the old ASS layout placed it: right-aligned at x=BADGE_TEXT_RIGHT, centred
- * vertically inside the badge pill, growing leftward (RTL). Using full-frame
- * coordinates keeps the placement identical to the previous libass behaviour and
- * lets ffmpeg overlay the layer at 0:0.
+ * Builds the ffmpeg `crop` y-expression that selects the active sprite row by
+ * playback time. Row 0 (y=0) is the transparent gap; group `i` lives on row
+ * `i+1` at `y=(i+1)*rowHeight`. Groups never overlap in time, but we still nest
+ * the conditions and default to 0 so any uncovered instant shows the gap row.
  */
-function renderProgramBadgeTextPng(
-  title: string,
+export function buildBadgeCropYExpression(groups: ProgramBadgeGroup[], rowHeight: number): string {
+  let expr = '0';
+  // Build from last group to first so the first group ends up outermost.
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const condition = buildOverlayEnableExpression(groups[i]!.ranges);
+    if (!condition) continue;
+    expr = `if(${condition},${(i + 1) * rowHeight},${expr})`;
+  }
+  return expr;
+}
+
+/**
+ * Renders all program titles into a single transparent sprite PNG. Row 0 is left
+ * fully transparent (shown during gaps); each subsequent row holds one title,
+ * right-aligned at x=BADGE_TEXT_RIGHT and vertically centred in its row, growing
+ * leftward (RTL) — identical placement to the previous per-strip layout.
+ */
+function renderProgramBadgeSpritePng(
+  titles: string[],
   options: ProgramBadgeOverlayOptions,
   fontFamily: string
 ): Buffer {
-  const width = Math.max(1, Math.round(options.width));
-  const height = Math.max(1, Math.round(options.height));
   const fontSize = Math.max(10, Math.round(options.fontSize ?? DEFAULT_FONT_SIZE));
-  const badgeY = programBadgeY(height, options.tickerHeight);
-  const textY = badgeY + Math.round(BADGE_HEIGHT / 2);
+  const rowCount = titles.length + 1; // +1 for the transparent gap row at index 0.
 
-  const canvas = createCanvas(width, height);
+  const canvas = createCanvas(BADGE_TEXT_STRIP_WIDTH, BADGE_TEXT_STRIP_HEIGHT * rowCount);
   const ctx = canvas.getContext('2d');
 
   // `bold` gives the thicker weight requested; Skia synthesises it when the
@@ -188,13 +220,24 @@ function renderProgramBadgeTextPng(
   ctx.textBaseline = 'middle';
   ctx.direction = 'rtl';
   ctx.textAlign = 'right';
-  ctx.fillText(title, BADGE_TEXT_RIGHT, textY);
+
+  titles.forEach((title, index) => {
+    const rowTop = (index + 1) * BADGE_TEXT_STRIP_HEIGHT;
+    ctx.fillText(title, BADGE_TEXT_RIGHT, rowTop + Math.round(BADGE_TEXT_STRIP_HEIGHT / 2));
+  });
 
   return canvas.toBuffer('image/png');
 }
 
 export function programBadgeY(height: number, tickerHeight: number): number {
   return Math.max(0, Math.round(height - tickerHeight - BADGE_HEIGHT - BADGE_Y_MARGIN_ABOVE_TICKER));
+}
+
+/** Y offset for overlaying the cropped strip so its centre matches the pill centre. */
+export function programBadgeTextLayerY(height: number, tickerHeight: number): number {
+  const badgeY = programBadgeY(height, tickerHeight);
+  const textCenter = badgeY + Math.round(BADGE_HEIGHT / 2);
+  return Math.max(0, textCenter - Math.round(BADGE_TEXT_STRIP_HEIGHT / 2));
 }
 
 function mergeRanges(ranges: ProgramBadgeRange[]): ProgramBadgeRange[] {
