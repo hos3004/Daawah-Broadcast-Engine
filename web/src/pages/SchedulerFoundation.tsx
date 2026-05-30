@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays,
   CheckCircle2,
@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { broadcastApi, mediaApi, schedulerFoundationApi } from '../api/client';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 interface ExcelIssue {
   severity: 'error' | 'warning' | 'info';
@@ -43,6 +44,7 @@ interface ProgramRow {
   status: 'ok' | 'warning' | 'error';
   program_key: string;
   program_name: string;
+  hide_logo: boolean;
   folder_root: string;
   folder_hint: string;
   play_mode: string;
@@ -160,8 +162,9 @@ interface ProgramFolderOption {
   status: string;
 }
 
-type WizardSlotMode = 'fit' | 'playlist' | 'file-count';
+type WizardSlotMode = 'fit' | 'playlist' | 'file-count' | 'kids-round-robin';
 type WizardPlayMode = 'sequential' | 'shuffle' | 'newest' | 'round_robin';
+type WizardCycleRepeatCount = 1 | 2 | 3 | 4;
 
 interface WizardProgramDraft {
   localId: string;
@@ -181,7 +184,49 @@ interface WizardProgramDraft {
   secondRepeatTime: string;
   durationMinutes: number;
   fileCountLimit: number;
+  hideLogo: boolean;
   notes: string;
+}
+
+interface KeyedWizardRow {
+  row: WizardProgramDraft;
+  key: string;
+  rowIndex: number;
+}
+
+interface WizardPayloadSlot extends Record<string, unknown> {
+  program_key: string;
+  days: string;
+  start_time: string;
+  duration_minutes: number;
+  effective_from: string;
+  effective_to: string;
+  priority: number;
+  notes: string;
+}
+
+interface WizardAiring {
+  keyedRow: KeyedWizardRow;
+  time: string;
+  timeIndex: number;
+  cycleIndex: number;
+  cycleRepeatCount: WizardCycleRepeatCount;
+  day: string;
+  startMinutes: number;
+  durationMinutes: number;
+}
+
+interface ScanProgress {
+  total: number;
+  scanned: number;
+  errors: number;
+  currentFile: string;
+  phase?: string;
+}
+
+interface WizardFolderScanTarget {
+  rootId: string;
+  path: string;
 }
 
 interface PreviewSource {
@@ -351,9 +396,12 @@ const slotModeLabels: Record<WizardSlotMode, string> = {
   fit: 'fit',
   playlist: 'playlist',
   'file-count': 'file-count',
+  'kids-round-robin': 'kids 1h round-robin',
 };
 
 const MAX_REASONABLE_WIZARD_SLOT_MINUTES = 6 * 60;
+const WIZARD_FULL_DAY_MINUTES = 24 * 60;
+const WIZARD_QUARTER_HOUR_MINUTES = 15;
 
 export default function SchedulerFoundationPage() {
   const [previewSource, setPreviewSource] = useState<PreviewSource | null>(null);
@@ -386,6 +434,7 @@ export default function SchedulerFoundationPage() {
   const [wizardStep, setWizardStep] = useState(1);
   const [wizardStartDate, setWizardStartDate] = useState(() => todayDateInputValue());
   const [wizardEndDate, setWizardEndDate] = useState(() => todayDateInputValue());
+  const [wizardCycleRepeatCount, setWizardCycleRepeatCount] = useState<WizardCycleRepeatCount>(1);
   const [wizardProgramText, setWizardProgramText] = useState('');
   const [wizardRows, setWizardRows] = useState<WizardProgramDraft[]>([]);
   const [wizardEditingDraftId, setWizardEditingDraftId] = useState<string | null>(null);
@@ -393,6 +442,9 @@ export default function SchedulerFoundationPage() {
   const [wizardLoadingFolders, setWizardLoadingFolders] = useState(false);
   const [wizardBuilding, setWizardBuilding] = useState(false);
   const [wizardError, setWizardError] = useState('');
+  const [wizardScanningFolders, setWizardScanningFolders] = useState(false);
+  const [wizardScanProgress, setWizardScanProgress] = useState<ScanProgress | null>(null);
+  const wizardScanningFoldersRef = useRef(false);
 
   const approvalBlockers = useMemo(() => preview ? scheduleApprovalBlockers(preview) : [], [preview]);
   const canApproveSchedule = Boolean(previewSource && preview && approvalBlockers.length === 0 && !approvedSchedule);
@@ -437,16 +489,70 @@ export default function SchedulerFoundationPage() {
     }
   };
 
+  const syncWizardRowsWithFolders = useCallback((folders: ProgramFolderOption[]) => {
+    setWizardRows(rows => rows.map(row => {
+      if (!row.folderId) return row;
+      const folder = folders.find(item => item.id === row.folderId);
+      if (!folder) return row;
+
+      const longestDurationMs = folder.active_longest_file_duration_ms ?? folder.longest_file_duration_ms ?? null;
+      const fileCount = folder.active_file_count ?? folder.file_count ?? null;
+      const wasMissingDuration = !row.longestDurationMs || row.longestDurationMs <= 0;
+      const isKids = row.slotMode === 'kids-round-robin' || isKidsWizardProgram(row.name, folder);
+      const roundedDuration = roundDurationMsToMinutes(longestDurationMs);
+
+      return {
+        ...row,
+        folderRoot: folder.root_key,
+        folderHint: folder.original_relative_path,
+        fileCount,
+        longestDurationMs,
+        durationMinutes: isKids ? 60 : wasMissingDuration && roundedDuration ? roundedDuration : row.durationMinutes,
+        slotMode: isKids ? 'kids-round-robin' : row.slotMode,
+        playMode: isKids ? 'sequential' : row.playMode,
+      };
+    }));
+  }, []);
+
+  const refreshWizardFoldersForRows = useCallback(async () => {
+    const folders = await loadWizardFolders(true);
+    syncWizardRowsWithFolders(folders);
+  }, [loadWizardFolders, syncWizardRowsWithFolders]);
+
+  const handleWizardScanWs = useCallback((msg: { type: string; data?: unknown }) => {
+    if (!wizardScanningFoldersRef.current) return;
+    if (msg.type === 'scan_progress') {
+      setWizardScanProgress(msg.data as ScanProgress);
+    }
+    if (msg.type === 'scan_complete' || msg.type === 'scan_error') {
+      wizardScanningFoldersRef.current = false;
+      setWizardScanningFolders(false);
+      setWizardScanProgress(null);
+      void refreshWizardFoldersForRows();
+      if (msg.type === 'scan_complete') {
+        setWorkflowMessage('اكتمل فحص المجلدات المحددة وتم تحديث بيانات أطول الملفات في الويزرد.');
+      } else {
+        setWorkflowError('تعذر إكمال فحص المجلدات المحددة. راجع سجل الفحص ثم حاول مرة أخرى.');
+      }
+    }
+  }, [refreshWizardFoldersForRows]);
+
+  useWebSocket(handleWizardScanWs);
+
   const openScheduleWizard = () => {
     const today = todayDateInputValue();
     setWizardEditingDraftId(null);
     setWizardStartDate(today);
     setWizardEndDate(today);
+    setWizardCycleRepeatCount(1);
     setWizardProgramText('');
     setWizardRows([]);
     setPreview(null);
     setPreviewSource(null);
     setApprovedSchedule(null);
+    wizardScanningFoldersRef.current = false;
+    setWizardScanningFolders(false);
+    setWizardScanProgress(null);
     setWizardOpen(true);
     setWizardError('');
     setWizardStep(1);
@@ -463,6 +569,7 @@ export default function SchedulerFoundationPage() {
 
     setWizardRows(rows);
     setWizardError('');
+    void startWizardAutoScanForMissingDurations(rows);
     setWizardStep(3);
   };
 
@@ -476,7 +583,15 @@ export default function SchedulerFoundationPage() {
   };
 
   const updateWizardRow = (localId: string, patch: Partial<WizardProgramDraft>) => {
-    setWizardRows(rows => rows.map(row => (row.localId === localId ? { ...row, ...patch } : row)));
+    setWizardRows(rows => rows.map(row => {
+      if (row.localId !== localId) return row;
+      const next = { ...row, ...patch };
+      if (next.slotMode === 'kids-round-robin') {
+        next.durationMinutes = 60;
+        next.playMode = 'sequential';
+      }
+      return next;
+    }));
   };
 
   const removeWizardRow = (localId: string) => {
@@ -498,16 +613,79 @@ export default function SchedulerFoundationPage() {
       return;
     }
 
+    const currentRow = wizardRows.find(row => row.localId === localId);
+    const isKids = currentRow?.slotMode === 'kids-round-robin' || isKidsWizardProgram(currentRow?.name ?? '', folder);
+
     updateWizardRow(localId, {
       folderId: folder.id,
       folderRoot: folder.root_key,
       folderHint: folder.original_relative_path,
       fileCount: folder.active_file_count ?? folder.file_count ?? null,
       longestDurationMs: folder.active_longest_file_duration_ms ?? folder.longest_file_duration_ms ?? null,
-      durationMinutes: roundDurationMsToMinutes(folder.active_longest_file_duration_ms ?? folder.longest_file_duration_ms) || 30,
+      durationMinutes: isKids ? 60 : roundDurationMsToMinutes(folder.active_longest_file_duration_ms ?? folder.longest_file_duration_ms) || 30,
+      slotMode: isKids ? 'kids-round-robin' : currentRow?.slotMode ?? 'fit',
+      playMode: isKids ? 'sequential' : currentRow?.playMode ?? 'sequential',
       matchStatus: 'manual',
       matchConfidence: 100,
     });
+  };
+
+  const scanWizardFolders = async (localId?: string) => {
+    const sourceRows = localId
+      ? wizardRows.filter(row => row.localId === localId)
+      : wizardRows.filter(shouldScanWizardFolder);
+    const targets = wizardFolderScanTargets(sourceRows);
+
+    if (targets.length === 0) {
+      setWizardError(localId ? 'اختر مجلد البرنامج قبل تشغيل الفهرسة.' : 'لا توجد مجلدات مختارة تحتاج إلى فهرسة الآن.');
+      return;
+    }
+
+    wizardScanningFoldersRef.current = true;
+    setWizardScanningFolders(true);
+    setWizardScanProgress(null);
+    setWizardError('');
+    setWorkflowError('');
+
+    try {
+      await mediaApi.scanBrowserFolders(targets);
+      setWorkflowMessage(targets.length === 1
+        ? `بدأ فحص مجلد "${targets[0]!.path}" لتحديث عدد الملفات وأطول مدة.`
+        : `بدأ فحص ${targets.length} مجلدات مختارة لتحديث عدد الملفات وأطول مدة.`);
+    } catch (err) {
+      wizardScanningFoldersRef.current = false;
+      setWizardScanningFolders(false);
+      setWizardScanProgress(null);
+      if (isConflictError(err)) {
+        setWorkflowMessage('يوجد فحص وسائط يعمل حاليا. بعد اكتماله اضغط فهرسة المجلدات المحددة مرة أخرى.');
+      } else {
+        setWizardError(describeWorkflowError(err, 'تعذر بدء فحص المجلدات المحددة.'));
+      }
+    }
+  };
+
+  const startWizardAutoScanForMissingDurations = async (rows: WizardProgramDraft[]) => {
+    const scanTarget = rows.find(row =>
+      row.folderRoot &&
+      row.folderHint &&
+      ((!row.longestDurationMs || row.longestDurationMs <= 0) || (row.fileCount ?? 0) <= 0)
+    );
+    if (!scanTarget) return;
+
+    try {
+      wizardScanningFoldersRef.current = true;
+      setWizardScanningFolders(true);
+      setWizardScanProgress(null);
+      await mediaApi.scanBrowserFolders(wizardFolderScanTargets([scanTarget]));
+      setWorkflowMessage(`بدأ فحص تلقائي لمجلد "${scanTarget.folderHint}" لأن مدة الملفات غير مفهرسة بعد. سيتم تحديث أطول ملف بعد اكتمال الفحص.`);
+    } catch (err) {
+      wizardScanningFoldersRef.current = false;
+      setWizardScanningFolders(false);
+      setWizardScanProgress(null);
+      if (isConflictError(err)) {
+        setWorkflowMessage('يوجد فحص وسائط يعمل حاليا. بعد اكتماله اضغط مطابقة البرامج مرة أخرى لتحديث المدد.');
+      }
+    }
   };
 
   const toggleWizardDay = (localId: string, day: string) => {
@@ -520,7 +698,7 @@ export default function SchedulerFoundationPage() {
   };
 
   const buildWizardPreview = async () => {
-    const validationError = validateWizardRows(wizardStartDate, wizardEndDate, wizardRows);
+    const validationError = validateWizardRows(wizardStartDate, wizardEndDate, wizardRows, wizardCycleRepeatCount);
     if (validationError) {
       setWizardError(validationError);
       return;
@@ -529,7 +707,7 @@ export default function SchedulerFoundationPage() {
     setWizardBuilding(true);
     setWizardError('');
     try {
-      const payload = buildWizardSchedulePayload(wizardStartDate, wizardEndDate, wizardRows);
+      const payload = buildWizardSchedulePayload(wizardStartDate, wizardEndDate, wizardRows, wizardCycleRepeatCount);
       const response = await schedulerFoundationApi.scheduleInputPreview(payload);
       const parsedPreview = response.data as ExcelPreview;
       const payloadText = JSON.stringify(payload);
@@ -687,6 +865,7 @@ export default function SchedulerFoundationPage() {
       const draftPreview = draftToPreview(draft);
       setWizardStartDate(draft.scheduleStartDate);
       setWizardEndDate(draft.scheduleEndDate);
+      setWizardCycleRepeatCount(detectWizardCycleRepeatCount(draftPreview));
       setWizardProgramText(draft.programs.map(program => program.program_name).join('\n'));
       setWizardRows(wizardRowsFromPreview(draftPreview, folders));
       setPreview(draftPreview);
@@ -803,12 +982,15 @@ export default function SchedulerFoundationPage() {
           step={wizardStep}
           startDate={wizardStartDate}
           endDate={wizardEndDate}
+          cycleRepeatCount={wizardCycleRepeatCount}
           programText={wizardProgramText}
           rows={wizardRows}
           folders={wizardFolders}
           loadingFolders={wizardLoadingFolders}
           building={wizardBuilding}
           error={wizardError}
+          scanningFolders={wizardScanningFolders}
+          scanProgress={wizardScanProgress}
           preview={preview}
           canApprove={canApproveSchedule}
           approvalBlockers={approvalBlockers}
@@ -817,8 +999,9 @@ export default function SchedulerFoundationPage() {
           onStep={setWizardStep}
           onStartDate={setWizardStartDate}
           onEndDate={setWizardEndDate}
+          onCycleRepeatCount={setWizardCycleRepeatCount}
           onProgramText={setWizardProgramText}
-          onLoadFolders={() => void loadWizardFolders(true)}
+          onLoadFolders={() => void refreshWizardFoldersForRows()}
           onParsePrograms={() => void parseWizardPrograms()}
           onBuildPreview={() => void buildWizardPreview()}
           onApprove={() => void approveSchedule()}
@@ -826,6 +1009,7 @@ export default function SchedulerFoundationPage() {
           onRemoveRow={removeWizardRow}
           onUpdateRow={updateWizardRow}
           onApplyFolder={applyWizardFolder}
+          onScanFolders={(localId?: string) => void scanWizardFolders(localId)}
           onToggleDay={toggleWizardDay}
         />
       )}
@@ -1081,12 +1265,15 @@ function ScheduleWizardModal({
   step,
   startDate,
   endDate,
+  cycleRepeatCount,
   programText,
   rows,
   folders,
   loadingFolders,
   building,
   error,
+  scanningFolders,
+  scanProgress,
   preview,
   canApprove,
   approvalBlockers,
@@ -1095,6 +1282,7 @@ function ScheduleWizardModal({
   onStep,
   onStartDate,
   onEndDate,
+  onCycleRepeatCount,
   onProgramText,
   onLoadFolders,
   onParsePrograms,
@@ -1104,17 +1292,21 @@ function ScheduleWizardModal({
   onRemoveRow,
   onUpdateRow,
   onApplyFolder,
+  onScanFolders,
   onToggleDay,
 }: {
   step: number;
   startDate: string;
   endDate: string;
+  cycleRepeatCount: WizardCycleRepeatCount;
   programText: string;
   rows: WizardProgramDraft[];
   folders: ProgramFolderOption[];
   loadingFolders: boolean;
   building: boolean;
   error: string;
+  scanningFolders: boolean;
+  scanProgress: ScanProgress | null;
   preview: ExcelPreview | null;
   canApprove: boolean;
   approvalBlockers: string[];
@@ -1123,6 +1315,7 @@ function ScheduleWizardModal({
   onStep: (step: number) => void;
   onStartDate: (value: string) => void;
   onEndDate: (value: string) => void;
+  onCycleRepeatCount: (value: WizardCycleRepeatCount) => void;
   onProgramText: (value: string) => void;
   onLoadFolders: () => void;
   onParsePrograms: () => void;
@@ -1132,11 +1325,14 @@ function ScheduleWizardModal({
   onRemoveRow: (localId: string) => void;
   onUpdateRow: (localId: string, patch: Partial<WizardProgramDraft>) => void;
   onApplyFolder: (localId: string, folderId: string) => void;
+  onScanFolders: (localId?: string) => void;
   onToggleDay: (localId: string, day: string) => void;
 }) {
   const fieldClass = 'w-full rounded-md border px-2 py-1.5 bg-transparent';
   const fieldStyle = { borderColor: 'var(--bg-border)' };
   const wizardIssueMap = preview ? buildWizardIssueMap(rows, preview) : new Map<string, WizardRowIssueSummary>();
+  const rowsNeedingScan = rows.filter(shouldScanWizardFolder).length;
+  const cycleHours = wizardCycleSpanMinutes(cycleRepeatCount) / 60;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-1" style={{ background: 'rgba(0,0,0,0.72)' }}>
@@ -1149,7 +1345,7 @@ function ScheduleWizardModal({
               <span className="badge badge-info">fit / playlist / file-count</span>
             </div>
             <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-              نفس فكرة النظام القديم: برامج، مواعيد بث، إعادات، أيام، ثم اعتماد وتشغيل.
+              نفس فكرة النظام القديم: برامج، مواعيد بث، تكرار دورة اليوم، أيام، ثم اعتماد وتشغيل.
             </p>
           </div>
           <button className="btn-ghost px-2 py-2" onClick={onClose} title="إغلاق">
@@ -1178,8 +1374,37 @@ function ScheduleWizardModal({
                   <input className={fieldClass} style={fieldStyle} type="date" value={endDate} onChange={event => onEndDate(event.target.value)} />
                 </label>
               </div>
+              <div className="rounded-md border p-3 space-y-3" style={{ borderColor: 'var(--bg-border)' }}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-medium">تكرار الدورة</div>
+                    <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                      {cycleRepeatCount === 1
+                        ? 'دورة واحدة تغطي اليوم، والفواصل تكمل الفراغات.'
+                        : `${cycleRepeatCount} دورات، مدة كل دورة ${cycleHours} ساعة.`}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {([1, 2, 3, 4] as WizardCycleRepeatCount[]).map(count => (
+                      <button
+                        key={count}
+                        type="button"
+                        className="rounded border px-3 py-1.5 text-sm"
+                        style={{
+                          borderColor: cycleRepeatCount === count ? 'var(--accent)' : 'var(--bg-border)',
+                          color: cycleRepeatCount === count ? 'var(--accent)' : 'var(--text-muted)',
+                          background: cycleRepeatCount === count ? 'rgba(232,160,32,0.10)' : 'transparent',
+                        }}
+                        onClick={() => onCycleRepeatCount(count)}
+                      >
+                        {count}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
               <div className="rounded-md border p-3 text-sm" style={{ borderColor: 'var(--bg-border)', color: 'var(--text-muted)' }}>
-                اختر فترة الخريطة، ثم الصق أسماء البرامج في الخطوة التالية. يمكن كتابة السطر كاسم فقط، أو بصيغة: 12:00 - 12:30 اسم البرنامج.
+                اختر فترة الخريطة وعدد تكرار الدورة، ثم الصق أسماء البرامج في الخطوة التالية. يمكن كتابة السطر كاسم فقط، أو بصيغة: 12:00 - 12:30 اسم البرنامج.
               </div>
               <div className="flex flex-wrap gap-2">
                 <button className="btn-primary flex items-center gap-2 text-sm" onClick={() => onStep(2)}>
@@ -1219,23 +1444,37 @@ function ScheduleWizardModal({
             <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
-                  راجع البرنامج، المجلد، نوع التشغيل، مدة الفترة، وقت البث والإعادات.
+                  راجع البرنامج، المجلد، نوع التشغيل، مدة الفترة، ووقت البث داخل الدورة الأولى.
                 </div>
-                <button className="btn-ghost flex items-center gap-2 text-sm" onClick={onAddRow}>
-                  <Wand2 size={14} />
-                  إضافة برنامج
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button className="btn-ghost flex items-center gap-2 text-sm" disabled={scanningFolders || rowsNeedingScan === 0} onClick={() => onScanFolders()}>
+                    <RefreshCw size={14} className={scanningFolders ? 'animate-spin' : ''} />
+                    {scanningFolders ? 'جاري الفهرسة...' : `فهرسة المجلدات المحددة (${rowsNeedingScan})`}
+                  </button>
+                  <button className="btn-ghost flex items-center gap-2 text-sm" onClick={onAddRow}>
+                    <Wand2 size={14} />
+                    إضافة برنامج
+                  </button>
+                </div>
               </div>
+              {scanningFolders && scanProgress && (
+                <div className="rounded-md border p-3 text-xs" style={{ borderColor: 'var(--bg-border)' }}>
+                  <div className="flex flex-wrap justify-between gap-2">
+                    <span>{scanProgress.currentFile || scanProgress.phase || 'فهرسة المجلدات'}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>{scanProgress.scanned}/{scanProgress.total} · أخطاء {scanProgress.errors}</span>
+                  </div>
+                </div>
+              )}
               {preview && preview.issues.length > 0 && (
                 <div className="rounded-md border p-3 text-xs" style={{ borderColor: preview.summary.errors > 0 ? 'var(--danger)' : 'var(--warning)', background: preview.summary.errors > 0 ? 'rgba(255,85,85,0.08)' : 'rgba(232,160,32,0.08)' }}>
                   الصفوف المظللة مأخوذة من آخر معاينة. الأحمر يعني خطأ يمنع الاعتماد، والأصفر تحذير لا يمنع الاعتماد.
                 </div>
               )}
               <div className="overflow-x-auto rounded-md border" style={{ borderColor: 'var(--bg-border)' }}>
-                <table className="w-full text-sm min-w-[2360px]">
+                <table className="w-full text-sm min-w-[2200px]">
                   <thead>
                     <tr style={{ borderBottom: '1px solid var(--bg-border)', background: 'rgba(255,255,255,0.02)' }}>
-                      {['حذف', 'البرنامج', 'المشكلة', 'المجلد', 'أطول ملف', 'النوع', 'تشغيل', 'مدة البث', 'البث', 'الإعادة 1', 'الإعادة 2', 'الأيام', 'file-count'].map(header => (
+                      {['حذف', 'البرنامج', 'إخفاء اللوجو', 'المشكلة', 'المجلد', 'أطول ملف', 'النوع', 'تشغيل', 'مدة البث', 'البث', 'الأيام', 'file-count'].map(header => (
                         <th key={header} className="text-right px-3 py-2 font-medium text-xs" style={{ color: 'var(--text-muted)' }}>{header}</th>
                       ))}
                     </tr>
@@ -1263,6 +1502,16 @@ function ScheduleWizardModal({
                               {row.matchStatus === 'needs_review' ? 'مراجعة' : `${row.matchConfidence}%`}
                             </span>
                           </div>
+                        </td>
+                        <td className="px-3 py-2 align-top min-w-32">
+                          <label className="inline-flex items-center gap-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+                            <input
+                              type="checkbox"
+                              checked={row.hideLogo}
+                              onChange={event => onUpdateRow(row.localId, { hideLogo: event.target.checked })}
+                            />
+                            <span>إخفاء</span>
+                          </label>
                         </td>
                         <td className="px-3 py-2 align-top min-w-80 max-w-sm">
                           {rowIssues && rowIssues.issues.length > 0 ? (
@@ -1314,9 +1563,26 @@ function ScheduleWizardModal({
                           <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
                             {row.longestDurationMs ? 'مدة فعلية من مكتبة الوسائط' : 'غير مفهرسة بعد'}
                           </div>
+                          {row.folderId && (
+                            <button
+                              type="button"
+                              className="btn-ghost mt-2 flex items-center gap-1 px-2 py-1 text-xs"
+                              disabled={scanningFolders}
+                              onClick={() => onScanFolders(row.localId)}
+                              title="فهرسة هذا المجلد"
+                            >
+                              <RefreshCw size={12} className={scanningFolders ? 'animate-spin' : ''} />
+                              فهرسة
+                            </button>
+                          )}
                         </td>
                         <td className="px-3 py-2 align-top min-w-44">
-                          <select className={`${fieldClass} min-w-[150px]`} style={fieldStyle} value={row.slotMode} onChange={event => onUpdateRow(row.localId, { slotMode: event.target.value as WizardSlotMode })}>
+                          <select
+                            className={`${fieldClass} min-w-[150px]`}
+                            style={fieldStyle}
+                            value={row.slotMode}
+                            onChange={event => onUpdateRow(row.localId, { slotMode: event.target.value as WizardSlotMode })}
+                          >
                             {(Object.keys(slotModeLabels) as WizardSlotMode[]).map(mode => <option key={mode} value={mode}>{slotModeLabels[mode]}</option>)}
                           </select>
                         </td>
@@ -1329,16 +1595,18 @@ function ScheduleWizardModal({
                           </select>
                         </td>
                         <td className="px-3 py-2 align-top min-w-32">
-                          <input className={`${fieldClass} min-w-[110px]`} style={wizardFieldStyle(rowIssues, 'duration_minutes')} type="number" min={1} value={row.durationMinutes} onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })} />
+                          <input
+                            className={`${fieldClass} min-w-[110px]`}
+                            style={wizardFieldStyle(rowIssues, 'duration_minutes')}
+                            type="number"
+                            min={row.slotMode === 'kids-round-robin' ? 60 : 1}
+                            disabled={row.slotMode === 'kids-round-robin'}
+                            value={row.durationMinutes}
+                            onChange={event => onUpdateRow(row.localId, { durationMinutes: Number(event.target.value) })}
+                          />
                         </td>
                         <td className="px-3 py-2 align-top min-w-36">
                           <input className={`${fieldClass} min-w-[120px]`} style={wizardTimeFieldStyle(rowIssues, row.startTime)} type="time" value={row.startTime} onChange={event => onUpdateRow(row.localId, { startTime: event.target.value })} />
-                        </td>
-                        <td className="px-3 py-2 align-top min-w-36">
-                          <input className={`${fieldClass} min-w-[120px]`} style={wizardTimeFieldStyle(rowIssues, row.repeatTime)} type="time" value={row.repeatTime} onChange={event => onUpdateRow(row.localId, { repeatTime: event.target.value })} />
-                        </td>
-                        <td className="px-3 py-2 align-top min-w-36">
-                          <input className={`${fieldClass} min-w-[120px]`} style={wizardTimeFieldStyle(rowIssues, row.secondRepeatTime)} type="time" value={row.secondRepeatTime} onChange={event => onUpdateRow(row.localId, { secondRepeatTime: event.target.value })} />
                         </td>
                         <td className="px-3 py-2 align-top min-w-[360px]">
                           <div className="flex flex-wrap gap-1">
@@ -1380,20 +1648,22 @@ function ScheduleWizardModal({
 
           {step === 4 && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <SummaryCard label="البرامج" value={rows.length} />
+                <SummaryCard label="الدورات" value={cycleRepeatCount} />
                 <SummaryCard label="مجلدات محددة" value={rows.filter(row => row.folderId).length} tone="ready" />
                 <SummaryCard label="تحتاج مراجعة" value={rows.filter(row => !row.folderId || row.matchStatus === 'needs_review' || (row.fileCount ?? 0) <= 0 || !row.longestDurationMs).length} tone="warning" />
-                <SummaryCard label="المواعيد" value={rows.reduce((sum, row) => sum + wizardSlotTimes(row).length, 0)} />
+                <SummaryCard label="المواعيد" value={rows.reduce((sum, row) => sum + wizardSlotTimes(row, cycleRepeatCount).length, 0)} />
               </div>
               <DataTable
                 empty="لا توجد برامج في الويزرد"
-                headers={['البرنامج', 'النوع', 'المدة', 'المواعيد', 'المجلد', 'أطول حلقة', 'الملفات']}
+                headers={['البرنامج', 'النوع', 'المدة', 'المواعيد', 'إخفاء اللوجو', 'المجلد', 'أطول حلقة', 'الملفات']}
                 rows={rows.map(row => [
                   row.name,
                   row.slotMode,
                   `${row.durationMinutes} دقيقة`,
-                  wizardSlotTimes(row).join('، '),
+                  wizardSlotTimes(row, cycleRepeatCount).join('، '),
+                  row.hideLogo ? 'نعم' : 'لا',
                   row.folderRoot ? `${row.folderRoot}/${row.folderHint}` : 'غير محدد',
                   formatDurationMs(row.longestDurationMs),
                   row.fileCount ?? '-',
@@ -1665,30 +1935,14 @@ function DataTable({
 
 function createWizardRowsFromText(text: string, folders: ProgramFolderOption[]): WizardProgramDraft[] {
   const rows: WizardProgramDraft[] = [];
-  const byName = new Map<string, WizardProgramDraft>();
 
   text
     .split(/\r?\n/)
     .map(line => parseWizardProgramLine(line))
     .filter((entry): entry is ParsedWizardProgramLine => Boolean(entry))
     .forEach(entry => {
-      const key = normalizeLookupText(entry.name);
-      const existing = byName.get(key);
-      if (existing && entry.startTime) {
-        if (existing.startTime !== entry.startTime && !existing.repeatTime) {
-          existing.repeatTime = entry.startTime;
-        } else if (existing.startTime !== entry.startTime && existing.repeatTime !== entry.startTime && !existing.secondRepeatTime) {
-          existing.secondRepeatTime = entry.startTime;
-        }
-        if (entry.durationMinutes && existing.durationMinutes === 30) {
-          existing.durationMinutes = entry.durationMinutes;
-        }
-        return;
-      }
-
       const row = createWizardRow(entry, folders, rows.length);
       rows.push(row);
-      byName.set(key, row);
     });
 
   return rows;
@@ -1711,7 +1965,24 @@ function draftToPreview(draft: SchedulerDraftDetail): ExcelPreview {
   };
 }
 
+function detectWizardCycleRepeatCount(preview: ExcelPreview): WizardCycleRepeatCount {
+  let detected: WizardCycleRepeatCount = 1;
+  for (const slot of preview.slots) {
+    const match = /\bcycle\s+\d+\/([1-4])\b/i.exec(slot.notes);
+    const value = match ? Number(match[1]) : NaN;
+    if (isWizardCycleRepeatCount(value) && value > detected) detected = value;
+  }
+  return detected;
+}
+
+function firstWizardCycleSlots(slots: SlotRow[], cycleRepeatCount: WizardCycleRepeatCount): SlotRow[] {
+  if (cycleRepeatCount === 1) return slots;
+  const firstCycle = slots.filter(slot => /\bcycle\s+1\/[1-4]\b/i.test(slot.notes));
+  return firstCycle.length > 0 ? firstCycle : slots;
+}
+
 function wizardRowsFromPreview(preview: ExcelPreview, folders: ProgramFolderOption[]): WizardProgramDraft[] {
+  const cycleRepeatCount = detectWizardCycleRepeatCount(preview);
   const slotsByProgram = new Map<string, SlotRow[]>();
   preview.slots.forEach(slot => {
     const slots = slotsByProgram.get(slot.program_key) ?? [];
@@ -1721,16 +1992,20 @@ function wizardRowsFromPreview(preview: ExcelPreview, folders: ProgramFolderOpti
 
   return preview.programs.map((program, index) => {
     const slots = slotsByProgram.get(program.program_key) ?? [];
+    const baseSlots = firstWizardCycleSlots(slots, cycleRepeatCount);
     const match = preview.folderMatches.find(item => item.program_key === program.program_key);
     const folder = folderForMatch(match, folders);
     const longestDurationMs = folder?.active_longest_file_duration_ms ?? folder?.longest_file_duration_ms ?? null;
     const fileCount = folder?.active_file_count ?? folder?.file_count ?? null;
-    const times = slots
+    const times = baseSlots
       .map(slot => slot.start_time)
       .filter((value, timeIndex, values) => Boolean(value) && values.indexOf(value) === timeIndex)
-      .slice(0, 3);
+      .slice(0, 1);
     const days = Array.from(new Set(slots.flatMap(slot => slot.days))).filter(day => dayKeys.includes(day));
-    const durationMinutes = slots[0]?.duration_minutes ?? roundDurationMsToMinutes(longestDurationMs) ?? 30;
+    const slotMode = wizardSlotModeFromPayload(program.slot_mode);
+    const durationMinutes = slotMode === 'kids-round-robin'
+      ? 60
+      : baseSlots[0]?.duration_minutes ?? roundDurationMsToMinutes(longestDurationMs) ?? 30;
 
     return {
       localId: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
@@ -1742,14 +2017,15 @@ function wizardRowsFromPreview(preview: ExcelPreview, folders: ProgramFolderOpti
       matchConfidence: match?.confidence ?? 0,
       fileCount,
       longestDurationMs,
-      slotMode: wizardSlotModeFromPayload(program.slot_mode),
+      slotMode,
       playMode: wizardPlayModeFromPayload(program.play_mode),
       days: days.length > 0 ? days : [...dayKeys],
       startTime: times[0] ?? '08:00',
-      repeatTime: times[1] ?? '',
-      secondRepeatTime: times[2] ?? '',
+      repeatTime: '',
+      secondRepeatTime: '',
       durationMinutes,
       fileCountLimit: program.file_count ?? 1,
+      hideLogo: program.hide_logo === true,
       notes: program.notes,
     };
   });
@@ -1771,6 +2047,7 @@ function folderForMatch(match: FolderMatch | undefined, folders: ProgramFolderOp
 }
 
 function wizardSlotModeFromPayload(value: string): WizardSlotMode {
+  if (value === 'kids_round_robin') return 'kids-round-robin';
   if (value === 'file_count') return 'file-count';
   if (value === 'playlist') return 'playlist';
   return 'fit';
@@ -1824,7 +2101,8 @@ function createWizardRow(entry: ParsedWizardProgramLine, folders: ProgramFolderO
   const matchedFolder = best && best.score >= 60 ? best.folder : null;
   const longestDurationMs = matchedFolder?.active_longest_file_duration_ms ?? matchedFolder?.longest_file_duration_ms ?? null;
   const fileCount = matchedFolder?.active_file_count ?? matchedFolder?.file_count ?? null;
-  const durationMinutes = roundDurationMsToMinutes(longestDurationMs) || entry.durationMinutes || 30;
+  const isKids = isKidsWizardProgram(entry.name, matchedFolder);
+  const durationMinutes = isKids ? 60 : roundDurationMsToMinutes(longestDurationMs) || entry.durationMinutes || 30;
 
   return {
     localId: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
@@ -1836,7 +2114,7 @@ function createWizardRow(entry: ParsedWizardProgramLine, folders: ProgramFolderO
     matchConfidence: matchedFolder ? best!.score : 0,
     fileCount,
     longestDurationMs,
-    slotMode: 'fit',
+    slotMode: isKids ? 'kids-round-robin' : 'fit',
     playMode: 'sequential',
     days: [...dayKeys],
     startTime: entry.startTime || minutesToTime((8 * 60 + index * 30) % (24 * 60)),
@@ -1844,8 +2122,49 @@ function createWizardRow(entry: ParsedWizardProgramLine, folders: ProgramFolderO
     secondRepeatTime: '',
     durationMinutes,
     fileCountLimit: 1,
+    hideLogo: false,
     notes: entry.durationWarning ?? '',
   };
+}
+
+function isKidsWizardProgram(name: string, folder?: ProgramFolderOption | null): boolean {
+  const text = normalizeLookupText([
+    name,
+    folder?.display_name_ar,
+    folder?.original_relative_path,
+    folder?.safe_slug,
+  ].filter(Boolean).join(' '));
+  return [
+    'kids',
+    'children',
+    'child',
+    '\u0627\u0637\u0641\u0627\u0644',
+    '\u0627\u0644\u0627\u0637\u0641\u0627\u0644',
+    '\u0637\u0641\u0644',
+  ].some(token => text.includes(token));
+}
+
+function shouldScanWizardFolder(row: WizardProgramDraft): boolean {
+  return Boolean(
+    row.folderRoot &&
+    row.folderHint &&
+    (
+      row.slotMode === 'kids-round-robin' ||
+      !row.longestDurationMs ||
+      row.longestDurationMs <= 0 ||
+      (row.fileCount ?? 0) <= 0
+    )
+  );
+}
+
+function wizardFolderScanTargets(rows: WizardProgramDraft[]): WizardFolderScanTarget[] {
+  const targets = new Map<string, WizardFolderScanTarget>();
+  for (const row of rows) {
+    if (!row.folderRoot || !row.folderHint) continue;
+    const target = { rootId: row.folderRoot, path: row.folderHint };
+    targets.set(`${target.rootId}\0${target.path}`, target);
+  }
+  return Array.from(targets.values());
 }
 
 function findBestFolderMatch(name: string, folders: ProgramFolderOption[]): { folder: ProgramFolderOption; score: number } | null {
@@ -1951,12 +2270,13 @@ function normalizeLookupText(value: string): string {
     .replace(/عبد\s+الحي/g, 'عبدالحي');
 }
 
-function validateWizardRows(startDate: string, endDate: string, rows: WizardProgramDraft[]): string {
+function validateWizardRows(startDate: string, endDate: string, rows: WizardProgramDraft[], cycleRepeatCount: WizardCycleRepeatCount): string {
   const issues: string[] = [];
   if (!startDate) issues.push('تاريخ بداية الجدولة غير محدد.');
   if (!endDate) issues.push('تاريخ نهاية الجدولة غير محدد.');
   if (startDate && endDate && endDate < startDate) issues.push('تاريخ نهاية الجدولة يجب أن يكون بعد تاريخ البداية.');
   if (rows.length === 0) issues.push('لا توجد برامج. أضف برنامجًا واحدًا على الأقل.');
+  if (!isWizardCycleRepeatCount(cycleRepeatCount)) issues.push('تكرار الدورة يجب أن يكون من 1 إلى 4.');
 
   rows.forEach((row, index) => {
     const label = `السطر ${index + 1}${row.name.trim() ? ` (${row.name.trim()})` : ''}`;
@@ -1967,6 +2287,7 @@ function validateWizardRows(startDate: string, endDate: string, rows: WizardProg
     if (!row.longestDurationMs || row.longestDurationMs <= 0) issues.push(`${label}: مدة الحلقات غير مفهرسة. شغّل فحص المدد أو اختر مجلدًا مفهرسًا.`);
     if (!row.startTime) issues.push(`${label}: وقت البث غير محدد.`);
     if (row.durationMinutes <= 0) issues.push(`${label}: مدة الفترة يجب أن تكون أكبر من صفر.`);
+    if (row.slotMode === 'kids-round-robin' && row.durationMinutes !== 60) issues.push(`${label}: kids-round-robin must be exactly 60 minutes.`);
     if (row.days.length === 0) issues.push(`${label}: اختر يوم بث واحدًا على الأقل.`);
     if (row.slotMode === 'file-count' && row.fileCountLimit <= 0) issues.push(`${label}: file-count يحتاج عدد ملفات أكبر من صفر.`);
   });
@@ -1974,10 +2295,11 @@ function validateWizardRows(startDate: string, endDate: string, rows: WizardProg
   return issues.length > 0 ? issues.slice(0, 12).join('\n') : '';
 }
 
-function buildWizardSchedulePayload(startDate: string, endDate: string, rows: WizardProgramDraft[]) {
-  const keyedRows = rows.map((row, index) => ({
+function buildWizardSchedulePayload(startDate: string, endDate: string, rows: WizardProgramDraft[], cycleRepeatCount: WizardCycleRepeatCount) {
+  const keyedRows: KeyedWizardRow[] = rows.map((row, index) => ({
     row,
     key: safeProgramKey(row.name, index),
+    rowIndex: index,
   }));
 
   return {
@@ -1997,31 +2319,125 @@ function buildWizardSchedulePayload(startDate: string, endDate: string, rows: Wi
       play_mode: row.playMode,
       slot_mode: wizardSlotModeForPayload(row.slotMode),
       file_count: row.slotMode === 'file-count' ? row.fileCountLimit : '',
+      hide_logo: row.hideLogo ? 'true' : 'false',
       repeat_policy: 'same_day_same_episode',
       enabled: 'true',
       notes: row.notes || `wizard:${row.matchStatus}`,
     })),
-    slots: keyedRows.flatMap(({ row, key }, rowIndex) => wizardSlotTimes(row).map((time, timeIndex) => ({
-      program_key: key,
-      days: row.days.join(';'),
-      start_time: time,
-      duration_minutes: row.durationMinutes,
-      effective_from: startDate,
-      effective_to: endDate,
-      priority: rowIndex * 10 + timeIndex + 1,
-      notes: timeIndex === 0 ? 'main airing' : `repeat ${timeIndex}`,
-    }))),
+    slots: buildWizardPayloadSlots(keyedRows, startDate, endDate, cycleRepeatCount),
   };
 }
 
-function wizardSlotModeForPayload(mode: WizardSlotMode): 'fit' | 'playlist' | 'file_count' {
-  return mode === 'file-count' ? 'file_count' : mode;
+function buildWizardPayloadSlots(keyedRows: KeyedWizardRow[], startDate: string, endDate: string, cycleRepeatCount: WizardCycleRepeatCount): WizardPayloadSlot[] {
+  const airings = buildWizardAirings(keyedRows, cycleRepeatCount);
+  const airingsByDay = new Map<string, WizardAiring[]>();
+  const adjustedDurations = new Map<WizardAiring, number>();
+
+  for (const airing of airings) {
+    const dayAirings = airingsByDay.get(airing.day) ?? [];
+    dayAirings.push(airing);
+    airingsByDay.set(airing.day, dayAirings);
+    adjustedDurations.set(airing, Math.max(1, Math.min(airing.durationMinutes, WIZARD_FULL_DAY_MINUTES - airing.startMinutes)));
+  }
+
+  for (const dayAirings of airingsByDay.values()) {
+    dayAirings.sort((a, b) =>
+      a.startMinutes - b.startMinutes ||
+      a.keyedRow.rowIndex - b.keyedRow.rowIndex ||
+      a.timeIndex - b.timeIndex
+    );
+    for (let index = 0; index < dayAirings.length - 1; index++) {
+      const current = dayAirings[index]!;
+      const next = dayAirings.slice(index + 1).find(item => item.startMinutes > current.startMinutes);
+      if (!next) continue;
+      const maxDurationBeforeNextStart = next.startMinutes - current.startMinutes;
+      const currentDuration = adjustedDurations.get(current) ?? current.durationMinutes;
+      if (currentDuration > maxDurationBeforeNextStart) {
+        adjustedDurations.set(current, Math.max(1, maxDurationBeforeNextStart));
+      }
+    }
+  }
+
+  const groupedSlots = new Map<string, { airing: WizardAiring; durationMinutes: number; days: string[] }>();
+  for (const airing of airings) {
+    const durationMinutes = adjustedDurations.get(airing) ?? Math.max(1, airing.durationMinutes);
+    const groupKey = `${airing.keyedRow.rowIndex}:${airing.timeIndex}:${airing.time}:${durationMinutes}`;
+    const group = groupedSlots.get(groupKey);
+    if (group) {
+      group.days.push(airing.day);
+    } else {
+      groupedSlots.set(groupKey, { airing, durationMinutes, days: [airing.day] });
+    }
+  }
+
+  return Array.from(groupedSlots.values())
+    .sort((a, b) =>
+      a.airing.keyedRow.rowIndex - b.airing.keyedRow.rowIndex ||
+      a.airing.timeIndex - b.airing.timeIndex ||
+      a.durationMinutes - b.durationMinutes
+    )
+    .map(({ airing, durationMinutes, days }) => ({
+      program_key: airing.keyedRow.key,
+      days: sortWizardDays(days).join(';'),
+      start_time: airing.time,
+      duration_minutes: durationMinutes,
+      effective_from: startDate,
+      effective_to: endDate,
+      priority: airing.keyedRow.rowIndex * 10 + airing.timeIndex + 1,
+      notes: cycleRepeatCount === 1
+        ? 'main airing; cycle 1/1'
+        : `cycle ${airing.cycleIndex + 1}/${airing.cycleRepeatCount}`,
+    }));
 }
 
-function wizardSlotTimes(row: WizardProgramDraft): string[] {
-  return [row.startTime, row.repeatTime, row.secondRepeatTime]
-    .map(value => value.trim())
-    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index);
+function buildWizardAirings(keyedRows: KeyedWizardRow[], cycleRepeatCount: WizardCycleRepeatCount): WizardAiring[] {
+  return keyedRows.flatMap(keyedRow => (
+    wizardSlotTimes(keyedRow.row, cycleRepeatCount).flatMap((time, timeIndex) => {
+      const startMinutes = timeToMinutes(time);
+      if (startMinutes === null) return [];
+      const cycleIndex = Math.min(timeIndex, cycleRepeatCount - 1);
+      return keyedRow.row.days.map(day => ({
+        keyedRow,
+        time,
+        timeIndex,
+        cycleIndex,
+        cycleRepeatCount,
+        day,
+        startMinutes,
+        durationMinutes: keyedRow.row.durationMinutes,
+      }));
+    })
+  ));
+}
+
+function sortWizardDays(days: string[]): string[] {
+  const uniqueDays = Array.from(new Set(days));
+  uniqueDays.sort((a, b) => dayKeys.indexOf(a) - dayKeys.indexOf(b));
+  return uniqueDays;
+}
+
+function wizardSlotModeForPayload(mode: WizardSlotMode): 'fit' | 'playlist' | 'file_count' | 'kids_round_robin' {
+  if (mode === 'file-count') return 'file_count';
+  if (mode === 'kids-round-robin') return 'kids_round_robin';
+  return mode;
+}
+
+function isWizardCycleRepeatCount(value: number): value is WizardCycleRepeatCount {
+  return value === 1 || value === 2 || value === 3 || value === 4;
+}
+
+function wizardCycleSpanMinutes(cycleRepeatCount: WizardCycleRepeatCount): number {
+  return WIZARD_FULL_DAY_MINUTES / cycleRepeatCount;
+}
+
+function wizardSlotTimes(row: WizardProgramDraft, cycleRepeatCount: WizardCycleRepeatCount = 1): string[] {
+  const startMinutes = timeToMinutes(row.startTime.trim());
+  if (startMinutes === null) return [];
+
+  const cycleSpan = wizardCycleSpanMinutes(cycleRepeatCount);
+  return Array.from({ length: cycleRepeatCount }, (_, cycleIndex) =>
+    minutesToTime(startMinutes + cycleIndex * cycleSpan)
+  ).filter((value, index, values) => values.indexOf(value) === index);
 }
 
 function safeProgramKey(name: string, index: number): string {
@@ -2065,7 +2481,8 @@ function minutesToTime(minutes: number): string {
 
 function roundDurationMsToMinutes(value: number | null | undefined): number | null {
   if (!value || value <= 0) return null;
-  return Math.max(1, Math.ceil(value / 60000));
+  const roundedMinutes = Math.ceil(value / 60000);
+  return Math.max(WIZARD_QUARTER_HOUR_MINUTES, Math.ceil(roundedMinutes / WIZARD_QUARTER_HOUR_MINUTES) * WIZARD_QUARTER_HOUR_MINUTES);
 }
 
 function formatDurationMs(value: number | null | undefined): string {
@@ -2081,7 +2498,7 @@ function formatDurationMs(value: number | null | undefined): string {
 function formatLongestFileDuration(value: number | null | undefined): string {
   const minutes = roundDurationMsToMinutes(value);
   if (!minutes) return 'غير مفهرسة';
-  return `${minutes} دقيقة`;
+  return `${formatDurationMs(value)} → ${minutes} دقيقة`;
 }
 
 function todayDateInputValue(): string {
@@ -2191,6 +2608,11 @@ function describeQuickBroadcastError(err: unknown): string {
   const serverMessage = data ? (textValue(data['error']) || textValue(data['message'])) : '';
   if (serverMessage) return serverMessage;
   return err instanceof Error ? err.message : String(err);
+}
+
+function isConflictError(err: unknown): boolean {
+  const response = isRecord(err) && isRecord(err['response']) ? err['response'] : null;
+  return response?.['status'] === 409;
 }
 
 function describeWorkflowError(err: unknown, fallback: string): string {

@@ -36,6 +36,8 @@ export const mediaApi = {
   browserList: (params: Record<string, string>) => api.get('/media/browser/list', { params }),
   scanBrowserFolder: (rootId: string, pathValue: string) =>
     api.post('/media/browser/scan', { rootId, path: pathValue }),
+  scanBrowserFolders: (folders: Array<{ rootId: string; path: string }>) =>
+    api.post('/media/browser/scan-selected', { folders }),
   programFolders: () => api.get('/media/program-folders'),
   programFolderEpisodes: (folderId: string) => api.get(`/media/program-folders/${folderId}/episodes`),
   trash: () => api.get('/media/trash'),

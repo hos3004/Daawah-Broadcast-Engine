@@ -4,7 +4,7 @@ import path from 'path';
 import { requireRole, auditLog, verifyPassword } from '../../auth';
 import { config } from '../../config';
 import { getDb } from '../../db/schema';
-import { scanMediaFolder, scanMediaLibrary } from '../../media/scanner';
+import { scanMediaFolder, scanMediaLibrary, type ScanResult } from '../../media/scanner';
 import { listMediaRoots } from '../../media/safeRoots';
 import {
   getMediaBrowserRoots,
@@ -18,6 +18,7 @@ import { getTranscodeQueue, cancelTranscodeJob } from '../../workers/transcodeWo
 export const mediaRouter = Router();
 
 let scanInProgress = false;
+const MAX_SELECTED_SCAN_FOLDERS = 25;
 
 mediaRouter.post('/scan', requireRole('admin', 'editor', 'operator'), async (req: Request, res: Response): Promise<void> => {
   if (scanInProgress) {
@@ -94,6 +95,78 @@ mediaRouter.get('/browser/stream', (req: Request, res: Response): void => {
     streamMediaFile(req, res, resolved.fullPath, path.basename(resolved.fullPath));
   } catch (err) {
     sendMediaBrowserError(res, err);
+  }
+});
+
+mediaRouter.post('/browser/scan-selected', requireRole('admin', 'editor', 'operator'), async (req: Request, res: Response): Promise<void> => {
+  if (scanInProgress) {
+    res.status(409).json({ error: 'Scan already in progress' });
+    return;
+  }
+
+  const { folders } = req.body as { folders?: Array<{ rootId?: string; path?: string }> };
+  if (!Array.isArray(folders) || folders.length === 0) {
+    res.status(400).json({ error: 'folders must contain at least one folder' });
+    return;
+  }
+  if (folders.length > MAX_SELECTED_SCAN_FOLDERS) {
+    res.status(400).json({ error: `Cannot scan more than ${MAX_SELECTED_SCAN_FOLDERS} folders at once` });
+    return;
+  }
+
+  let resolvedFolders: ReturnType<typeof resolveSelectedScanFolders>;
+  try {
+    resolvedFolders = resolveSelectedScanFolders(folders);
+  } catch (err) {
+    sendMediaBrowserError(res, err);
+    return;
+  }
+
+  scanInProgress = true;
+  auditLog(
+    req.user!.id,
+    req.user!.email,
+    'MEDIA_BROWSER_SCAN_SELECTED_START',
+    'media_folder',
+    undefined,
+    JSON.stringify(resolvedFolders.map(folder => ({ rootId: folder.root.id, path: folder.relativePath }))),
+    req.ip
+  );
+
+  res.json({
+    ok: true,
+    message: 'Selected folder scans started',
+    folders: resolvedFolders.map(folder => ({
+      rootId: folder.root.id,
+      path: folder.relativePath,
+      fullPath: folder.fullPath,
+    })),
+  });
+
+  try {
+    const results: Array<{ rootId: string; path: string; result: ScanResult }> = [];
+    for (const folder of resolvedFolders) {
+      broadcastWs({
+        type: 'scan_progress',
+        data: {
+          total: 0,
+          scanned: 0,
+          errors: 0,
+          currentFile: folder.relativePath,
+          phase: 'scanning',
+        },
+      });
+      const result = await scanMediaFolder(folder.fullPath, (progress) => {
+        broadcastWs({ type: 'scan_progress', data: progress });
+      });
+      results.push({ rootId: folder.root.id, path: folder.relativePath, result });
+    }
+    auditLog(req.user!.id, req.user!.email, 'MEDIA_BROWSER_SCAN_SELECTED_DONE', 'media_folder', undefined, JSON.stringify(results), req.ip);
+    broadcastWs({ type: 'scan_complete', data: { folders: results } });
+  } catch (err) {
+    broadcastWs({ type: 'scan_error', data: { error: String(err) } });
+  } finally {
+    scanInProgress = false;
   }
 });
 
@@ -607,6 +680,33 @@ type Db = ReturnType<typeof getDb>;
 interface ByteRange {
   start: number;
   end: number;
+}
+
+function resolveSelectedScanFolders(folders: Array<{ rootId?: string; path?: string }>): ReturnType<typeof resolveMediaBrowserPath>[] {
+  const resolvedFolders: ReturnType<typeof resolveMediaBrowserPath>[] = [];
+  const seen = new Set<string>();
+
+  for (const folder of folders) {
+    if (!folder.rootId) {
+      throw new MediaBrowserError('rootId is required', 400);
+    }
+
+    const resolved = resolveMediaBrowserPath(folder.rootId, folder.path);
+    if (!fs.statSync(resolved.fullPath).isDirectory()) {
+      throw new MediaBrowserError('Selected path is not a directory', 400);
+    }
+
+    const key = `${resolved.root.id}\0${resolved.relativePath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolvedFolders.push(resolved);
+  }
+
+  if (resolvedFolders.length === 0) {
+    throw new MediaBrowserError('No unique folders selected for scan', 400);
+  }
+
+  return resolvedFolders;
 }
 
 function collectFolderTreeIds(db: Db, rootFolderId: string): string[] {
