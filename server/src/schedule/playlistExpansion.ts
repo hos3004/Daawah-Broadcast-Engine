@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/schema';
 import {
   fillGapWithProfessionalBumpers,
+  type GapFillerCursorPlan,
   type SourceRole,
 } from '../playlist/gapFiller';
 import { DraftValidationError } from './drafts';
@@ -22,6 +23,7 @@ export interface ExpandedPlaylistItem {
   source: string;
   sourceRole: SourceRole;
   programKey: string | null;
+  hideLogo: boolean;
   title: string;
   startTime: string;
   endTime: string;
@@ -73,13 +75,35 @@ interface MediaFileRow {
   filename: string;
   type: string;
   status: string;
+  folder_id: string | null;
   duration_sec: number | null;
   duration_ms: number | null;
   modified_at: string | null;
 }
 
+interface MediaFolderRow {
+  id: string;
+  original_relative_path: string;
+}
+
 interface ProgramCursor {
   nextIndex: number;
+}
+
+type ProgramRow = PublishedScheduleDetail['programs'][number];
+type SchedulePreviewRow = PublishedScheduleDetail['schedulePreview']['days'][number]['rows'][number];
+type ProgramPlayMode = 'sequential' | 'shuffle' | 'newest' | 'round_robin';
+type ProgramSlotMode = 'fit' | 'playlist' | 'file_count' | 'kids_round_robin';
+
+interface ProgramBaseItem {
+  date: string;
+  type: 'program';
+  source: string;
+  sourceRole: SourceRole;
+  programKey: string | null;
+  hideLogo: boolean;
+  title: string;
+  trimStartSeconds: 0;
 }
 
 interface ExpansionContext {
@@ -87,7 +111,11 @@ interface ExpansionContext {
   programsByKey: Map<string, PublishedScheduleDetail['programs'][number]>;
   folderIdByProgramKey: Map<string, string>;
   filesByFolderId: Map<string, MediaFileRow[]>;
+  foldersById: Map<string, MediaFolderRow | null>;
+  kidsRoundRobinFilesByFolderId: Map<string, MediaFileRow[]>;
   programCursors: Map<string, ProgramCursor>;
+  gapFillerCursors: GapFillerCursorPlan;
+  dailyFitSelections: Map<string, MediaFileRow>;
   warnings: PlaylistExpansionWarning[];
   errors: PlaylistExpansionError[];
 }
@@ -105,7 +133,11 @@ export function expandPublishedScheduleToFiles(schedule: PublishedScheduleDetail
         .map(match => [match.program_key, match.matched_folder_id as string])
     ),
     filesByFolderId: new Map(),
+    foldersById: new Map(),
+    kidsRoundRobinFilesByFolderId: new Map(),
     programCursors: new Map(),
+    gapFillerCursors: new Map(),
+    dailyFitSelections: new Map(),
     warnings: [],
     errors: [],
   };
@@ -148,7 +180,7 @@ export function renderFfconcat(items: ExpandedPlaylistItem[]): string {
 
 function expandProgramRow(
   date: string,
-  row: PublishedScheduleDetail['schedulePreview']['days'][number]['rows'][number],
+  row: SchedulePreviewRow,
   context: ExpansionContext
 ): ExpandedPlaylistItem[] {
   const startSeconds = timeToSeconds(row.start_time);
@@ -156,12 +188,13 @@ function expandProgramRow(
   const endSeconds = startSeconds + slotDurationSeconds;
   const programKey = row.program_key ?? '';
   const source = row.row === null ? `${date}:program:${row.start_time}` : `excel-row:${row.row}`;
-  const baseItem = {
+  const baseItem: ProgramBaseItem = {
     date,
     type: 'program' as const,
     source,
     sourceRole: 'program' as SourceRole,
     programKey: programKey || null,
+    hideLogo: false,
     title: row.title,
     trimStartSeconds: 0 as const,
   };
@@ -175,6 +208,11 @@ function expandProgramRow(
     return [missingItem(baseItem, startSeconds, endSeconds, 'missing_media')];
   }
 
+  const program = context.programsByKey.get(programKey)!;
+  const programBaseItem: ProgramBaseItem = {
+    ...baseItem,
+    hideLogo: program.hide_logo === true,
+  };
   const folderId = context.folderIdByProgramKey.get(programKey);
   if (!folderId) {
     context.errors.push({
@@ -182,7 +220,7 @@ function expandProgramRow(
       itemId: source,
       message: `Program "${programKey}" has no approved matched media folder.`,
     });
-    return [missingItem(baseItem, startSeconds, endSeconds, 'missing_media')];
+    return [missingItem(programBaseItem, startSeconds, endSeconds, 'missing_media')];
   }
 
   const files = getReadyFilesForFolder(folderId, context);
@@ -192,38 +230,102 @@ function expandProgramRow(
       itemId: source,
       message: `Program "${programKey}" has no ready media files in matched folder ${folderId}.`,
     });
+    return [missingItem(programBaseItem, startSeconds, endSeconds, 'missing_media')];
+  }
+
+  const slotMode = normalizeSlotMode(program.slot_mode);
+  if (slotMode === 'kids_round_robin') {
+    return expandKidsRoundRobinProgramRow(program, folderId, programBaseItem, startSeconds, endSeconds, context);
+  }
+  if (slotMode === 'playlist') {
+    return expandPlaylistProgramRow(program, files, programBaseItem, startSeconds, endSeconds, context);
+  }
+  if (slotMode === 'file_count') {
+    return expandFileCountProgramRow(program, files, programBaseItem, startSeconds, endSeconds, context);
+  }
+  return expandFitProgramRow(program, files, programBaseItem, startSeconds, endSeconds, context);
+}
+
+function expandFitProgramRow(
+  program: ProgramRow,
+  files: MediaFileRow[],
+  baseItem: ProgramBaseItem,
+  startSeconds: number,
+  endSeconds: number,
+  context: ExpansionContext
+): ExpandedPlaylistItem[] {
+  const slotDurationSeconds = endSeconds - startSeconds;
+  const playMode = normalizePlayMode(program.play_mode);
+  const cacheKey = `${baseItem.date}:${program.program_key}`;
+  let media = program.repeat_policy === 'advance_each_airing'
+    ? null
+    : context.dailyFitSelections.get(cacheKey) ?? null;
+
+  if (!media) {
+    media = selectNextFiles(program.program_key, files, playMode, 1, context)[0] ?? null;
+    if (media && program.repeat_policy !== 'advance_each_airing') {
+      context.dailyFitSelections.set(cacheKey, media);
+    }
+  }
+
+  if (!media) {
+    context.errors.push({
+      code: 'PROGRAM_MEDIA_NOT_AVAILABLE',
+      itemId: baseItem.source,
+      message: `Program "${program.program_key}" has no media file available for fit mode.`,
+    });
     return [missingItem(baseItem, startSeconds, endSeconds, 'missing_media')];
   }
 
-  const cursor = getProgramCursor(programKey, context);
+  const duration = validateProgramMedia(media, program.program_key, baseItem.source, context);
+  if (duration === null) {
+    return [missingItem(baseItem, startSeconds, endSeconds, 'unknown_duration', media)];
+  }
+
+  const items: ExpandedPlaylistItem[] = [];
+  const playSeconds = Math.min(duration, slotDurationSeconds);
+  items.push(readyItem({
+    ...baseItem,
+    media,
+    startSeconds,
+    endSeconds: startSeconds + playSeconds,
+    isTrimmed: duration > slotDurationSeconds,
+  }));
+
+  if (startSeconds + playSeconds < endSeconds) {
+    items.push(...expandInternalGap(
+      baseItem.date,
+      startSeconds + playSeconds,
+      endSeconds,
+      `${baseItem.source}:fit-gap`,
+      context
+    ));
+  }
+
+  return items;
+}
+
+function expandPlaylistProgramRow(
+  program: ProgramRow,
+  files: MediaFileRow[],
+  baseItem: ProgramBaseItem,
+  startSeconds: number,
+  endSeconds: number,
+  context: ExpansionContext
+): ExpandedPlaylistItem[] {
+  const playMode = normalizePlayMode(program.play_mode);
   const items: ExpandedPlaylistItem[] = [];
   let currentSeconds = startSeconds;
-  let remainingSeconds = slotDurationSeconds;
+  let remainingSeconds = endSeconds - startSeconds;
   let attempts = 0;
 
   while (remainingSeconds > 0 && attempts < MAX_EXPANDED_ITEMS_PER_ROW) {
     attempts++;
-    const media = files[cursor.nextIndex % files.length];
+    const media = selectNextFiles(program.program_key, files, playMode, 1, context)[0];
     if (!media) break;
-    cursor.nextIndex = (cursor.nextIndex + 1) % files.length;
 
-    const mediaDurationSeconds = mediaDuration(media);
+    const mediaDurationSeconds = validateProgramMedia(media, program.program_key, baseItem.source, context);
     if (mediaDurationSeconds === null) {
-      context.errors.push({
-        code: 'MEDIA_DURATION_UNKNOWN',
-        itemId: source,
-        message: `Media file "${media.filename}" for program "${programKey}" has no known QC duration.`,
-      });
-      items.push(missingItem(baseItem, currentSeconds, endSeconds, 'unknown_duration', media));
-      break;
-    }
-
-    if (!fs.existsSync(media.path)) {
-      context.errors.push({
-        code: 'MEDIA_FILE_MISSING_ON_DISK',
-        itemId: source,
-        message: `Media file "${media.filename}" for program "${programKey}" is ready in DB but missing on disk.`,
-      });
       items.push(missingItem(baseItem, currentSeconds, endSeconds, 'missing_media', media));
       break;
     }
@@ -245,8 +347,8 @@ function expandProgramRow(
   if (remainingSeconds > 0 && items.every(item => item.validationStatus === 'ready')) {
     context.errors.push({
       code: 'PROGRAM_SLOT_UNDERFILLED',
-      itemId: source,
-      message: `Program slot "${row.title}" on ${date} could not be expanded to its full duration.`,
+      itemId: baseItem.source,
+      message: `Program slot "${baseItem.title}" on ${baseItem.date} could not be expanded to its full duration.`,
     });
     items.push(missingItem(baseItem, currentSeconds, endSeconds, 'missing_media'));
   }
@@ -254,17 +356,171 @@ function expandProgramRow(
   if (attempts >= MAX_EXPANDED_ITEMS_PER_ROW) {
     context.errors.push({
       code: 'PROGRAM_EXPANSION_SAFETY_LIMIT',
-      itemId: source,
-      message: `Program slot "${row.title}" exceeded the file expansion safety limit.`,
+      itemId: baseItem.source,
+      message: `Program slot "${baseItem.title}" exceeded the file expansion safety limit.`,
     });
   }
 
   return items;
 }
 
+function expandFileCountProgramRow(
+  program: ProgramRow,
+  files: MediaFileRow[],
+  baseItem: ProgramBaseItem,
+  startSeconds: number,
+  endSeconds: number,
+  context: ExpansionContext
+): ExpandedPlaylistItem[] {
+  const playMode = normalizePlayMode(program.play_mode);
+  const fileCount = Math.max(1, program.file_count ?? 1);
+  const selected = selectNextFiles(program.program_key, files, playMode, fileCount, context);
+  const items: ExpandedPlaylistItem[] = [];
+  let currentSeconds = startSeconds;
+
+  for (const media of selected) {
+    if (currentSeconds >= endSeconds) break;
+
+    const mediaDurationSeconds = validateProgramMedia(media, program.program_key, baseItem.source, context);
+    if (mediaDurationSeconds === null) {
+      items.push(missingItem(baseItem, currentSeconds, endSeconds, 'missing_media', media));
+      break;
+    }
+
+    const fileEndSeconds = currentSeconds + mediaDurationSeconds;
+    if (fileEndSeconds > endSeconds) {
+      const remainingSeconds = endSeconds - currentSeconds;
+      if (remainingSeconds > mediaDurationSeconds * 0.3) {
+        items.push(readyItem({
+          ...baseItem,
+          media,
+          startSeconds: currentSeconds,
+          endSeconds,
+          isTrimmed: true,
+        }));
+      }
+      currentSeconds = endSeconds;
+      break;
+    }
+
+    items.push(readyItem({
+      ...baseItem,
+      media,
+      startSeconds: currentSeconds,
+      endSeconds: fileEndSeconds,
+      isTrimmed: false,
+    }));
+    currentSeconds = fileEndSeconds;
+  }
+
+  if (items.length === 0) {
+    context.errors.push({
+      code: 'PROGRAM_MEDIA_NOT_AVAILABLE',
+      itemId: baseItem.source,
+      message: `Program "${program.program_key}" has no playable media for file_count mode.`,
+    });
+    return [missingItem(baseItem, startSeconds, endSeconds, 'missing_media')];
+  }
+
+  if (currentSeconds < endSeconds && items.every(item => item.validationStatus === 'ready')) {
+    items.push(...expandInternalGap(
+      baseItem.date,
+      currentSeconds,
+      endSeconds,
+      `${baseItem.source}:file-count-gap`,
+      context
+    ));
+  }
+
+  return items;
+}
+
+function expandKidsRoundRobinProgramRow(
+  program: ProgramRow,
+  folderId: string,
+  baseItem: ProgramBaseItem,
+  startSeconds: number,
+  endSeconds: number,
+  context: ExpansionContext
+): ExpandedPlaylistItem[] {
+  const sequence = getKidsRoundRobinFilesForFolder(folderId, context);
+  if (sequence.length === 0) {
+    context.errors.push({
+      code: 'KIDS_MEDIA_NOT_AVAILABLE',
+      itemId: baseItem.source,
+      message: `Kids program "${program.program_key}" has no playable media under its child folders.`,
+    });
+    return [missingItem(baseItem, startSeconds, endSeconds, 'missing_media')];
+  }
+
+  const cursor = getProgramCursor(`kids:${program.program_key}`, context);
+  const items: ExpandedPlaylistItem[] = [];
+  let currentSeconds = startSeconds;
+  let attempts = 0;
+
+  while (currentSeconds < endSeconds && attempts < MAX_EXPANDED_ITEMS_PER_ROW) {
+    attempts++;
+    const media = sequence[cursor.nextIndex % sequence.length]!;
+    cursor.nextIndex = (cursor.nextIndex + 1) % sequence.length;
+
+    const mediaDurationSeconds = validateProgramMedia(media, program.program_key, baseItem.source, context);
+    if (mediaDurationSeconds === null) {
+      items.push(missingItem(baseItem, currentSeconds, endSeconds, 'unknown_duration', media));
+      break;
+    }
+
+    const remainingSeconds = endSeconds - currentSeconds;
+    if (mediaDurationSeconds > remainingSeconds) {
+      const canTrim = items.length === 0 || remainingSeconds > mediaDurationSeconds * 0.3;
+      if (canTrim) {
+        items.push(readyItem({
+          ...baseItem,
+          media,
+          startSeconds: currentSeconds,
+          endSeconds,
+          isTrimmed: true,
+        }));
+        currentSeconds = endSeconds;
+      } else {
+        cursor.nextIndex = (cursor.nextIndex - 1 + sequence.length) % sequence.length;
+      }
+      break;
+    }
+
+    items.push(readyItem({
+      ...baseItem,
+      media,
+      startSeconds: currentSeconds,
+      endSeconds: currentSeconds + mediaDurationSeconds,
+      isTrimmed: false,
+    }));
+    currentSeconds += mediaDurationSeconds;
+  }
+
+  if (attempts >= MAX_EXPANDED_ITEMS_PER_ROW) {
+    context.errors.push({
+      code: 'KIDS_EXPANSION_SAFETY_LIMIT',
+      itemId: baseItem.source,
+      message: `Kids program slot "${baseItem.title}" exceeded the file expansion safety limit.`,
+    });
+  }
+
+  if (currentSeconds < endSeconds && items.every(item => item.validationStatus === 'ready')) {
+    items.push(...expandInternalGap(
+      baseItem.date,
+      currentSeconds,
+      endSeconds,
+      `${baseItem.source}:kids-gap`,
+      context
+    ));
+  }
+
+  return items.length > 0 ? items : [missingItem(baseItem, startSeconds, endSeconds, 'missing_media')];
+}
+
 function expandGapRow(
   date: string,
-  row: PublishedScheduleDetail['schedulePreview']['days'][number]['rows'][number],
+  row: SchedulePreviewRow,
   context: ExpansionContext
 ): ExpandedPlaylistItem[] {
   const dayStartMs = Date.parse(`${date}T00:00:00.000Z`);
@@ -274,7 +530,74 @@ function expandGapRow(
   const startMs = dayStartMs + startSeconds * 1000;
   const endMs = dayStartMs + endSeconds * 1000;
   const source = row.row === null ? `${date}:gap:${row.start_time}` : `excel-row:${row.row}`;
-  const professional = fillGapWithProfessionalBumpers(startMs, endMs, context.db, 0, { updateCursors: false })
+  const items = expandGapRange(date, startMs, endMs, source, context);
+
+  if (items.length === 0) {
+    context.errors.push({
+      code: 'GAP_FILLER_MEDIA_NOT_AVAILABLE',
+      itemId: source,
+      message: `Gap from ${row.start_time} to ${row.end_time} on ${date} has no ready filler or emergency media.`,
+    });
+    return [missingItem({
+      date,
+      type: 'gap_filler',
+      source,
+      sourceRole: 'filler',
+      programKey: null,
+      hideLogo: false,
+      title: row.title,
+      trimStartSeconds: 0,
+    }, startSeconds, endSeconds, 'missing_media')];
+  }
+
+  return items;
+}
+
+function expandInternalGap(
+  date: string,
+  startSeconds: number,
+  endSeconds: number,
+  source: string,
+  context: ExpansionContext
+): ExpandedPlaylistItem[] {
+  const dayStartMs = Date.parse(`${date}T00:00:00.000Z`);
+  const startMs = dayStartMs + startSeconds * 1000;
+  const endMs = dayStartMs + endSeconds * 1000;
+  const items = expandGapRange(date, startMs, endMs, source, context);
+
+  if (items.length === 0) {
+    context.errors.push({
+      code: 'GAP_FILLER_MEDIA_NOT_AVAILABLE',
+      itemId: source,
+      message: `Internal gap from ${formatClock(startSeconds)} to ${formatClock(endSeconds)} on ${date} has no ready filler or emergency media.`,
+    });
+    return [missingItem({
+      date,
+      type: 'gap_filler',
+      source,
+      sourceRole: 'filler',
+      programKey: null,
+      hideLogo: false,
+      title: 'Professional Gap Preview',
+      trimStartSeconds: 0,
+    }, startSeconds, endSeconds, 'missing_media')];
+  }
+
+  return items;
+}
+
+function expandGapRange(
+  date: string,
+  startMs: number,
+  endMs: number,
+  source: string,
+  context: ExpansionContext
+): ExpandedPlaylistItem[] {
+  const dayStartMs = Date.parse(`${date}T00:00:00.000Z`);
+  const professional = fillGapWithProfessionalBumpers(startMs, endMs, context.db, 0, {
+    updateCursors: false,
+    plannedCursors: context.gapFillerCursors,
+  })
     .sort((a, b) => a.start_time_ms - b.start_time_ms);
 
   const items: ExpandedPlaylistItem[] = [];
@@ -291,23 +614,6 @@ function expandGapRow(
 
   if (currentMs < endMs) {
     items.push(...expandGapFromFallbackFiles(date, currentMs, endMs, source, context));
-  }
-
-  if (items.length === 0) {
-    context.errors.push({
-      code: 'GAP_FILLER_MEDIA_NOT_AVAILABLE',
-      itemId: source,
-      message: `Gap from ${row.start_time} to ${row.end_time} on ${date} has no ready filler or emergency media.`,
-    });
-    return [missingItem({
-      date,
-      type: 'gap_filler',
-      source,
-      sourceRole: 'filler',
-      programKey: null,
-      title: row.title,
-      trimStartSeconds: 0,
-    }, startSeconds, endSeconds, 'missing_media')];
   }
 
   return items;
@@ -366,6 +672,7 @@ function expandGapFromFallbackFiles(
       source,
       sourceRole: media.type === 'emergency' ? 'emergency' : 'filler',
       programKey: null,
+      hideLogo: false,
       title: media.type === 'emergency' ? 'Emergency Fallback' : 'Filler',
       trimStartSeconds: 0,
       media,
@@ -403,6 +710,7 @@ function gapItemFromPlaylistItem(
     source,
     sourceRole: item.source_role,
     programKey: null,
+    hideLogo: false,
     title: item.title,
     startTime: formatClock(startSeconds),
     endTime: formatClock(endSeconds),
@@ -426,6 +734,7 @@ function readyItem(args: {
   source: string;
   sourceRole: SourceRole;
   programKey: string | null;
+  hideLogo: boolean;
   title: string;
   trimStartSeconds: 0;
   media: MediaFileRow;
@@ -441,6 +750,7 @@ function readyItem(args: {
     source: args.source,
     sourceRole: args.sourceRole,
     programKey: args.programKey,
+    hideLogo: args.hideLogo,
     title: args.title,
     startTime: formatClock(args.startSeconds),
     endTime: formatClock(args.endSeconds),
@@ -465,6 +775,7 @@ function missingItem(
     source: string;
     sourceRole: SourceRole;
     programKey: string | null;
+    hideLogo: boolean;
     title: string;
     trimStartSeconds: 0;
   },
@@ -481,6 +792,7 @@ function missingItem(
     source: base.source,
     sourceRole: base.sourceRole,
     programKey: base.programKey,
+    hideLogo: base.hideLogo,
     title: base.title,
     startTime: formatClock(startSeconds),
     endTime: formatClock(endSeconds),
@@ -510,7 +822,7 @@ function getReadyFilesForFolder(folderId: string, context: ExpansionContext): Me
       FROM media_folders child
       JOIN folder_tree parent ON child.parent_folder_id=parent.id
     )
-    SELECT id, path, relative_path, filename, type, status, duration_sec, duration_ms, modified_at
+    SELECT id, path, relative_path, filename, type, status, folder_id, duration_sec, duration_ms, modified_at
     FROM media_files
     WHERE folder_id IN (SELECT id FROM folder_tree)
       AND status='ready'
@@ -521,12 +833,228 @@ function getReadyFilesForFolder(folderId: string, context: ExpansionContext): Me
   return files;
 }
 
+function getFolderForId(folderId: string, context: ExpansionContext): MediaFolderRow | null {
+  if (context.foldersById.has(folderId)) return context.foldersById.get(folderId) ?? null;
+
+  const folder = context.db.prepare(`
+    SELECT id, original_relative_path
+    FROM media_folders
+    WHERE id=?
+  `).get(folderId) as MediaFolderRow | undefined;
+  const value = folder ?? null;
+  context.foldersById.set(folderId, value);
+  return value;
+}
+
+function getKidsRoundRobinFilesForFolder(folderId: string, context: ExpansionContext): MediaFileRow[] {
+  const cached = context.kidsRoundRobinFilesByFolderId.get(folderId);
+  if (cached) return cached;
+
+  const parent = getFolderForId(folderId, context);
+  const files = getReadyFilesForFolder(folderId, context);
+  const grouped = groupFilesByImmediateChildFolder(parent?.original_relative_path ?? '', files);
+  const sequence = interleaveFileGroups(grouped);
+  context.kidsRoundRobinFilesByFolderId.set(folderId, sequence);
+  return sequence;
+}
+
+function groupFilesByImmediateChildFolder(parentRelativePath: string, files: MediaFileRow[]): MediaFileRow[][] {
+  const parent = normalizeMediaRelativePath(parentRelativePath);
+  const byChild = new Map<string, MediaFileRow[]>();
+
+  for (const file of files) {
+    const relativePath = normalizeMediaRelativePath(file.relative_path ?? file.filename ?? file.path);
+    const childKey = immediateChildKey(parent, relativePath);
+    const list = byChild.get(childKey) ?? [];
+    list.push(file);
+    byChild.set(childKey, list);
+  }
+
+  return Array.from(byChild.entries())
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
+    .map(([, group]) => sortByEpisodeNumber(group));
+}
+
+function interleaveFileGroups(groups: MediaFileRow[][]): MediaFileRow[] {
+  if (groups.length === 0) return [];
+  const maxLength = Math.max(...groups.map(group => group.length));
+  const interleaved: MediaFileRow[] = [];
+  for (let index = 0; index < maxLength; index++) {
+    for (const group of groups) {
+      const item = group[index];
+      if (item) interleaved.push(item);
+    }
+  }
+  return interleaved;
+}
+
+function immediateChildKey(parentRelativePath: string, fileRelativePath: string): string {
+  const parent = parentRelativePath.replace(/\/+$/g, '');
+  let rest = fileRelativePath;
+  if (parent && (fileRelativePath === parent || fileRelativePath.startsWith(`${parent}/`))) {
+    rest = fileRelativePath.slice(parent.length).replace(/^\/+/g, '');
+  }
+
+  const segments = rest.split('/').filter(Boolean);
+  if (segments.length <= 1) return '.';
+  return segments[0]!;
+}
+
+function normalizeMediaRelativePath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/^\/+/g, '').replace(/\/+/g, '/');
+}
+
 function getProgramCursor(programKey: string, context: ExpansionContext): ProgramCursor {
   const existing = context.programCursors.get(programKey);
   if (existing) return existing;
   const cursor = { nextIndex: 0 };
   context.programCursors.set(programKey, cursor);
   return cursor;
+}
+
+function selectNextFiles(
+  programKey: string,
+  files: MediaFileRow[],
+  playMode: ProgramPlayMode,
+  count: number,
+  context: ExpansionContext
+): MediaFileRow[] {
+  if (files.length === 0 || count <= 0) return [];
+
+  const ordered = orderFilesForPlayMode(files, playMode);
+  if (ordered.length === 0) return [];
+
+  if (playMode === 'shuffle') {
+    return ordered.slice(0, count);
+  }
+
+  if (playMode === 'newest') {
+    return ordered.slice(0, count);
+  }
+
+  const cursorKey = playMode === 'round_robin' ? `rr:${programKey}` : programKey;
+  const cursor = getProgramCursor(cursorKey, context);
+  const selected: MediaFileRow[] = [];
+  for (let offset = 0; offset < count; offset++) {
+    selected.push(ordered[(cursor.nextIndex + offset) % ordered.length]!);
+  }
+  cursor.nextIndex = (cursor.nextIndex + selected.length) % ordered.length;
+  return selected;
+}
+
+function orderFilesForPlayMode(files: MediaFileRow[], playMode: ProgramPlayMode): MediaFileRow[] {
+  if (playMode === 'shuffle') {
+    return shuffleFiles(files);
+  }
+  if (playMode === 'newest') {
+    return [...files].sort((a, b) => mediaModifiedTime(b) - mediaModifiedTime(a) || compareMediaFiles(a, b));
+  }
+  if (playMode === 'round_robin') {
+    return interleaveRoundRobinFiles(files);
+  }
+  return sortByEpisodeNumber(files);
+}
+
+function interleaveRoundRobinFiles(files: MediaFileRow[]): MediaFileRow[] {
+  const byDir = new Map<string, MediaFileRow[]>();
+  for (const file of files) {
+    const dir = path.dirname(file.relative_path ?? file.path);
+    const list = byDir.get(dir) ?? [];
+    list.push(file);
+    byDir.set(dir, list);
+  }
+
+  const dirs = Array.from(byDir.keys()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  for (const dir of dirs) {
+    byDir.set(dir, sortByEpisodeNumber(byDir.get(dir)!));
+  }
+
+  const maxLength = Math.max(...dirs.map(dir => byDir.get(dir)!.length));
+  const interleaved: MediaFileRow[] = [];
+  for (let index = 0; index < maxLength; index++) {
+    for (const dir of dirs) {
+      const item = byDir.get(dir)![index];
+      if (item) interleaved.push(item);
+    }
+  }
+  return interleaved;
+}
+
+function sortByEpisodeNumber(files: MediaFileRow[]): MediaFileRow[] {
+  return [...files].sort((a, b) => {
+    const left = extractEpisodeNumber(a);
+    const right = extractEpisodeNumber(b);
+    if (left !== right) return left - right;
+    return compareMediaFiles(a, b);
+  });
+}
+
+function extractEpisodeNumber(file: MediaFileRow): number {
+  const basename = path.basename(file.relative_path ?? file.filename ?? file.path, path.extname(file.filename ?? file.path));
+  const leading = basename.match(/^(\d+)/);
+  if (leading) return Number(leading[1]);
+  const separated = basename.match(/(?:^|[\s_.-])(\d+)(?:[\s_.-]|$)/);
+  if (separated) return Number(separated[1]);
+  const any = basename.match(/\d+/);
+  return any ? Number(any[0]) : Number.POSITIVE_INFINITY;
+}
+
+function compareMediaFiles(a: MediaFileRow, b: MediaFileRow): number {
+  const left = a.relative_path ?? a.filename ?? a.path;
+  const right = b.relative_path ?? b.filename ?? b.path;
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id);
+}
+
+function shuffleFiles(files: MediaFileRow[]): MediaFileRow[] {
+  const shuffled = [...files];
+  for (let index = shuffled.length - 1; index > 0; index--) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex]!, shuffled[index]!];
+  }
+  return shuffled;
+}
+
+function mediaModifiedTime(file: MediaFileRow): number {
+  const parsed = file.modified_at ? Date.parse(file.modified_at) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeSlotMode(value: string): ProgramSlotMode {
+  if (value === 'playlist' || value === 'file_count' || value === 'kids_round_robin') return value;
+  return 'fit';
+}
+
+function normalizePlayMode(value: string): ProgramPlayMode {
+  if (value === 'shuffle' || value === 'newest' || value === 'round_robin') return value;
+  return 'sequential';
+}
+
+function validateProgramMedia(
+  media: MediaFileRow,
+  programKey: string,
+  source: string,
+  context: ExpansionContext
+): number | null {
+  const mediaDurationSeconds = mediaDuration(media);
+  if (mediaDurationSeconds === null) {
+    context.errors.push({
+      code: 'MEDIA_DURATION_UNKNOWN',
+      itemId: source,
+      message: `Media file "${media.filename}" for program "${programKey}" has no known QC duration.`,
+    });
+    return null;
+  }
+
+  if (!fs.existsSync(media.path)) {
+    context.errors.push({
+      code: 'MEDIA_FILE_MISSING_ON_DISK',
+      itemId: source,
+      message: `Media file "${media.filename}" for program "${programKey}" is ready in DB but missing on disk.`,
+    });
+    return null;
+  }
+
+  return mediaDurationSeconds;
 }
 
 function validateTimeline(items: ExpandedPlaylistItem[], context: ExpansionContext): void {

@@ -15,6 +15,7 @@ import {
   buildOverlayEnableExpression,
   prepareProgramBadgeOverlayAssets,
   programBadgeY,
+  type ProgramBadgeRange,
 } from '../overlay/programBadgeOverlay';
 
 export type BroadcastStatus = 'idle' | 'starting' | 'running' | 'stopping' | 'error' | 'emergency';
@@ -500,8 +501,7 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
   const logoPath = resolveLogoOverlayPath(config.overlay.logoLoopPath);
   const hasLogo = fs.existsSync(logoPath);
 
-  const tickerPath = path.join(config.paths.assets, 'overlays', 'tickers', `${date}.webm`);
-  const hasTicker = fs.existsSync(tickerPath);
+  const tickerPath = resolveTickerOverlayPath(date);
 
   // Now-playing PNG (lower third): shown for first N seconds of the session
   const nowPlayingPath = current?.lower_third_path ?? null;
@@ -555,13 +555,15 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
     } else {
       inputs.push('-stream_loop', '-1', '-i', logoPath);
     }
+    const logoEnable = buildLogoOverlayEnableExpression(available, now);
+    const logoEnablePart = logoEnable ? `:enable='${logoEnable}'` : '';
     filterComplex += `;[${inputIdx}:v]scale=${config.overlay.logoWidth}:-1:force_original_aspect_ratio=decrease,format=rgba[logo_rgba]`;
-    filterComplex += `;${lastLabel}[logo_rgba]overlay=${config.overlay.logoPosition}:shortest=0[logo]`;
+    filterComplex += `;${lastLabel}[logo_rgba]overlay=${config.overlay.logoPosition}${logoEnablePart}:shortest=0[logo]`;
     lastLabel = '[logo]';
     inputIdx++;
   }
 
-  if (hasTicker) {
+  if (tickerPath) {
     const ty = Math.max(0, parseInt(h, 10) - config.overlay.tickerHeight);
     inputs.push('-stream_loop', '-1', '-i', tickerPath);
     filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=0:${ty}:shortest=0[ticker]`;
@@ -724,6 +726,15 @@ function resolveLogoOverlayPath(configuredPath: string): string {
   return configuredPath;
 }
 
+function resolveTickerOverlayPath(date: string): string | null {
+  const tickerDir = path.join(config.paths.assets, 'overlays', 'tickers');
+  const stablePath = path.join(tickerDir, 'current-schedule.webm');
+  if (fs.existsSync(stablePath)) return stablePath;
+
+  const datePath = path.join(tickerDir, `${date}.webm`);
+  return fs.existsSync(datePath) ? datePath : null;
+}
+
 function isStaticImageOverlay(filePath: string): boolean {
   return ['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(filePath).toLowerCase());
 }
@@ -746,6 +757,33 @@ function tryPrepareProgramBadgeOverlayAssets(
     logger.warn(`Program badge overlay was skipped: ${err}`);
     return null;
   }
+}
+
+export function buildLogoOverlayEnableExpression(items: PlaylistItem[], playbackStartMs: number): string | null {
+  const hideRanges = items
+    .filter(item => item.hide_logo === true && (item.source_role === 'program' || item.type === 'program'))
+    .map(item => ({
+      startSeconds: Math.max(0, (item.start_time_ms - playbackStartMs) / 1000),
+      endSeconds: Math.max(0, (item.end_time_ms - playbackStartMs) / 1000),
+    }))
+    .filter(range => range.endSeconds - range.startSeconds >= 0.5);
+
+  const hideExpression = buildOverlayEnableExpression(mergeTimelineRanges(hideRanges));
+  return hideExpression ? `not(${hideExpression})` : null;
+}
+
+function mergeTimelineRanges(ranges: ProgramBadgeRange[]): ProgramBadgeRange[] {
+  const sorted = [...ranges].sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+  const merged: ProgramBadgeRange[] = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.startSeconds <= last.endSeconds + 0.05) {
+      last.endSeconds = Math.max(last.endSeconds, range.endSeconds);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
 }
 
 /**
@@ -941,6 +979,8 @@ async function preparePlaylistArtifactBroadcast(runId: string): Promise<Prepared
       timelineEndSeconds?: number;
       isTrimmed?: boolean;
       trimEndSeconds?: number | null;
+      hideLogo?: boolean;
+      hide_logo?: boolean;
     }>;
   };
 
@@ -989,6 +1029,7 @@ async function preparePlaylistArtifactBroadcast(runId: string): Promise<Prepared
       is_trimmed: item.isTrimmed === true,
       trim_out_ms: item.isTrimmed === true ? durationMs : null,
       forced_duration_ms: item.isTrimmed === true ? durationMs : null,
+      hide_logo: item.hideLogo === true || item.hide_logo === true,
     });
   }
 

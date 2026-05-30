@@ -7,6 +7,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { ensureDir } from '../utils/fileUtils';
 import { getPlaylistForDate } from '../playlist/builder';
+import { buildTickerPreview } from '../overlays/controlPanel';
 
 const execFileAsync = promisify(execFile);
 
@@ -24,12 +25,27 @@ export interface TickerConfig {
 export interface TickerGenerationResult {
   pngPath: string;
   webmPath: string;
+  stablePngPath?: string;
+  stableWebmPath?: string;
   textContent: string;
   width: number;
   height: number;
+  scrollCycleWidth: number;
+}
+
+export interface LoopedTickerLayout {
+  textWidth: number;
+  tileWidth: number;
+  totalWidth: number;
+  repeatCount: number;
 }
 
 let fontLoaded = false;
+const TICKER_LOOP_SEPARATOR = '   •   ';
+export const STABLE_TICKER_BASENAME = 'current-schedule';
+const TICKER_EMPTY_TEXT = '\u062a\u0634\u0627\u0647\u062f\u0648\u0646 \u0627\u0644\u064a\u0648\u0645';
+const TICKER_SCHEDULE_PREFIX = '\u062a\u0634\u0627\u0647\u062f\u0648\u0646 \u0639\u0644\u0649 \u0645\u062f\u0627\u0631 \u0627\u0644\u064a\u0648\u0645';
+const TICKER_PROGRAM_SEPARATOR = ' \u2022 ';
 
 function loadFont(fontPath: string): void {
   if (fontLoaded) return;
@@ -44,29 +60,37 @@ function loadFont(fontPath: string): void {
 }
 
 function buildTickerText(date: string): string {
+  try {
+    const previewText = buildTickerPreview({ mode: 'today', date }).text.trim();
+    if (previewText && previewText !== TICKER_EMPTY_TEXT) return previewText;
+  } catch (err) {
+    logger.warn(`Could not build ticker text from active schedule: ${err}`);
+  }
+
   const playlist = getPlaylistForDate(date);
   if (!playlist || playlist.items.length === 0) {
-    return `بث مباشر على مدار الساعة — ${date}`;
+    return TICKER_EMPTY_TEXT;
   }
 
-  const programs = playlist.items
+  const programNames = playlist.items
     .filter(item => item.type === 'program')
-    .slice(0, 10);
+    .map(item => (item.title_ar ?? item.title).trim())
+    .filter(Boolean)
+    .filter((title, index, all) => all.indexOf(title) === index);
 
-  if (programs.length === 0) {
-    return `تشاهدون اليوم: بث مستمر ${date}`;
+  if (programNames.length === 0) {
+    return TICKER_EMPTY_TEXT;
   }
 
-  const parts = programs.map(item => {
-    const time = new Date(item.start_time_ms).toLocaleTimeString('ar-SA', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
-    return `${item.title_ar ?? item.title} ${time}`;
-  });
+  return `${TICKER_SCHEDULE_PREFIX}: ${programNames.join(TICKER_PROGRAM_SEPARATOR)}`;
+}
 
-  return `تشاهدون اليوم: ${parts.join('  |  ')}      `;
+export function getStableTickerAssetPaths(): { pngPath: string; webmPath: string } {
+  const tickerDir = path.join(config.paths.assets, 'overlays', 'tickers');
+  return {
+    pngPath: path.join(tickerDir, `${STABLE_TICKER_BASENAME}.png`),
+    webmPath: path.join(tickerDir, `${STABLE_TICKER_BASENAME}.webm`),
+  };
 }
 
 function parseColor(colorStr: string): { r: number; g: number; b: number; a: number } {
@@ -122,10 +146,11 @@ function drawTickerBackground(
 
 export async function generateTickerPng(
   date: string,
-  tickerConfig?: Partial<TickerConfig>
-): Promise<{ pngPath: string; textContent: string; width: number; height: number }> {
+  tickerConfig?: Partial<TickerConfig>,
+  textOverride?: string
+): Promise<{ pngPath: string; textContent: string; width: number; height: number; scrollCycleWidth: number }> {
   const broadcastRes = config.broadcast.resolution.split('x');
-  const broadcastWidth = parseInt(broadcastRes[0] ?? '1280', 10);
+  const broadcastWidth = tickerConfig?.width ?? parseInt(broadcastRes[0] ?? '1280', 10);
 
   const cfg: TickerConfig = {
     width: broadcastWidth,
@@ -140,49 +165,66 @@ export async function generateTickerPng(
 
   loadFont(cfg.fontPath);
 
-  const text = buildTickerText(date);
+  const text = (textOverride?.trim() || buildTickerText(date)).trim();
+  const loopText = `${text}${TICKER_LOOP_SEPARATOR}`;
   const fontFamily = fs.existsSync(cfg.fontPath) ? 'ArabicFont' : 'Arial';
 
   // Measure text width with a temp canvas
   const measureCanvas = createCanvas(100, cfg.height);
   const mCtx = measureCanvas.getContext('2d');
   mCtx.font = `${cfg.fontSize}px "${fontFamily}"`;
-  const metrics = mCtx.measureText(text);
-  const textWidth = Math.ceil(metrics.width) + cfg.safeMargin * 2;
+  const layout = calculateLoopedTickerLayout({
+    screenWidth: cfg.width,
+    textWidth: Math.ceil(mCtx.measureText(loopText).width),
+    gapWidth: cfg.safeMargin,
+  });
 
-  // The PNG must be wide enough to scroll (screen width + text width)
-  const totalWidth = cfg.width + textWidth + cfg.width;
-
-  const canvas = createCanvas(totalWidth, cfg.height);
+  const canvas = createCanvas(layout.totalWidth, cfg.height);
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
 
   // Background
-  drawTickerBackground(ctx, totalWidth, cfg.height, cfg.bgColor);
+  drawTickerBackground(ctx, layout.totalWidth, cfg.height, cfg.bgColor);
 
   // Text — right-to-left Arabic
   ctx.font = `${cfg.fontSize}px "${fontFamily}"`;
   ctx.fillStyle = cfg.textColor;
   ctx.textBaseline = 'middle';
   ctx.direction = 'rtl';
+  ctx.textAlign = 'right';
 
-  // Draw text starting from right side
-  ctx.fillText(text, cfg.safeMargin + textWidth, cfg.height / 2);
+  for (let i = 0; i < layout.repeatCount; i++) {
+    ctx.fillText(loopText, layout.textWidth + i * layout.tileWidth, cfg.height / 2);
+  }
 
   ensureDir(path.join(config.paths.assets, 'overlays', 'tickers'));
   const pngPath = path.join(config.paths.assets, 'overlays', 'tickers', `${date}.png`);
   const buffer = canvas.toBuffer('image/png');
   fs.writeFileSync(pngPath, buffer);
 
-  logger.info(`Generated ticker PNG for ${date}: ${pngPath} (${totalWidth}x${cfg.height})`);
-  return { pngPath, textContent: text, width: totalWidth, height: cfg.height };
+  logger.info(
+    `Generated ticker PNG for ${date}: ${pngPath} ` +
+      `(${layout.totalWidth}x${cfg.height}, cycle=${layout.tileWidth}px)`
+  );
+  return {
+    pngPath,
+    textContent: text,
+    width: layout.totalWidth,
+    height: cfg.height,
+    scrollCycleWidth: layout.tileWidth,
+  };
 }
 
-export async function generateTickerWebm(date: string): Promise<TickerGenerationResult> {
-  const { pngPath, textContent, width, height } = await generateTickerPng(date);
+export async function generateTickerWebm(
+  date: string,
+  tickerConfig?: Partial<TickerConfig>,
+  textOverride?: string
+): Promise<TickerGenerationResult> {
+  const { pngPath, textContent, width, height, scrollCycleWidth } = await generateTickerPng(date, tickerConfig, textOverride);
 
   const broadcastRes = config.broadcast.resolution.split('x');
   const broadcastWidth = parseInt(broadcastRes[0] ?? '1280', 10);
-  const scrollDuration = Math.ceil(width / config.overlay.tickerSpeed);
+  const tickerSpeed = tickerConfig?.speed ?? config.overlay.tickerSpeed;
+  const scrollDuration = Math.max(1, scrollCycleWidth / tickerSpeed);
 
   const webmPath = pngPath.replace('.png', '.webm');
 
@@ -191,7 +233,7 @@ export async function generateTickerWebm(date: string): Promise<TickerGeneration
   //   h = tickerSpeed_px_per_sec / (fps * src_width_px)
   // Without this correction the old formula (1/speed) ran ~fps× too fast.
   const fps = config.broadcast.fps;
-  const h = (config.overlay.tickerSpeed / (fps * width)).toFixed(8);
+  const h = (tickerSpeed / (fps * width)).toFixed(8);
 
   // Double hflip reverses scroll direction so Arabic text moves RIGHT-to-LEFT
   // (enters from the right, exits left) matching standard Arabic broadcast convention.
@@ -222,7 +264,39 @@ export async function generateTickerWebm(date: string): Promise<TickerGeneration
     throw new Error(`FFmpeg ticker encoding failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  return { pngPath, webmPath, textContent, width, height };
+  const stablePaths = getStableTickerAssetPaths();
+  fs.copyFileSync(pngPath, stablePaths.pngPath);
+  fs.copyFileSync(webmPath, stablePaths.webmPath);
+  logger.info(`Updated stable ticker assets: ${stablePaths.webmPath}`);
+
+  return {
+    pngPath,
+    webmPath,
+    stablePngPath: stablePaths.pngPath,
+    stableWebmPath: stablePaths.webmPath,
+    textContent,
+    width,
+    height,
+    scrollCycleWidth,
+  };
+}
+
+export function calculateLoopedTickerLayout(input: {
+  screenWidth: number;
+  textWidth: number;
+  gapWidth: number;
+}): LoopedTickerLayout {
+  const screenWidth = Math.max(1, Math.ceil(input.screenWidth));
+  const textWidth = Math.max(1, Math.ceil(input.textWidth));
+  const gapWidth = Math.max(0, Math.ceil(input.gapWidth));
+  const tileWidth = textWidth + gapWidth;
+  const repeatCount = Math.max(3, Math.ceil((screenWidth + tileWidth) / tileWidth) + 2);
+  return {
+    textWidth,
+    tileWidth,
+    totalWidth: tileWidth * repeatCount,
+    repeatCount,
+  };
 }
 
 export async function generateTickerMonth(yearMonth: string): Promise<void> {

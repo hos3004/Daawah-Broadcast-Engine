@@ -114,6 +114,7 @@ describe('scheduler foundation routes', () => {
       willUpdateCursors: boolean;
       willMaterializePlaylist: boolean;
       summary: { matchedPrograms: number; programCount: number; slotCount: number };
+      programs: Array<{ hide_logo: boolean }>;
       folderMatches: Array<{ status: string }>;
       schedulePreview: { days: unknown[] };
     };
@@ -123,6 +124,7 @@ describe('scheduler foundation routes', () => {
     expect(body.willUpdateCursors).toBe(false);
     expect(body.willMaterializePlaylist).toBe(false);
     expect(body.summary).toMatchObject({ matchedPrograms: 1, programCount: 1, slotCount: 1 });
+    expect(body.programs[0]?.hide_logo).toBe(true);
     expect(body.folderMatches[0]?.status).toBe('matched');
     expect(body.schedulePreview.days.length).toBeGreaterThan(0);
 
@@ -691,7 +693,7 @@ describe('scheduler foundation routes', () => {
     const ffconcatPath = path.join(dryRun.run.outputPath, 'playlist.ffconcat');
     const playlist = JSON.parse(fs.readFileSync(playlistPath, 'utf8')) as {
       mediaExpansionAvailable: boolean;
-      items: Array<{ mediaFileId: string | null; absolutePath: string | null; validationStatus: string }>;
+      items: Array<{ mediaFileId: string | null; absolutePath: string | null; validationStatus: string; hideLogo?: boolean }>;
     };
     const ffconcat = fs.readFileSync(ffconcatPath, 'utf8');
 
@@ -709,6 +711,7 @@ describe('scheduler foundation routes', () => {
     expect(playlist.items.every(item => item.validationStatus === 'ready')).toBe(true);
     expect(playlist.items.map(item => item.mediaFileId)).toContain('program-media-1');
     expect(playlist.items.map(item => item.mediaFileId)).toContain('program-media-2');
+    expect(playlist.items.some(item => item.mediaFileId === 'program-media-1' && item.hideLogo === true)).toBe(true);
     expect(playlist.items.every(item => item.absolutePath)).toBe(true);
     expect(ffconcat).toContain('ffconcat version 1.0');
     expect(ffconcat).toContain(first.replace(/\\/g, '/').split('/').pop());
@@ -947,6 +950,7 @@ describe('scheduler foundation routes', () => {
       source: 'test',
       sourceRole: 'program',
       programKey: 'program:test',
+      hideLogo: false,
       title: 'Unsafe media path',
       startTime: '00:00:00',
       endTime: '00:00:05',
@@ -1543,6 +1547,7 @@ function makeWorkbookBuffer(): Buffer {
     play_mode: 'sequential',
     slot_mode: 'fit',
     repeat_policy: 'same_day_same_episode',
+    hide_logo: 'true',
     enabled: 'true',
   }]), 'Programs');
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([{

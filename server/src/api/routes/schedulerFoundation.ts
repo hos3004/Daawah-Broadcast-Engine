@@ -49,6 +49,7 @@ import {
   buildTickerPreview,
   deleteLogoAsset,
   exportTickerAss,
+  getLogoAsset,
   getOverlaySettings,
   getTodayScheduleItems,
   listLogoAssets,
@@ -1278,6 +1279,30 @@ schedulerFoundationRouter.get(
           ffmpegExecution: false,
         },
       });
+    } catch (err) {
+      sendFoundationError(res, err);
+    }
+  }
+);
+
+schedulerFoundationRouter.get(
+  '/overlays/logo-assets/:id/content',
+  requireRole('admin', 'editor', 'operator'),
+  (req: Request, res: Response): void => {
+    try {
+      const id = req.params.id;
+      if (!id) {
+        res.status(400).json({ error: 'Logo asset id is required', code: 'LOGO_ASSET_ID_REQUIRED' });
+        return;
+      }
+      const asset = getLogoAsset(id);
+      if (!asset) {
+        res.status(404).json({ error: 'Logo asset not found', code: 'LOGO_ASSET_NOT_FOUND' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.type(asset.mimeType);
+      res.sendFile(asset.absolutePath);
     } catch (err) {
       sendFoundationError(res, err);
     }

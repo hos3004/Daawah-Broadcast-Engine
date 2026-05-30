@@ -20,13 +20,15 @@ interface MediaFile {
   program_id: string | null;
 }
 
-interface CursorState {
+export interface GapFillerCursorState {
   cursor_key: string;
   role: string;
   folder_key: string | null;
   last_media_file_id: string | null;
   last_played_path: string | null;
 }
+
+export type GapFillerCursorPlan = Map<string, GapFillerCursorState>;
 
 interface GapFillerConfig {
   mainStingPath: string;
@@ -53,15 +55,17 @@ interface BuildProfessionalGapFillItemsArgs {
   db: Db;
   startPosition: number;
   updateCursors?: boolean;
+  plannedCursors?: GapFillerCursorPlan;
 }
 
 export interface GapFillerOptions {
   updateCursors?: boolean;
+  plannedCursors?: GapFillerCursorPlan;
 }
 
 interface CursorSelectionOptions {
   updateCursors: boolean;
-  plannedCursors: Map<string, CursorState>;
+  plannedCursors: GapFillerCursorPlan;
 }
 
 const DEFAULT_DURATION_MS = 60_000;
@@ -125,7 +129,7 @@ export function buildProfessionalGapFillItems(args: BuildProfessionalGapFillItem
   let attempts = 0;
   const cursorOptions: CursorSelectionOptions = {
     updateCursors: args.updateCursors ?? true,
-    plannedCursors: new Map(),
+    plannedCursors: args.plannedCursors ?? new Map(),
   };
 
   while (currentMs < endMs && items.length < maxItems && attempts < maxAttempts) {
@@ -263,7 +267,7 @@ export function getNextByCursor(
   const selected = candidates[selectedIndex];
   if (!selected) return null;
 
-  const nextState: CursorState = {
+  const nextState: GapFillerCursorState = {
     cursor_key: cursorKey,
     role,
     folder_key: folderKey,
@@ -359,7 +363,7 @@ function updateGeneralFolderCursor(bucket: GeneralBucket, db: Db, options: Curso
     duration_sec: null,
     program_id: null,
   };
-  const nextState: CursorState = {
+  const nextState: GapFillerCursorState = {
     cursor_key: 'gap:general-folder-index',
     role: 'general_bumper',
     folder_key: bucket.folderKey,
@@ -373,9 +377,9 @@ function updateGeneralFolderCursor(bucket: GeneralBucket, db: Db, options: Curso
   }
 }
 
-function getCursor(cursorKey: string, db: Db): CursorState | null {
+function getCursor(cursorKey: string, db: Db): GapFillerCursorState | null {
   return db.prepare('SELECT * FROM bumper_cursor_state WHERE cursor_key=?')
-    .get(cursorKey) as CursorState | null;
+    .get(cursorKey) as GapFillerCursorState | null;
 }
 
 function queryReadyFillerFiles(db: Db): MediaFile[] {

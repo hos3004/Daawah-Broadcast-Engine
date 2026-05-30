@@ -4,7 +4,7 @@ import { normalizeArabicForMatch } from '../media/safeNaming';
 import { DEFAULT_MEDIA_ROOTS, normalizeRootRelativePath, SafeRootError } from '../media/safeRoots';
 
 export const SUPPORTED_PLAY_MODES = ['sequential', 'shuffle', 'newest', 'round_robin'] as const;
-export const SUPPORTED_SLOT_MODES = ['fit', 'playlist', 'file_count'] as const;
+export const SUPPORTED_SLOT_MODES = ['fit', 'playlist', 'file_count', 'kids_round_robin'] as const;
 export const SUPPORTED_REPEAT_POLICIES = ['same_day_same_episode', 'advance_each_airing'] as const;
 
 export type ExcelPreviewSeverity = 'error' | 'warning' | 'info';
@@ -64,6 +64,7 @@ export interface ProgramPreviewRow {
   status: PreviewRowStatus;
   program_key: string;
   program_name: string;
+  hide_logo: boolean;
   folder_hint: string;
   normalized_folder_hint: string | null;
   folder_root: string;
@@ -408,6 +409,8 @@ function validatePrograms(rows: Record<string, unknown>[], issues: ExcelPreviewI
     const repeatPolicy = asString(row['repeat_policy']) || 'same_day_same_episode';
     const enabledText = asString(row['enabled']);
     const enabled = enabledText ? parseEnabled(enabledText) : true;
+    const hideLogoText = asString(row['hide_logo'] ?? row['hide_logo_during_program']);
+    const hideLogo = hideLogoText ? parseEnabled(hideLogoText) : false;
     let normalizedFolderHint: string | null = null;
 
     if (!programKey) {
@@ -446,12 +449,16 @@ function validatePrograms(rows: Record<string, unknown>[], issues: ExcelPreviewI
     if (enabledText && enabled === null) {
       addIssue(issues, 'error', 'INVALID_ENABLED_VALUE', 'Programs', rowNumber, 'enabled', 'قيمة enabled يجب أن تكون true أو false.');
     }
+    if (hideLogoText && hideLogo === null) {
+      addIssue(issues, 'error', 'INVALID_HIDE_LOGO_VALUE', 'Programs', rowNumber, 'hide_logo', 'قيمة hide_logo يجب أن تكون true أو false.');
+    }
 
     return {
       row: rowNumber,
       status: 'ok',
       program_key: programKey,
       program_name: programName,
+      hide_logo: hideLogo === true,
       folder_hint: folderHint,
       normalized_folder_hint: normalizedFolderHint,
       folder_root: folderRoot,
@@ -544,6 +551,18 @@ function detectOverlapsAndGaps(slots: SlotPreviewRow[], issues: ExcelPreviewIssu
       const current = intervals[index]!;
       const next = intervals[index + 1]!;
       if (current.end > next.start) {
+        if (current.start < next.start) {
+          addIssue(
+            issues,
+            'warning',
+            'SLOT_TRIMMED_TO_NEXT_HARD_START',
+            'Slots',
+            current.row,
+            'duration_minutes',
+            `سيتم قص نهاية صف ${current.row} يوم ${DAY_LABELS[day] ?? day} عند ${formatMinutes(next.start)} للحفاظ على بداية صف ${next.row} في موعدها.`
+          );
+          continue;
+        }
         addIssue(
           issues,
           'error',
@@ -662,7 +681,7 @@ function buildSchedulePreview(
     days.push({
       date: dateText,
       day: dayKey,
-      rows: insertGapRows(rows),
+      rows: insertGapRows(applyHardStartCaps(rows)),
     });
   }
 
@@ -672,6 +691,27 @@ function buildSchedulePreview(
     truncated: totalDays > daysToRender,
     days,
   };
+}
+
+function applyHardStartCaps(rows: SchedulePreviewRow[]): SchedulePreviewRow[] {
+  return rows.map((row, index) => {
+    const start = parseTimeToMinutes(row.start_time);
+    const end = parsePreviewMinutes(row.end_time);
+    if (start === null || end === null) return row;
+
+    const nextStart = rows
+      .slice(index + 1)
+      .map(nextRow => parseTimeToMinutes(nextRow.start_time))
+      .find((value): value is number => value !== null && value > start);
+
+    if (nextStart === undefined || end <= nextStart) return row;
+
+    return {
+      ...row,
+      end_time: formatMinutes(nextStart),
+      duration_minutes: Math.max(0, nextStart - start),
+    };
+  });
 }
 
 function syncRowIssueLists(

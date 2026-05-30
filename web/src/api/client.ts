@@ -199,6 +199,7 @@ export const schedulerFoundationApi = {
   overlaySettings: () => api.get('/scheduler-foundation/overlays/settings'),
   saveOverlaySettings: (payload: unknown) => api.put('/scheduler-foundation/overlays/settings', payload),
   listLogoAssets: () => api.get('/scheduler-foundation/overlays/logo-assets'),
+  logoAssetContentUrl: (id: string) => `/api/scheduler-foundation/overlays/logo-assets/${encodeURIComponent(id)}/content`,
   uploadLogoAsset: (file: File) => {
     const fd = new FormData();
     fd.append('file', file);

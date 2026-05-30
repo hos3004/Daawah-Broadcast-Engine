@@ -140,12 +140,13 @@ const DEFAULT_LOGO_SETTINGS: LogoOverlaySettings = {
   customY: null,
   width: null,
   height: null,
-  scale: 0.18,
+  scale: 0.08,
   opacity: 0.9,
   safeArea: 24,
 };
 
 export const ARABIC_TICKER_FONT_FALLBACKS = [
+  'Tajawal',
   'Noto Naskh Arabic',
   'Amiri',
   'Noto Sans Arabic',
@@ -159,8 +160,8 @@ const DEFAULT_TICKER_SETTINGS: TickerSettings = {
   fontFamily: ARABIC_TICKER_FONT_FALLBACKS[0]!,
   fontSize: 34,
   textColor: '#FFFFFF',
-  backgroundColor: '#000000',
-  backgroundOpacity: 0.68,
+  backgroundColor: 'gradient-blue',
+  backgroundOpacity: 1,
   opacity: 1,
   speedPixelsPerSecond: 90,
   position: 'bottom',
@@ -169,6 +170,11 @@ const DEFAULT_TICKER_SETTINGS: TickerSettings = {
   resolutionHeight: 720,
   limitItems: 12,
 };
+
+const MAX_STABLE_TICKER_ITEMS = 500;
+const TICKER_TEXT_SEPARATOR = ' \u2022 ';
+const TICKER_EMPTY_TEXT = '\u062a\u0634\u0627\u0647\u062f\u0648\u0646 \u0627\u0644\u064a\u0648\u0645';
+const TICKER_SCHEDULE_PREFIX = '\u062a\u0634\u0627\u0647\u062f\u0648\u0646 \u0639\u0644\u0649 \u0645\u062f\u0627\u0631 \u0627\u0644\u064a\u0648\u0645';
 
 const LOGO_ASSET_MAX_BYTES = 5 * 1024 * 1024;
 const LOGO_ASSET_MIME_BY_EXT: Record<string, string[]> = {
@@ -239,7 +245,7 @@ export function validateTickerSettings(input: Partial<TickerSettings>): TickerSe
     fontFamily: normalizeFontFamily(input.fontFamily) || DEFAULT_TICKER_SETTINGS.fontFamily,
     fontSize: clampInt(input.fontSize ?? DEFAULT_TICKER_SETTINGS.fontSize, 12, 120),
     textColor: normalizeHexColor(input.textColor, DEFAULT_TICKER_SETTINGS.textColor),
-    backgroundColor: normalizeHexColor(input.backgroundColor, DEFAULT_TICKER_SETTINGS.backgroundColor),
+    backgroundColor: normalizeTickerBackground(input.backgroundColor, DEFAULT_TICKER_SETTINGS.backgroundColor),
     backgroundOpacity: clampNumber(input.backgroundOpacity ?? DEFAULT_TICKER_SETTINGS.backgroundOpacity, 0, 1),
     opacity: clampNumber(input.opacity ?? DEFAULT_TICKER_SETTINGS.opacity, 0, 1),
     speedPixelsPerSecond: clampInt(input.speedPixelsPerSecond ?? DEFAULT_TICKER_SETTINGS.speedPixelsPerSecond, 10, 800),
@@ -321,14 +327,16 @@ export function exportTickerAss(input: TickerPreviewInput = {}): TickerExport {
 }
 
 export function getTodayScheduleItems(input: { date?: string; limit?: number } = {}): TodayScheduleTickerItem[] {
-  const limit = clampInt(input.limit ?? DEFAULT_TICKER_SETTINGS.limitItems, 1, 50);
   try {
     const activeState = getActiveScheduleState();
     if (!activeState) return [];
     const activeSchedule = getPublishedSchedule(activeState.publishedScheduleId);
     if (!activeSchedule) return [];
-    const date = normalizeDate(input.date, activeSchedule.timezone);
-    return scheduleItemsFromPreview(activeSchedule.schedulePreview, date, limit, getSafeNameDisplayLookup());
+    return scheduleProgramItemsFromPreview(
+      activeSchedule.schedulePreview,
+      activeSchedule.programs,
+      getSafeNameDisplayLookup()
+    );
   } catch {
     return [];
   }
@@ -433,7 +441,55 @@ export function scheduleItemsFromPreview(
         title: (programKey ? displayNameLookup.get(programKey) : null) ?? fallbackTitle,
         programKey,
       };
-    });
+	    });
+}
+
+export function scheduleProgramItemsFromPreview(
+  preview: unknown,
+  programs: ReadonlyArray<{ program_key?: unknown; program_name?: unknown; enabled?: unknown }> = [],
+  displayNameLookup: Map<string, string> = new Map(),
+  limit = MAX_STABLE_TICKER_ITEMS
+): TodayScheduleTickerItem[] {
+  const safeLimit = clampInt(limit, 1, MAX_STABLE_TICKER_ITEMS);
+  const programsByKey = new Map<string, { program_name?: unknown; enabled?: unknown }>();
+  for (const program of programs) {
+    const programKey = cleanString(program.program_key);
+    if (programKey) programsByKey.set(programKey, program);
+  }
+
+  const items: TodayScheduleTickerItem[] = [];
+  const seen = new Set<string>();
+  const addItem = (programKey: string | null, fallbackTitle: unknown): void => {
+    if (items.length >= safeLimit) return;
+    const title = cleanString(programKey ? displayNameLookup.get(programKey) : '')
+      || cleanString(programKey ? programsByKey.get(programKey)?.program_name : '')
+      || cleanString(fallbackTitle)
+      || cleanString(programKey);
+    if (!title) return;
+    const dedupeKey = programKey ? `key:${programKey}` : `title:${title.toLowerCase()}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    items.push({ time: '', title, programKey });
+  };
+
+  const days = isRecord(preview) && Array.isArray(preview['days']) ? preview['days'] : [];
+  for (const day of days) {
+    const rows = isRecord(day) && Array.isArray(day['rows']) ? day['rows'] : [];
+    for (const row of rows) {
+      if (!isRecord(row) || row['type'] !== 'slot') continue;
+      const programKey = cleanString(row['program_key']) || null;
+      addItem(programKey, row['title']);
+    }
+  }
+
+  if (items.length === 0) {
+    for (const program of programs) {
+      if (program.enabled === false) continue;
+      addItem(cleanString(program.program_key) || null, program.program_name);
+    }
+  }
+
+  return items;
 }
 
 export function buildTickerText(input: {
@@ -443,18 +499,17 @@ export function buildTickerText(input: {
   limit?: number;
 }): string {
   const scheduleText = input.scheduleItems
-    .slice(0, input.limit ?? input.scheduleItems.length)
-    .map(item => `${item.time} ${item.title}`.trim())
+    .map(item => cleanString(item.title))
     .filter(Boolean)
-    .join(' • ');
-  const manualText = input.messages.map(cleanString).filter(Boolean).join(' • ');
-  if (input.mode === 'manual') return manualText || 'تشاهدون اليوم';
+    .join(TICKER_TEXT_SEPARATOR);
+  const manualText = input.messages.map(cleanString).filter(Boolean).join(TICKER_TEXT_SEPARATOR);
+  if (input.mode === 'manual') return manualText || TICKER_EMPTY_TEXT;
   if (input.mode === 'mixed') {
-    return [manualText, scheduleText ? `تشاهدون اليوم: ${scheduleText}` : '']
+    return [manualText, scheduleText ? `${TICKER_SCHEDULE_PREFIX}: ${scheduleText}` : '']
       .filter(Boolean)
-      .join(' • ');
+      .join(TICKER_TEXT_SEPARATOR);
   }
-  return scheduleText ? `تشاهدون اليوم: ${scheduleText}` : 'تشاهدون اليوم';
+  return scheduleText ? `${TICKER_SCHEDULE_PREFIX}: ${scheduleText}` : TICKER_EMPTY_TEXT;
 }
 
 export function renderTickerAss(text: string, settings: TickerSettings): string {
@@ -468,7 +523,7 @@ export function renderTickerAss(text: string, settings: TickerSettings): string 
   const endX = -estimatedTextWidth;
   const startX = settings.resolutionWidth + 40;
   const primaryColour = assColor(settings.textColor, settings.opacity);
-  const backColour = assColor(settings.backgroundColor, settings.backgroundOpacity);
+  const backColour = assColor(assBackgroundColor(settings.backgroundColor), settings.backgroundOpacity);
 
   return [
     '[Script Info]',
@@ -598,6 +653,15 @@ function localDateInTimezone(date: Date, timezone: string): string {
 function normalizeHexColor(value: unknown, fallback: string): string {
   if (typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value)) return value.toUpperCase();
   return fallback;
+}
+
+function normalizeTickerBackground(value: unknown, fallback: string): string {
+  if (typeof value === 'string' && value.toLowerCase() === 'gradient-blue') return 'gradient-blue';
+  return normalizeHexColor(value, fallback);
+}
+
+function assBackgroundColor(value: string): string {
+  return value.toLowerCase() === 'gradient-blue' ? '#0B69D1' : value;
 }
 
 function assColor(hex: string, opacity: number): string {

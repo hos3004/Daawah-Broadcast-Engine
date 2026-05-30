@@ -186,6 +186,35 @@ describe('professional gap filler', () => {
     expect(items.map(item => item.media_file_id)).toEqual(['main-1', 'main-2']);
     expect(cursorCount).toBe(0);
   });
+
+  it('continues a dry-run cursor plan across separate gaps without database writes', () => {
+    process.env['GAP_PATTERN'] = 'main';
+
+    const { initDb, getDb, closeDb: close } = require('../db/schema') as typeof import('../db/schema');
+    const { fillGapWithProfessionalBumpers } = require('../playlist/gapFiller') as typeof import('../playlist/gapFiller');
+
+    initDb();
+    closeDb = close;
+    const db = getDb();
+    insertMedia(db, 'main-1', path.join(mainDir, '01-main.mp4'), 60);
+    insertMedia(db, 'main-2', path.join(mainDir, '02-main.mp4'), 60);
+
+    const plannedCursors = new Map();
+    const first = fillGapWithProfessionalBumpers(0, 60_000, db, 0, {
+      updateCursors: false,
+      plannedCursors,
+    });
+    const second = fillGapWithProfessionalBumpers(10 * 60_000, 11 * 60_000, db, 1, {
+      updateCursors: false,
+      plannedCursors,
+    });
+    const cursorCount = (db.prepare('SELECT COUNT(*) as cnt FROM bumper_cursor_state')
+      .get() as { cnt: number }).cnt;
+
+    expect(first.map(item => item.media_file_id)).toEqual(['main-1']);
+    expect(second.map(item => item.media_file_id)).toEqual(['main-2']);
+    expect(cursorCount).toBe(0);
+  });
 });
 
 function seedProfessionalBumpers(

@@ -4,14 +4,27 @@ import path from 'path';
 import fs from 'fs';
 import { requireAuth, requireRole, auditLog } from '../../auth';
 import { convertLogoSequenceToWebm } from '../../overlay/logoConverter';
-import { generateTickerWebm, generateTickerMonth } from '../../overlay/tickerGenerator';
+import { generateTickerWebm, generateTickerMonth, getStableTickerAssetPaths, type TickerConfig } from '../../overlay/tickerGenerator';
 import { generateNowPlayingPng } from '../../overlay/nowPlayingGenerator';
+import { buildTickerPreview, type TickerSettings } from '../../overlays/controlPanel';
 import { getDb } from '../../db/schema';
 import { config } from '../../config';
 import { ensureDir, sanitizeFilename } from '../../utils/fileUtils';
 import type { PlaylistItem } from '../../playlist/builder';
 
 export const overlaysRouter = Router();
+
+function tickerGeneratorConfigFromSettings(settings: TickerSettings): Partial<TickerConfig> {
+  return {
+    width: settings.resolutionWidth,
+    fontSize: settings.fontSize,
+    textColor: settings.textColor,
+    bgColor: settings.backgroundColor,
+    speed: settings.speedPixelsPerSecond,
+    safeMargin: settings.safeArea,
+    fontPath: config.overlay.fontPath,
+  };
+}
 
 const logoUploadDir = path.join(config.paths.assets, 'logo-source');
 ensureDir(logoUploadDir);
@@ -57,9 +70,27 @@ overlaysRouter.post('/logo/convert', requireRole('admin', 'editor'), async (req:
 overlaysRouter.post('/ticker/generate/:date', requireRole('admin', 'editor', 'operator'), async (req: Request, res: Response): Promise<void> => {
   const { date } = req.params;
   try {
-    const result = await generateTickerWebm(date!);
+    const body = req.body as {
+      mode?: 'manual' | 'today' | 'mixed';
+      messages?: string[];
+      settings?: Partial<TickerSettings>;
+      limit?: number;
+    };
+    const usesControlPanelInput = Boolean(body.mode || body.messages || body.settings || body.limit);
+    const preview = usesControlPanelInput
+      ? buildTickerPreview({
+          mode: body.mode,
+          date,
+          messages: body.messages,
+          settings: body.settings,
+          limit: body.limit,
+        })
+      : null;
+    const result = preview
+      ? await generateTickerWebm(date!, tickerGeneratorConfigFromSettings(preview.settings), preview.text)
+      : await generateTickerWebm(date!);
     auditLog(req.user!.id, req.user!.email, 'TICKER_GENERATE', 'overlay', undefined, date, req.ip);
-    res.json(result);
+    res.json({ ...result, preview });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -96,8 +127,13 @@ overlaysRouter.post('/now-playing/:playlistItemId', requireRole('admin', 'editor
 overlaysRouter.get('/preview/ticker/:date', requireAuth, (req: Request, res: Response): void => {
   const webmPath = path.join(config.paths.assets, 'overlays', 'tickers', `${req.params['date']!}.webm`);
   const pngPath = path.join(config.paths.assets, 'overlays', 'tickers', `${req.params['date']!}.png`);
+  const stablePaths = getStableTickerAssetPaths();
 
-  if (fs.existsSync(webmPath)) {
+  if (fs.existsSync(stablePaths.webmPath)) {
+    res.sendFile(stablePaths.webmPath);
+  } else if (fs.existsSync(stablePaths.pngPath)) {
+    res.sendFile(stablePaths.pngPath);
+  } else if (fs.existsSync(webmPath)) {
     res.sendFile(webmPath);
   } else if (fs.existsSync(pngPath)) {
     res.sendFile(pngPath);

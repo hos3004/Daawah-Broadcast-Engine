@@ -107,6 +107,8 @@ describe('Excel schedule import preview', () => {
         { program_key: 'prog-b', days: 'sat', start_time: '08:30', end_time: '09:30' },
         { program_key: 'prog-a', days: 'sun', start_time: '10:00', end_time: '11:00' },
         { program_key: 'prog-b', days: 'sun', start_time: '12:00', end_time: '13:00' },
+        { program_key: 'prog-a', days: 'wed', start_time: '07:00', duration_minutes: '30' },
+        { program_key: 'prog-b', days: 'wed', start_time: '07:00', duration_minutes: '30' },
         { program_key: 'missing', days: 'fri', start_time: '14:00', duration_minutes: '30' },
         { program_key: 'prog-a', days: 'bad-day', start_time: '15:00', duration_minutes: '30' },
         { program_key: 'prog-a', days: 'mon', start_time: '16:00' },
@@ -120,6 +122,7 @@ describe('Excel schedule import preview', () => {
       'INVALID_DAYS',
       'MISSING_DURATION',
       'OVERLAPPING_SLOTS',
+      'SLOT_TRIMMED_TO_NEXT_HARD_START',
       'GAP_DETECTED',
       'CROSSING_MIDNIGHT',
     ]));

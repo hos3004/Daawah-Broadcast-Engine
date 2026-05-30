@@ -15,7 +15,7 @@ import { initWs } from './ws';
 import { logger } from './utils/logger';
 import { ensureDir } from './utils/fileUtils';
 import { buildDailyPlaylist, getCurrentAndNext } from './playlist/builder';
-import { checkHlsHealth, getBroadcastState, stopBroadcast } from './broadcast/ffmpegRunner';
+import { checkHlsHealth, getBroadcastState, stopBroadcast, tryAutoResumeBroadcastOnStartup } from './broadcast/ffmpegRunner';
 import { checkFfmpeg, checkFfprobe } from './media/ffprobe';
 import { startMonitoring } from './monitoring';
 import { startTranscodeWorker } from './workers/transcodeWorker';
@@ -157,6 +157,7 @@ async function main(): Promise<void> {
     logger.info(`Environment: ${config.env}`);
     logger.info(`DB: ${config.db.path}`);
     logger.info(`Media: ${config.paths.mediaLibrary}`);
+    void tryAutoResumeBroadcastOnStartup();
   });
 
   // Graceful shutdown

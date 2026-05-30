@@ -27,6 +27,31 @@
     padding: 0;
   }
 
+  select,
+  input,
+  textarea {
+    color: var(--text-primary);
+  }
+
+  select {
+    color-scheme: dark;
+  }
+
+  select option,
+  select optgroup {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+  }
+
+  select option:checked {
+    background-color: #2563eb;
+    color: #fff;
+  }
+
+  select option:disabled {
+    color: var(--text-muted);
+  }
+
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg-primary); }
   ::-webkit-scrollbar-thumb { background: var(--bg-border); border-radius: 3px; }
@@ -80,5 +105,18 @@
   .ltr-text {
     direction: ltr;
     unicode-bidi: plaintext;
+  }
+
+  .ticker-preview-marquee {
+    display: inline-block;
+    min-width: max-content;
+    padding: 0 1.5rem;
+    animation: ticker-preview-ltr 18s linear infinite;
+    will-change: transform;
+  }
+
+  @keyframes ticker-preview-ltr {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(100%); }
   }
 }

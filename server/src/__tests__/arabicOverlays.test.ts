@@ -48,7 +48,10 @@ describe('Arabic overlay control panel', () => {
       { time: '08:00', title: 'برنامج التفسير', programKey: 'tafseer' },
       { time: '09:30', title: 'السيرة', programKey: 'seerah' },
     ]);
-    expect(text).toBe('تشاهدون اليوم: 08:00 برنامج التفسير • 09:30 السيرة');
+    expect(text).toContain('برنامج التفسير');
+    expect(text).toContain('السيرة');
+    expect(text).not.toContain('08:00');
+    expect(text).not.toContain('09:30');
   });
 
   it('reads today ticker items from the active published schedule snapshot', () => {
@@ -78,6 +81,21 @@ describe('Arabic overlay control panel', () => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run('folder-tafseer', sourceRootId, 'Tafseer', 'تفسير', 'tafseer', 'tafseer', 1, 'indexed');
     db.prepare(`
+      INSERT INTO media_folders
+        (id, root_id, original_relative_path, display_name_ar, normalized_name, safe_slug, file_count, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('folder-seerah', sourceRootId, 'Seerah', 'السيرة', 'seerah', 'seerah', 1, 'indexed');
+    db.prepare(`
+      INSERT INTO media_files
+        (id, path, relative_path, filename, type, status, folder_id, duration_sec, duration_ms, file_size, modified_at, scanned_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('file-tafseer', path.join(tempDir, 'source', 'Tafseer', 'ep1.mp4'), 'Tafseer/ep1.mp4', 'ep1.mp4', 'program', 'ready', 'folder-tafseer', 120, 120000, 1024, new Date().toISOString(), new Date().toISOString());
+    db.prepare(`
+      INSERT INTO media_files
+        (id, path, relative_path, filename, type, status, folder_id, duration_sec, duration_ms, file_size, modified_at, scanned_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('file-seerah', path.join(tempDir, 'source', 'Seerah', 'ep1.mp4'), 'Seerah/ep1.mp4', 'ep1.mp4', 'program', 'ready', 'folder-seerah', 120, 120000, 1024, new Date().toISOString(), new Date().toISOString());
+    db.prepare(`
       INSERT INTO program_candidates
         (id, folder_id, suggested_program_key, display_name_ar, safe_slug, episode_count, play_mode_suggestion, slot_mode_suggestion, confidence_score, needs_review)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -98,15 +116,16 @@ describe('Arabic overlay control panel', () => {
       activatedBy: null,
     });
 
-    const items = getTodayScheduleItems({ date: '2026-05-22', limit: 5 });
+    const items = getTodayScheduleItems({ date: '2026-05-22', limit: 1 });
     const preview = buildTickerPreview({ mode: 'today', date: '2026-05-22' });
 
     expect(items).toEqual([
-      { time: '08:00', title: 'برنامج التفسير المعتمد', programKey: 'tafseer' },
-      { time: '09:30', title: 'السيرة', programKey: 'seerah' },
+      { time: '', title: 'برنامج التفسير المعتمد', programKey: 'tafseer' },
+      { time: '', title: 'السيرة', programKey: 'seerah' },
     ]);
     expect(preview.text).toContain('برنامج التفسير المعتمد');
-    expect(preview.text).toContain('09:30 السيرة');
+    expect(preview.text).toContain('السيرة');
+    expect(preview.text).not.toContain('09:30');
   });
 
   it('escapes ASS special characters and renders moving UTF-8 ASS output', () => {
@@ -114,7 +133,7 @@ describe('Arabic overlay control panel', () => {
     const escaped = escapeAssText('خبر {مهم}\\سطر\nثان');
     const ass = renderTickerAss('تشاهدون اليوم: خبر مهم', validateTickerSettings({ fontFamily: 'Noto Sans Arabic' }));
 
-    expect(validateTickerSettings({}).fontFamily).toBe('Noto Naskh Arabic');
+    expect(validateTickerSettings({}).fontFamily).toBe('Tajawal');
     expect(escaped).toBe('خبر \\{مهم\\}\\\\سطر\\Nثان');
     expect(Buffer.from(ass, 'utf8').toString('utf8')).toContain('تشاهدون اليوم');
     expect(ass).toContain('\\move(');
@@ -320,7 +339,34 @@ function makeActiveSchedulePreview(): Record<string, unknown> {
         issues: [],
       },
     ],
-    folderMatches: [],
+    folderMatches: [
+      {
+        row: 2,
+        program_key: 'tafseer',
+        folder_root: 'source',
+        folder_hint: 'Tafseer',
+        status: 'matched',
+        status_ar: 'مطابق',
+        confidence: 1,
+        matched_folder_id: 'folder-tafseer',
+        matched_relative_path: 'Tafseer',
+        suggestions: [],
+        message: '',
+      },
+      {
+        row: 3,
+        program_key: 'seerah',
+        folder_root: 'source',
+        folder_hint: 'Seerah',
+        status: 'matched',
+        status_ar: 'مطابق',
+        confidence: 1,
+        matched_folder_id: 'folder-seerah',
+        matched_relative_path: 'Seerah',
+        suggestions: [],
+        message: '',
+      },
+    ],
     schedulePreview: {
       timezone: 'Europe/Istanbul',
       gapPattern: 'professional_gap_filler',

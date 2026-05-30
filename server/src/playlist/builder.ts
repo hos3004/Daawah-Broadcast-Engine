@@ -27,6 +27,7 @@ export interface PlaylistItem {
   is_trimmed: boolean;
   trim_out_ms: number | null;
   forced_duration_ms: number | null;
+  hide_logo?: boolean;
 }
 
 export interface DailyPlaylist {

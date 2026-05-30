@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -127,7 +127,7 @@ const defaultLogo: LogoSettings = {
   customY: null,
   width: null,
   height: null,
-  scale: 0.18,
+  scale: 0.08,
   opacity: 0.9,
   safeArea: 24,
 };
@@ -135,11 +135,11 @@ const defaultLogo: LogoSettings = {
 const defaultTicker: TickerSettings = {
   enabled: true,
   mode: 'today',
-  fontFamily: 'Noto Naskh Arabic',
+  fontFamily: 'Tajawal',
   fontSize: 34,
   textColor: '#FFFFFF',
-  backgroundColor: '#000000',
-  backgroundOpacity: 0.68,
+  backgroundColor: 'gradient-blue',
+  backgroundOpacity: 1,
   opacity: 1,
   speedPixelsPerSecond: 90,
   position: 'bottom',
@@ -170,13 +170,20 @@ export default function OverlaysPage() {
 
   const activeRows = safePreview?.needsReview.length ? safePreview.needsReview : safeNaming?.needsReview ?? [];
   const collisionRows = safePreview?.slugCollisions.length ? safePreview.slugCollisions : safeNaming?.slugCollisions ?? [];
-  const overlayPreviewStyle = useMemo(() => ({
-    opacity: settings.logo.opacity,
-    transform: `scale(${Math.max(0.4, settings.logo.scale * 3)})`,
-  }), [settings.logo.opacity, settings.logo.scale]);
   const selectedLogoAsset = useMemo(
     () => logoAssets.find(asset => asset.id === settings.logo.logoAssetId) ?? null,
     [logoAssets, settings.logo.logoAssetId]
+  );
+  const logoPreviewUrl = selectedLogoAsset
+    ? `${schedulerFoundationApi.logoAssetContentUrl(selectedLogoAsset.id)}?v=${encodeURIComponent(selectedLogoAsset.createdAt)}`
+    : null;
+  const logoPreviewStyle = useMemo(
+    () => logoOverlayStyle(settings.logo, settings.ticker.resolutionWidth, settings.ticker.resolutionHeight),
+    [settings.logo, settings.ticker.resolutionWidth, settings.ticker.resolutionHeight]
+  );
+  const tickerPreviewStyle = useMemo(
+    () => tickerOverlayStyle(settings.ticker),
+    [settings.ticker]
   );
 
   async function refresh() {
@@ -322,14 +329,20 @@ export default function OverlaysPage() {
   }
 
   async function applyToBroadcast() {
+    const confirmed = window.confirm('سيتم توليد شريط الأخبار بإعدادات هذه الصفحة ثم إعادة تشغيل البث. هل تريد المتابعة؟');
+    if (!confirmed) return;
     setLoading('apply');
     setMessage('');
     try {
-      // Step 1: regenerate ticker WebM for today with current settings
-      await api.post(`/overlays/ticker/generate/${todayDate}`);
-      // Step 2: restart broadcast so ffmpeg picks up the new WebM
+      await api.post(`/overlays/ticker/generate/${todayDate}`, {
+        mode: settings.ticker.mode,
+        date: todayDate,
+        messages: manualMessages.split('\n'),
+        settings: settings.ticker,
+        limit: settings.ticker.limitItems,
+      });
       await broadcastApi.restart();
-      setMessage('✅ تم إعادة توليد التيكر وإعادة تشغيل البث بالإعدادات الجديدة.');
+      setMessage('تم توليد شريط الأخبار وإعادة تشغيل البث بالإعدادات الحالية.');
     } catch (err) {
       setMessage(errorText(err));
     } finally {
@@ -356,9 +369,9 @@ export default function OverlaysPage() {
         <div>
           <h2 className="text-xl font-bold">إعدادات الشاشة والبث</h2>
           <div className="mt-2 flex flex-wrap gap-2">
-            <span className="badge badge-info">Preview only</span>
-            <span className="badge badge-ready">No OBS</span>
-            <span className="badge badge-warning">No live activation</span>
+            <span className="badge badge-info">معاينة آمنة</span>
+            <span className="badge badge-ready">بدون OBS</span>
+            <span className="badge badge-warning">التطبيق المباشر يتطلب تأكيدًا</span>
           </div>
         </div>
         <button className="btn-ghost flex items-center gap-2" onClick={() => void refresh()} disabled={loading !== null}>
@@ -548,9 +561,7 @@ export default function OverlaysPage() {
           <div className="card space-y-4">
             <PanelTitle icon={Eye} title="معاينة اللوجو" />
             <div className="relative aspect-video overflow-hidden rounded-md border" style={{ borderColor: 'var(--bg-border)', background: '#111827' }}>
-              <div className={logoPositionClass(settings.logo.position)} style={overlayPreviewStyle}>
-                <div className="rounded bg-white/90 px-4 py-2 font-bold text-black">DAAWAH</div>
-              </div>
+              <LogoPreviewOverlay src={logoPreviewUrl} settings={settings.logo} style={logoPreviewStyle} />
             </div>
           </div>
         </section>
@@ -581,6 +592,31 @@ export default function OverlaysPage() {
               <option value="DejaVu Sans">DejaVu Sans</option>
             </select>
           </InputRow>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <InputRow label="خلفية الشريط">
+              <select
+                value={settings.ticker.backgroundColor}
+                onChange={event => setSettings(current => ({ ...current, ticker: { ...current.ticker, backgroundColor: event.target.value } }))}
+                className="w-full rounded px-3 py-2"
+                style={inputStyle}
+              >
+                <option value="gradient-blue">تدرج أزرق</option>
+                <option value="#000000">أسود شفاف</option>
+                <option value="#0B69D1">أزرق ثابت</option>
+              </select>
+            </InputRow>
+            <InputRow label="موضع الشريط">
+              <select
+                value={settings.ticker.position}
+                onChange={event => setSettings(current => ({ ...current, ticker: { ...current.ticker, position: event.target.value as TickerSettings['position'] } }))}
+                className="w-full rounded px-3 py-2"
+                style={inputStyle}
+              >
+                <option value="bottom">أسفل الشاشة</option>
+                <option value="top">أعلى الشاشة</option>
+              </select>
+            </InputRow>
+          </div>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <NumberInput label="حجم الخط" value={settings.ticker.fontSize} onChange={value => setSettings(current => ({ ...current, ticker: { ...current.ticker, fontSize: value } }))} />
             <NumberInput label="السرعة" value={settings.ticker.speedPixelsPerSecond} onChange={value => setSettings(current => ({ ...current, ticker: { ...current.ticker, speedPixelsPerSecond: value } }))} />
@@ -634,11 +670,11 @@ export default function OverlaysPage() {
         <section className="card space-y-4">
           <PanelTitle icon={SlidersHorizontal} title="معاينة التراكب" />
           <div className="relative aspect-video overflow-hidden rounded-md border" style={{ borderColor: 'var(--bg-border)', background: '#111827' }}>
-            <div className={logoPositionClass(settings.logo.position)} style={overlayPreviewStyle}>
-              <div className="rounded bg-white/90 px-4 py-2 font-bold text-black">DAAWAH</div>
-            </div>
-            <div className="absolute bottom-6 left-0 right-0 bg-black/70 px-4 py-2 text-center text-white">
-              {tickerPreview?.text ?? 'تشاهدون اليوم'}
+            <LogoPreviewOverlay src={logoPreviewUrl} settings={settings.logo} style={logoPreviewStyle} />
+            <div style={tickerPreviewStyle}>
+              <div className="ticker-preview-marquee" dir="rtl">
+                {tickerPreview?.text ?? 'تشاهدون اليوم'}
+              </div>
             </div>
           </div>
           {tickerPreview?.tickerAssPath && (
@@ -651,7 +687,7 @@ export default function OverlaysPage() {
           </pre>
           <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-muted)' }}>
             <AlertTriangle size={16} />
-            لا يوجد زر تفعيل للبث المباشر ولا زر إعادة تشغيل.
+            المعاينة هنا لا تغيّر البث. زر التطبيق المباشر موجود في تبويب شريط الأخبار ويتطلب تأكيدًا.
           </div>
         </section>
       )}
@@ -700,6 +736,27 @@ function NumberInput({ label, value, onChange }: { label: string; value: number;
   );
 }
 
+function LogoPreviewOverlay({ src, settings, style }: { src: string | null; settings: LogoSettings; style: CSSProperties }) {
+  if (!settings.enabled) return null;
+  return (
+    <div className="pointer-events-none flex items-center justify-center" style={style}>
+      {src ? (
+        <img
+          src={src}
+          alt="Logo preview"
+          className="block h-auto w-full select-none"
+          style={{ objectFit: 'contain' }}
+          draggable={false}
+        />
+      ) : (
+        <div className="rounded border border-dashed px-3 py-2 text-xs" style={{ borderColor: 'rgba(255,255,255,0.35)', color: 'rgba(255,255,255,0.76)' }}>
+          لا يوجد لوجو مختار
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MiniTable({ title, rows }: { title: string; rows: Array<{ key: string; value: string; note: string }> }) {
   return (
     <div className="rounded-md border" style={{ borderColor: 'var(--bg-border)' }}>
@@ -727,12 +784,75 @@ const inputStyle = {
   color: 'var(--text-primary)',
 };
 
-function logoPositionClass(position: LogoSettings['position']): string {
-  const base = 'absolute';
-  if (position === 'top-left') return `${base} left-6 top-6`;
-  if (position === 'bottom-right') return `${base} bottom-6 right-6`;
-  if (position === 'bottom-left') return `${base} bottom-6 left-6`;
-  return `${base} right-6 top-6`;
+function logoOverlayStyle(settings: LogoSettings, resolutionWidth: number, resolutionHeight: number): CSSProperties {
+  const widthPx = settings.width ?? Math.round(resolutionWidth * settings.scale);
+  const widthPercent = clamp((widthPx / resolutionWidth) * 100, 3, 34);
+  const xPercent = clamp((settings.xMargin / resolutionWidth) * 100, 0, 45);
+  const yPercent = clamp((settings.yMargin / resolutionHeight) * 100, 0, 45);
+  const style: CSSProperties = {
+    position: 'absolute',
+    width: `${widthPercent}%`,
+    maxHeight: '42%',
+    opacity: settings.opacity,
+    zIndex: 2,
+  };
+
+  if (settings.position === 'custom') {
+    style.left = `${clamp(((settings.customX ?? settings.xMargin) / resolutionWidth) * 100, 0, 92)}%`;
+    style.top = `${clamp(((settings.customY ?? settings.yMargin) / resolutionHeight) * 100, 0, 92)}%`;
+    return style;
+  }
+
+  if (settings.position.includes('right')) style.right = `${xPercent}%`;
+  else style.left = `${xPercent}%`;
+
+  if (settings.position.includes('bottom')) style.bottom = `${yPercent}%`;
+  else style.top = `${yPercent}%`;
+
+  return style;
+}
+
+function tickerOverlayStyle(settings: TickerSettings): CSSProperties {
+  const verticalKey = settings.position === 'top' ? 'top' : 'bottom';
+  return {
+    position: 'absolute',
+    [verticalKey]: 0,
+    left: 0,
+    right: 0,
+    minHeight: '42px',
+    overflow: 'hidden',
+    display: 'flex',
+    alignItems: 'center',
+    color: settings.textColor,
+    background: tickerBackgroundCss(settings.backgroundColor, settings.backgroundOpacity),
+    opacity: settings.opacity,
+    fontFamily: `"${settings.fontFamily}", "Noto Naskh Arabic", Arial, sans-serif`,
+    fontSize: `${clamp(Math.round(settings.fontSize * 0.56), 14, 30)}px`,
+    lineHeight: 1.35,
+    whiteSpace: 'nowrap',
+    zIndex: 1,
+  };
+}
+
+function tickerBackgroundCss(backgroundColor: string, opacity: number): string {
+  if (backgroundColor.toLowerCase() === 'gradient-blue') {
+    return `linear-gradient(90deg, ${hexToRgba('#042B66', opacity)} 0%, ${hexToRgba('#0B69D1', opacity)} 45%, ${hexToRgba('#021A3D', opacity)} 100%)`;
+  }
+  return hexToRgba(backgroundColor, opacity);
+}
+
+function hexToRgba(value: string, opacity: number): string {
+  const match = /^#?([0-9A-Fa-f]{6})$/.exec(value);
+  const hex = match?.[1] ?? '000000';
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${clamp(opacity, 0, 1)})`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }
 
 function errorText(err: unknown): string {
