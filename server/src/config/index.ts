@@ -85,6 +85,7 @@ export const config = {
     logoLoopPath: optional('OVERLAY_LOGO_LOOP_PATH', path.join(appRoot, 'assets', 'overlays', 'logo', 'logo-loop.webm')),
     programBadgeTemplatePath: optional('PROGRAM_BADGE_TEMPLATE_PATH', path.join(appRoot, 'assets', 'overlays', 'program-badge', 'now.png')),
     programBadgeMaxWords: optionalInt('PROGRAM_BADGE_MAX_WORDS', 3),
+    programBadgeFontSize: optionalInt('PROGRAM_BADGE_FONT_SIZE', 24),
     logoPosition: optional('OVERLAY_LOGO_POSITION', '10:10'),
     logoWidth: optionalInt('OVERLAY_LOGO_WIDTH', 104),
     tickerHeight: optionalInt('TICKER_HEIGHT', 60),

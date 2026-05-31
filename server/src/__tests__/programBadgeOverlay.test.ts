@@ -179,7 +179,7 @@ describe('program badge image overlay', () => {
     // paints visible glyph pixels — shaped Arabic, not transparent .notdef tofu.
     const probe = createCanvas(256, 60);
     const pctx = probe.getContext('2d');
-    pctx.font = 'bold 30px "ProgramBadgeFont"';
+    pctx.font = 'bold 24px "ProgramBadgeFont"';
     pctx.fillStyle = '#FFFFFF';
     pctx.textBaseline = 'middle';
     pctx.direction = 'rtl';

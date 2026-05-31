@@ -68,7 +68,7 @@ interface ProgramBadgeGroup {
 const DEFAULT_FONT_PATH = config.overlay.fontPath;
 const FONT_FAMILY = 'ProgramBadgeFont';
 const DEFAULT_MAX_WORDS = 3;
-const DEFAULT_FONT_SIZE = 30;
+const DEFAULT_FONT_SIZE = 24;
 const BADGE_TEXT_RIGHT = 137;
 const BADGE_HEIGHT = 45;
 const BADGE_Y_MARGIN_ABOVE_TICKER = 8;
@@ -207,7 +207,7 @@ function renderProgramBadgeSpritePng(
   options: ProgramBadgeOverlayOptions,
   fontFamily: string
 ): Buffer {
-  const fontSize = Math.max(10, Math.round(options.fontSize ?? DEFAULT_FONT_SIZE));
+  const fontSize = Math.max(10, Math.round(options.fontSize ?? config.overlay.programBadgeFontSize ?? DEFAULT_FONT_SIZE));
   const rowCount = titles.length + 1; // +1 for the transparent gap row at index 0.
 
   const canvas = createCanvas(BADGE_TEXT_STRIP_WIDTH, BADGE_TEXT_STRIP_HEIGHT * rowCount);
