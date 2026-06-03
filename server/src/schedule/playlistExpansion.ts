@@ -92,6 +92,8 @@ interface ProgramCursor {
 
 type ProgramRow = PublishedScheduleDetail['programs'][number];
 type SchedulePreviewRow = PublishedScheduleDetail['schedulePreview']['days'][number]['rows'][number];
+type SchedulePreviewDay = PublishedScheduleDetail['schedulePreview']['days'][number];
+type SlotRow = PublishedScheduleDetail['slots'][number];
 type ProgramPlayMode = 'sequential' | 'shuffle' | 'newest' | 'round_robin';
 type ProgramSlotMode = 'fit' | 'playlist' | 'file_count' | 'kids_round_robin';
 
@@ -121,6 +123,9 @@ interface ExpansionContext {
 }
 
 const MAX_EXPANDED_ITEMS_PER_ROW = 10_000;
+const DAY_MINUTES = 24 * 60;
+const AUTO_CYCLE_SNAP_TOLERANCE_MINUTES = 10;
+const AUTO_CYCLE_STANDARD_SPANS_MINUTES = [60, 120, 180, 240, 360, 480, 720, 1440] as const;
 
 export function expandPublishedScheduleToFiles(schedule: PublishedScheduleDetail): PlaylistExpansionResult {
   const db = getDb();
@@ -145,7 +150,7 @@ export function expandPublishedScheduleToFiles(schedule: PublishedScheduleDetail
   const items: ExpandedPlaylistItem[] = [];
 
   for (const day of schedule.schedulePreview.days) {
-    for (const row of day.rows) {
+    for (const row of materializationRowsForDay(schedule, day, context)) {
       const rowItems = row.type === 'gap'
         ? expandGapRow(day.date, row, context)
         : expandProgramRow(day.date, row, context);
@@ -161,6 +166,223 @@ export function expandPublishedScheduleToFiles(schedule: PublishedScheduleDetail
     warnings: context.warnings,
     errors: context.errors,
     summary,
+  };
+}
+
+function materializationRowsForDay(
+  schedule: PublishedScheduleDetail,
+  day: SchedulePreviewDay,
+  context: ExpansionContext
+): SchedulePreviewRow[] {
+  const repeatedRows = buildAutoRepeatedCycleRows(schedule, day, context);
+  return repeatedRows ?? day.rows;
+}
+
+function buildAutoRepeatedCycleRows(
+  schedule: PublishedScheduleDetail,
+  day: SchedulePreviewDay,
+  context: ExpansionContext
+): SchedulePreviewRow[] | null {
+  const slotRows = day.rows.filter(isSlotPreviewRow);
+  if (slotRows.length === 0) return null;
+
+  const cycleNotesByRow = collectCycleNotesBySlotRow(schedule.slots);
+  if (!slotRows.some(row => row.row !== null && cycleNotesByRow.has(row.row))) return null;
+
+  const maxCycleCount = Math.max(1, ...Array.from(cycleNotesByRow.values()).map(note => note.total));
+  const baseRows = maxCycleCount > 1
+    ? slotRows.filter(row => row.row !== null && cycleNotesByRow.get(row.row)?.index === 1)
+    : slotRows;
+  if (baseRows.length === 0) return null;
+
+  const cyclePlan = planAutoCycle(baseRows);
+  if (!cyclePlan || cyclePlan.starts.length <= 1) return null;
+
+  context.warnings.push({
+    code: 'AUTO_CYCLE_REPEAT_APPLIED',
+    itemId: `${day.date}:auto-cycle-repeat`,
+    message: `Auto repeated the ${cyclePlan.spanMinutes} minute cycle on ${day.date} from ${formatPreviewTime(cyclePlan.baseStartMinutes)} to fill the day.`,
+  });
+
+  return insertMaterializationGapRows(repeatCycleRows(baseRows, cyclePlan));
+}
+
+function isSlotPreviewRow(row: SchedulePreviewRow): boolean {
+  return row.type !== 'gap';
+}
+
+function collectCycleNotesBySlotRow(slots: SlotRow[] | undefined): Map<number, { index: number; total: number }> {
+  const notes = new Map<number, { index: number; total: number }>();
+  if (!Array.isArray(slots)) return notes;
+
+  for (const slot of slots) {
+    if (typeof slot.row !== 'number') continue;
+    const note = parseCycleNote(slot.notes);
+    if (note) notes.set(slot.row, note);
+  }
+  return notes;
+}
+
+function parseCycleNote(value: string | null | undefined): { index: number; total: number } | null {
+  const match = /\bcycle\s+(\d+)\/(\d+)\b/i.exec(value ?? '');
+  if (!match) return null;
+  const index = Number(match[1]);
+  const total = Number(match[2]);
+  if (!Number.isInteger(index) || !Number.isInteger(total) || index < 1 || total < 1) return null;
+  return { index, total };
+}
+
+function planAutoCycle(rows: SchedulePreviewRow[]): { baseStartMinutes: number; spanMinutes: number; starts: number[] } | null {
+  const spans = rows
+    .map(row => {
+      const start = parseTimeToMinutes(row.start_time);
+      if (start === null) return null;
+      return {
+        start,
+        end: start + Math.max(1, row.duration_minutes),
+      };
+    })
+    .filter((row): row is { start: number; end: number } => row !== null);
+  if (spans.length === 0) return null;
+
+  const baseStartMinutes = Math.min(...spans.map(row => row.start));
+  const rawSpanMinutes = Math.max(...spans.map(row => row.end)) - baseStartMinutes;
+  if (rawSpanMinutes <= 0) return null;
+
+  const spanMinutes = normalizeAutoCycleSpanMinutes(rawSpanMinutes);
+  if (spanMinutes <= 0 || spanMinutes >= DAY_MINUTES) return null;
+
+  let firstStart = baseStartMinutes;
+  while (firstStart - spanMinutes >= 0) {
+    firstStart -= spanMinutes;
+  }
+
+  const starts: number[] = [];
+  for (let start = firstStart; start < DAY_MINUTES; start += spanMinutes) {
+    starts.push(start);
+  }
+
+  return { baseStartMinutes, spanMinutes, starts };
+}
+
+function normalizeAutoCycleSpanMinutes(rawSpanMinutes: number): number {
+  const roundedRaw = Math.max(1, Math.round(rawSpanMinutes));
+  const nearestStandard = AUTO_CYCLE_STANDARD_SPANS_MINUTES
+    .map(span => ({ span, delta: Math.abs(span - roundedRaw) }))
+    .sort((a, b) => a.delta - b.delta || a.span - b.span)[0];
+
+  if (nearestStandard && nearestStandard.delta <= AUTO_CYCLE_SNAP_TOLERANCE_MINUTES) {
+    return nearestStandard.span;
+  }
+  return roundedRaw;
+}
+
+function repeatCycleRows(
+  baseRows: SchedulePreviewRow[],
+  plan: { baseStartMinutes: number; spanMinutes: number; starts: number[] }
+): SchedulePreviewRow[] {
+  const sortedBaseRows = [...baseRows].sort((a, b) => {
+    const left = parseTimeToMinutes(a.start_time) ?? 0;
+    const right = parseTimeToMinutes(b.start_time) ?? 0;
+    return left - right;
+  });
+  const rows: SchedulePreviewRow[] = [];
+
+  for (const cycleStart of plan.starts) {
+    const cycleEnd = Math.min(DAY_MINUTES, cycleStart + plan.spanMinutes);
+    for (const row of sortedBaseRows) {
+      const baseStart = parseTimeToMinutes(row.start_time);
+      if (baseStart === null) continue;
+      const start = cycleStart + (baseStart - plan.baseStartMinutes);
+      if (start < 0 || start >= DAY_MINUTES || start >= cycleEnd) continue;
+
+      const end = Math.min(start + Math.max(1, row.duration_minutes), cycleEnd, DAY_MINUTES);
+      if (end <= start) continue;
+
+      rows.push({
+        ...row,
+        start_time: formatPreviewTime(start),
+        end_time: formatPreviewTime(end),
+        duration_minutes: Math.max(0, end - start),
+      });
+    }
+  }
+
+  return applyMaterializationHardStartCaps(rows);
+}
+
+function applyMaterializationHardStartCaps(rows: SchedulePreviewRow[]): SchedulePreviewRow[] {
+  const sorted = [...rows].sort((a, b) => {
+    const left = parseTimeToMinutes(a.start_time) ?? 0;
+    const right = parseTimeToMinutes(b.start_time) ?? 0;
+    return left - right;
+  });
+
+  return sorted.map((row, index) => {
+    const start = parseTimeToMinutes(row.start_time);
+    const end = start === null ? null : start + row.duration_minutes;
+    if (start === null || end === null) return row;
+
+    const nextStart = sorted
+      .slice(index + 1)
+      .map(nextRow => parseTimeToMinutes(nextRow.start_time))
+      .find((value): value is number => value !== null && value > start);
+    if (nextStart === undefined || end <= nextStart) return row;
+
+    return {
+      ...row,
+      end_time: formatPreviewTime(nextStart),
+      duration_minutes: Math.max(0, nextStart - start),
+    };
+  });
+}
+
+function insertMaterializationGapRows(rows: SchedulePreviewRow[]): SchedulePreviewRow[] {
+  const sorted = [...rows].sort((a, b) => {
+    const left = parseTimeToMinutes(a.start_time) ?? 0;
+    const right = parseTimeToMinutes(b.start_time) ?? 0;
+    return left - right;
+  });
+  const result: SchedulePreviewRow[] = [];
+  let cursor = 0;
+
+  for (const row of sorted) {
+    const start = parseTimeToMinutes(row.start_time);
+    if (start === null) continue;
+    const safeStart = Math.max(0, Math.min(DAY_MINUTES, start));
+    const safeEnd = Math.max(safeStart, Math.min(DAY_MINUTES, safeStart + row.duration_minutes));
+
+    if (safeStart > cursor) {
+      result.push(gapPreviewRow(cursor, safeStart));
+    }
+
+    if (safeEnd > safeStart) {
+      result.push({
+        ...row,
+        start_time: formatPreviewTime(safeStart),
+        end_time: formatPreviewTime(safeEnd),
+        duration_minutes: safeEnd - safeStart,
+      });
+      cursor = Math.max(cursor, safeEnd);
+    }
+  }
+
+  if (cursor < DAY_MINUTES) {
+    result.push(gapPreviewRow(cursor, DAY_MINUTES));
+  }
+
+  return result;
+}
+
+function gapPreviewRow(start: number, end: number): SchedulePreviewRow {
+  return {
+    type: 'gap',
+    row: null,
+    program_key: null,
+    title: 'Professional Gap Preview',
+    start_time: formatPreviewTime(start),
+    end_time: formatPreviewTime(end),
+    duration_minutes: Math.max(0, end - start),
   };
 }
 
@@ -1135,6 +1357,13 @@ function formatClock(seconds: number): string {
   const minutes = Math.floor((safeSeconds % 3600) / 60);
   const secs = safeSeconds % 60;
   return `${pad2(hours)}:${pad2(minutes)}:${pad2(secs)}`;
+}
+
+function formatPreviewTime(minutes: number): string {
+  const safeMinutes = Math.max(0, Math.min(DAY_MINUTES, Math.round(minutes)));
+  const hours = Math.floor(safeMinutes / 60);
+  const mins = safeMinutes % 60;
+  return `${pad2(hours)}:${pad2(mins)}`;
 }
 
 function pad2(value: number): string {
