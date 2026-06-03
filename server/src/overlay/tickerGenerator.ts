@@ -89,7 +89,7 @@ export function getStableTickerAssetPaths(): { pngPath: string; webmPath: string
   const tickerDir = path.join(config.paths.assets, 'overlays', 'tickers');
   return {
     pngPath: path.join(tickerDir, `${STABLE_TICKER_BASENAME}.png`),
-    webmPath: path.join(tickerDir, `${STABLE_TICKER_BASENAME}.webm`),
+    webmPath: path.join(tickerDir, `${STABLE_TICKER_BASENAME}.mp4`),
   };
 }
 
@@ -226,7 +226,7 @@ export async function generateTickerWebm(
   const tickerSpeed = tickerConfig?.speed ?? config.overlay.tickerSpeed;
   const scrollDuration = Math.max(1, scrollCycleWidth / tickerSpeed);
 
-  const webmPath = pngPath.replace('.png', '.webm');
+  const webmPath = pngPath.replace('.png', '.mp4');
 
   // tickerSpeed is in px/sec. The scroll filter's `horizontal` value is a
   // per-frame fraction of the source width, so we must divide by fps × width:
@@ -238,7 +238,7 @@ export async function generateTickerWebm(
   // Double hflip reverses scroll direction so Arabic text moves RIGHT-to-LEFT
   // (enters from the right, exits left) matching standard Arabic broadcast convention.
   // Characters are un-mirrored because the flip is applied twice.
-  const scrollVf = `hflip,scroll=horizontal=${h}:v=0,hflip,crop=${broadcastWidth}:${height},format=yuva420p`;
+  const scrollVf = `hflip,scroll=horizontal=${h}:v=0,hflip,crop=${broadcastWidth}:${height},format=yuv420p`;
 
   // Use FFmpeg scroll filter: scrolls the PNG horizontally
   const args = [
@@ -247,11 +247,10 @@ export async function generateTickerWebm(
     '-t', String(scrollDuration),
     '-i', pngPath,
     '-vf', scrollVf,
-    '-c:v', 'libvpx-vp9',
-    '-b:v', '0',
-    '-crf', '18',
-    '-auto-alt-ref', '0',
-    '-pix_fmt', 'yuva420p',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '23',
+    '-pix_fmt', 'yuv420p',
     '-an',
     webmPath,
   ];

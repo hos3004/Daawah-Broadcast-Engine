@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import dayjs from 'dayjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -13,6 +14,7 @@ import { broadcastWs } from '../ws';
 import { buildAudioSyncAf } from '../media/normalizer';
 import {
   buildOverlayEnableExpression,
+  foldRangesByPeriod,
   prepareProgramBadgeOverlayAssets,
   programBadgeY,
   type ProgramBadgeRange,
@@ -514,12 +516,20 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
     '-re', '-f', 'concat', '-safe', '0', '-i', concatListPath,
   ];
 
+  // The overlay PNGs (pill, title sprite, logo, lower-third) are STATIC images:
+  // their on/off timing is driven entirely by the `enable=`/crop expressions on
+  // the output time `t`, NOT by the input frame rate. Feeding them at the full
+  // 25fps forced ffmpeg to re-decode (zlib) each PNG 25×/s, which alone dropped the
+  // single-threaded filter chain from ~2x to ~0.4x realtime. A 1fps loop keeps the
+  // image available (overlay holds the last frame) while cutting that decode ~25×.
+  const STATIC_OVERLAY_FPS = '1';
+
   let filterComplex = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${config.broadcast.fps},setpts=N/(${config.broadcast.fps}*TB),settb=1/${config.broadcast.fps}[base]`;
   let lastLabel = '[base]';
   let inputIdx = 1;
 
   if (hasNowPlaying) {
-    inputs.push('-loop', '1', '-i', nowPlayingPath!);
+    inputs.push('-loop', '1', '-framerate', STATIC_OVERLAY_FPS, '-i', nowPlayingPath!);
     const duration = config.overlay.nowPlayingDuration;
     filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=10:H-h-80:enable='between(t,0,${duration})'[np]`;
     lastLabel = '[np]';
@@ -527,10 +537,10 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
   }
 
   if (programBadgeOverlay) {
-    const enable = buildOverlayEnableExpression(programBadgeOverlay.backgroundRanges);
+    const enable = programBadgeOverlay.backgroundEnableExpression;
     if (enable) {
       // Badge background pill ("الآن" template) — shown whenever any program is on.
-      inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', programBadgeOverlay.templatePath);
+      inputs.push('-loop', '1', '-framerate', STATIC_OVERLAY_FPS, '-i', programBadgeOverlay.templatePath);
       filterComplex += `;${lastLabel}[${inputIdx}:v]overlay=0:${programBadgeY(height, config.overlay.tickerHeight)}:enable='${enable}':shortest=0[program_badge_bg]`;
       lastLabel = '[program_badge_bg]';
       inputIdx++;
@@ -541,7 +551,7 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
       // of how many programs the day has. The previous per-title overlay chain
       // dropped the encoder to ~0.40x realtime; this keeps it above 5x.
       const textLayerY = programBadgeOverlay.textLayerY;
-      inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', programBadgeOverlay.spritePath);
+      inputs.push('-loop', '1', '-framerate', STATIC_OVERLAY_FPS, '-i', programBadgeOverlay.spritePath);
       filterComplex += `;[${inputIdx}:v]crop=${programBadgeOverlay.spriteWidth}:${programBadgeOverlay.rowHeight}:0:'${programBadgeOverlay.cropYExpression}'[program_badge_text_src]`;
       filterComplex += `;${lastLabel}[program_badge_text_src]overlay=0:${textLayerY}:shortest=0[program_badge_text]`;
       lastLabel = '[program_badge_text]';
@@ -551,11 +561,11 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
 
   if (hasLogo) {
     if (isStaticImageOverlay(logoPath)) {
-      inputs.push('-loop', '1', '-framerate', String(config.broadcast.fps), '-i', logoPath);
+      inputs.push('-loop', '1', '-framerate', STATIC_OVERLAY_FPS, '-i', logoPath);
     } else {
       inputs.push('-stream_loop', '-1', '-i', logoPath);
     }
-    const logoEnable = buildLogoOverlayEnableExpression(available, now);
+    const logoEnable = buildLogoOverlayEnableExpression(available, now, programBadgeOverlay?.cyclePeriod ?? null);
     const logoEnablePart = logoEnable ? `:enable='${logoEnable}'` : '';
     filterComplex += `;[${inputIdx}:v]scale=${config.overlay.logoWidth}:-1:force_original_aspect_ratio=decrease,format=rgba[logo_rgba]`;
     filterComplex += `;${lastLabel}[logo_rgba]overlay=${config.overlay.logoPosition}${logoEnablePart}:shortest=0[logo]`;
@@ -573,8 +583,15 @@ async function buildBroadcastCommandFromItems(items: PlaylistItem[], current: Pl
 
   filterComplex += `;${lastLabel}null[vout]`;
 
+  // The overlay/scale filter chain is otherwise single-threaded and was leaving
+  // most cores idle while running below realtime. Slice-threading the filter graph
+  // across up to 4 cores recovers headroom (more than 4 hits diminishing returns /
+  // contention on this 8-core box).
+  const filterThreads = String(Math.min(4, Math.max(1, os.cpus().length)));
+
   const args: string[] = [
     '-y',
+    '-filter_complex_threads', filterThreads,
     ...inputs,
     '-filter_complex', filterComplex,
     '-map', '[vout]',
@@ -728,10 +745,10 @@ function resolveLogoOverlayPath(configuredPath: string): string {
 
 function resolveTickerOverlayPath(date: string): string | null {
   const tickerDir = path.join(config.paths.assets, 'overlays', 'tickers');
-  const stablePath = path.join(tickerDir, 'current-schedule.webm');
+  const stablePath = path.join(tickerDir, 'current-schedule.mp4');
   if (fs.existsSync(stablePath)) return stablePath;
 
-  const datePath = path.join(tickerDir, `${date}.webm`);
+  const datePath = path.join(tickerDir, `${date}.mp4`);
   return fs.existsSync(datePath) ? datePath : null;
 }
 
@@ -759,7 +776,11 @@ function tryPrepareProgramBadgeOverlayAssets(
   }
 }
 
-export function buildLogoOverlayEnableExpression(items: PlaylistItem[], playbackStartMs: number): string | null {
+export function buildLogoOverlayEnableExpression(
+  items: PlaylistItem[],
+  playbackStartMs: number,
+  cyclePeriod: number | null = null
+): string | null {
   const hideRanges = items
     .filter(item => item.hide_logo === true && (item.source_role === 'program' || item.type === 'program'))
     .map(item => ({
@@ -768,7 +789,13 @@ export function buildLogoOverlayEnableExpression(items: PlaylistItem[], playback
     }))
     .filter(range => range.endSeconds - range.startSeconds >= 0.5);
 
-  const hideExpression = buildOverlayEnableExpression(mergeTimelineRanges(hideRanges));
+  // When the schedule is a repeated cycle, fold the (otherwise per-program, whole-
+  // timeline) hide windows into one cycle and match with mod(t,period). This is the
+  // same per-frame `between()` blow-up the badge had; left unfolded it kept the
+  // single-threaded filter graph well under realtime.
+  const hideExpression = cyclePeriod
+    ? buildOverlayEnableExpression(foldRangesByPeriod(hideRanges, cyclePeriod), { period: cyclePeriod })
+    : buildOverlayEnableExpression(mergeTimelineRanges(hideRanges));
   return hideExpression ? `not(${hideExpression})` : null;
 }
 

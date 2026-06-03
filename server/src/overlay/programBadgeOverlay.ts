@@ -31,6 +31,21 @@ export interface ProgramBadgeOverlayAssets {
   textLayerY: number;
   /** Ranges during which the pill background is shown (any program on air). */
   backgroundRanges: ProgramBadgeRange[];
+  /**
+   * Pre-built ffmpeg `enable` expression for the pill background. When the
+   * schedule is periodic (a fixed cycle repeated over many days) the ranges are
+   * folded into one cycle with `mod(t,period)`, collapsing thousands of
+   * `between()` terms into a handful — the per-frame, single-threaded cost of
+   * that expression was the dominant encoder bottleneck. Falls back to the full
+   * absolute-time expression when no clean cycle is detected.
+   */
+  backgroundEnableExpression: string;
+  /**
+   * Detected schedule cycle period in seconds, or null when the schedule isn't a
+   * clean repeat. Exposed so other periodic per-frame expressions built for the
+   * same broadcast (e.g. the logo-hide expression) can fold by the same period.
+   */
+  cyclePeriod: number | null;
   eventCount: number;
 }
 
@@ -125,16 +140,42 @@ export function prepareProgramBadgeOverlayAssets(
   const datePart = sanitizeFilePart(options.date);
   const spritePath = path.join(outputDir, `current-${datePart}.png`);
   const buffer = renderProgramBadgeSpritePng(groups.map(group => group.title), options, fontFamily);
-  fs.writeFileSync(spritePath, buffer);
+  // Write to a temp file then rename: ffmpeg may be reading the previous sprite,
+  // and a partial write produces an "Invalid PNG signature" crash. rename() is
+  // atomic on the same filesystem so readers always see a complete file.
+  const tmpSpritePath = spritePath + '.tmp';
+  fs.writeFileSync(tmpSpritePath, buffer);
+  fs.renameSync(tmpSpritePath, spritePath);
+
+  // Fold a repeated schedule into a single cycle BEFORE building any expression.
+  // Folding by start phase (not duration) collapses ~45 cycles × 16 titles into
+  // one cycle; the badge windows then carry the longest episode per title, capped
+  // at the next program's start so they never overlap. The folded groups keep the
+  // SAME order/index as `groups`, so they still index the sprite's rows correctly.
+  const detectedCycle = detectScheduleCycle(groups);
+  const cycle = detectedCycle ?? undefined;
+  const effectiveGroups = detectedCycle ? foldGroupsIntoCycle(groups, detectedCycle.period) : groups;
+  const backgroundRanges = mergeRanges(effectiveGroups.flatMap(group => group.ranges));
+  const backgroundEnableExpression = buildOverlayEnableExpression(backgroundRanges, cycle);
+
+  if (detectedCycle) {
+    const before = groups.reduce((count, group) => count + group.ranges.length, 0);
+    const after = effectiveGroups.reduce((count, group) => count + group.ranges.length, 0);
+    logger.info(
+      `Program badge: schedule is periodic (cycle ${detectedCycle.period}s) — folded ${before} program ranges into ${after} to keep the ffmpeg enable/crop expressions small.`
+    );
+  }
 
   return {
     templatePath,
     spritePath,
     spriteWidth: BADGE_TEXT_STRIP_WIDTH,
     rowHeight: BADGE_TEXT_STRIP_HEIGHT,
-    cropYExpression: buildBadgeCropYExpression(groups, BADGE_TEXT_STRIP_HEIGHT),
+    cropYExpression: buildBadgeCropYExpression(effectiveGroups, BADGE_TEXT_STRIP_HEIGHT, cycle),
     textLayerY: programBadgeTextLayerY(options.height, options.tickerHeight),
-    backgroundRanges: mergeRanges(groups.flatMap(group => group.ranges)),
+    backgroundRanges,
+    backgroundEnableExpression,
+    cyclePeriod: detectedCycle?.period ?? null,
     eventCount: groups.reduce((count, group) => count + group.ranges.length, 0),
   };
 }
@@ -173,9 +214,19 @@ export function truncateProgramBadgeTitle(value: string | null | undefined, maxW
   return title.split(/\s+/u).slice(0, limit).join(' ');
 }
 
-export function buildOverlayEnableExpression(ranges: ProgramBadgeRange[]): string {
+export interface ScheduleCycle {
+  /** Period in seconds; the whole schedule is this one cycle repeated. */
+  period: number;
+}
+
+export function buildOverlayEnableExpression(ranges: ProgramBadgeRange[], cycle?: ScheduleCycle): string {
+  // The ranges are pre-folded into [0,period) by foldGroupsIntoCycle when a cycle
+  // is detected, so here we only choose the time variable: `mod(t,period)` makes
+  // the same handful of `between()` terms match every repeated cycle; otherwise
+  // we match absolute playback time `t`.
+  const timeVar = cycle ? `mod(t,${formatFilterSeconds(cycle.period)})` : 't';
   return ranges
-    .map(range => `between(t,${formatFilterSeconds(range.startSeconds)},${formatFilterSeconds(range.endSeconds)})`)
+    .map(range => `between(${timeVar},${formatFilterSeconds(range.startSeconds)},${formatFilterSeconds(range.endSeconds)})`)
     .join('+');
 }
 
@@ -184,16 +235,186 @@ export function buildOverlayEnableExpression(ranges: ProgramBadgeRange[]): strin
  * playback time. Row 0 (y=0) is the transparent gap; group `i` lives on row
  * `i+1` at `y=(i+1)*rowHeight`. Groups never overlap in time, but we still nest
  * the conditions and default to 0 so any uncovered instant shows the gap row.
+ * When `cycle` is set the conditions use `mod(t,period)` so a schedule repeated
+ * over many days collapses to one cycle's worth of `between()` terms.
  */
-export function buildBadgeCropYExpression(groups: ProgramBadgeGroup[], rowHeight: number): string {
+export function buildBadgeCropYExpression(groups: ProgramBadgeGroup[], rowHeight: number, cycle?: ScheduleCycle): string {
   let expr = '0';
   // Build from last group to first so the first group ends up outermost.
   for (let i = groups.length - 1; i >= 0; i--) {
-    const condition = buildOverlayEnableExpression(groups[i]!.ranges);
+    const condition = buildOverlayEnableExpression(groups[i]!.ranges, cycle);
     if (!condition) continue;
     expr = `if(${condition},${(i + 1) * rowHeight},${expr})`;
   }
   return expr;
+}
+
+/**
+ * Detects whether the schedule is one fixed cycle repeated (the auto-repeat
+ * materializer emits the same day/cycle over and over for up to ~2 weeks).
+ *
+ * Folding is validated on START PHASE and TITLE ROW only — NOT duration. Real
+ * cycles reuse the same time slots every period but swap in different episodes, so
+ * each program's duration varies cycle to cycle. We therefore require that every
+ * program start lands at one of a small set of phases, and that each phase always
+ * carries the same title (no slot is reused for two different programs). Durations
+ * are reconciled later by foldGroupsIntoCycle (longest episode, capped at the next
+ * slot). Returns null when the schedule isn't a clean repeat, and the caller keeps
+ * the full absolute-time expression (correct, just slower).
+ */
+export function detectScheduleCycle(groups: ProgramBadgeGroup[]): ScheduleCycle | null {
+  const labeled: Array<{ start: number; row: number }> = [];
+  groups.forEach((group, index) => {
+    for (const range of group.ranges) {
+      labeled.push({ start: range.startSeconds, row: index + 1 });
+    }
+  });
+  if (labeled.length < 6) return null;
+  labeled.sort((a, b) => a.start - b.start);
+
+  const period = estimateCyclePeriod(groups);
+  if (period === null || period <= 1) return null;
+
+  const span = labeled[labeled.length - 1]!.start - labeled[0]!.start;
+  if (span < period * 2) return null; // need at least a couple of cycles to fold
+
+  // Every program start must land at the same phase (within tol) and on the same
+  // title row each cycle. Collect the distinct phases as we go; a phase that ever
+  // carries two different rows means the slot isn't a clean repeat → bail.
+  const tol = 2.0; // seconds
+  const phaseRows: Array<{ phase: number; row: number }> = [];
+  for (const l of labeled) {
+    const phase = ((l.start % period) + period) % period;
+    const match = phaseRows.find(ref => {
+      const rawDiff = Math.abs(ref.phase - phase);
+      const phaseDiff = Math.min(rawDiff, period - rawDiff); // wrap-around distance
+      return phaseDiff <= tol;
+    });
+    if (match) {
+      if (match.row !== l.row) return null;
+    } else {
+      phaseRows.push({ phase, row: l.row });
+    }
+  }
+
+  // Require genuine folding: distinct phases must be far fewer than total ranges
+  // (otherwise there's nothing to collapse and folding could only lose accuracy).
+  if (phaseRows.length >= labeled.length / 2) return null;
+  return { period };
+}
+
+/**
+ * Folds a repeated schedule into ONE cycle's worth of groups, by start phase.
+ * Each program collapses to a single window starting at its phase and lasting the
+ * LONGEST episode seen for that title, capped at the gap to the next program's
+ * start so windows never overlap. A window that crosses the cycle boundary is
+ * split into a head + wrapped tail. Group order/index is preserved so the folded
+ * groups still index the sprite's title rows correctly.
+ */
+export function foldGroupsIntoCycle(groups: ProgramBadgeGroup[], period: number): ProgramBadgeGroup[] {
+  const meta = groups.map((group, index) => {
+    let phase = 0;
+    let maxDur = 0;
+    let hasPhase = false;
+    for (const range of group.ranges) {
+      const dur = range.endSeconds - range.startSeconds;
+      if (dur > maxDur) maxDur = dur;
+      if (!hasPhase) {
+        phase = ((range.startSeconds % period) + period) % period;
+        hasPhase = true;
+      }
+    }
+    return { index, phase, maxDur };
+  });
+
+  // Cap each program at the next program's start (in phase order, wrapping).
+  const order = [...meta].sort((a, b) => a.phase - b.phase);
+  const capByIndex = new Map<number, number>();
+  for (let i = 0; i < order.length; i++) {
+    const cur = order[i]!;
+    const next = order[(i + 1) % order.length]!;
+    const gap = i + 1 < order.length ? next.phase - cur.phase : next.phase + period - cur.phase;
+    capByIndex.set(cur.index, Math.max(0, gap));
+  }
+
+  return groups.map((group, index) => {
+    const m = meta[index]!;
+    const cap = capByIndex.get(index) ?? period;
+    const dur = Math.min(m.maxDur, cap);
+    const ranges: ProgramBadgeRange[] = [];
+    if (dur > 0) {
+      const start = m.phase;
+      const end = start + dur;
+      if (end <= period) {
+        ranges.push({ startSeconds: start, endSeconds: end });
+      } else {
+        ranges.push({ startSeconds: start, endSeconds: period });
+        ranges.push({ startSeconds: 0, endSeconds: end - period });
+      }
+    }
+    return { title: group.title, ranges };
+  });
+}
+
+/** Most common gap (rounded to whole seconds) between successive starts of the same program. */
+function estimateCyclePeriod(groups: ProgramBadgeGroup[]): number | null {
+  const counts = new Map<number, number>();
+  for (const group of groups) {
+    const ranges = group.ranges; // already merged & sorted by collectProgramBadgeGroups
+    for (let i = 1; i < ranges.length; i++) {
+      const diff = Math.round(ranges[i]!.startSeconds - ranges[i - 1]!.startSeconds);
+      if (diff > 1) counts.set(diff, (counts.get(diff) ?? 0) + 1);
+    }
+  }
+  let period: number | null = null;
+  let best = 0;
+  for (const [diff, count] of counts) {
+    if (count > best) {
+      best = count;
+      period = diff;
+    }
+  }
+  return period;
+}
+
+/**
+ * Folds a flat list of periodic time ranges into one [0,period) cycle by start
+ * phase, using the LONGEST instance seen at each phase (capped to the period and
+ * split at the boundary). Like the badge fold, this trades a few seconds of extra
+ * on-screen time in short cycles for collapsing thousands of per-frame `between()`
+ * terms into a handful. Used for the logo-hide expression, which repeats every
+ * cycle but would otherwise emit one term per program across the whole timeline.
+ */
+export function foldRangesByPeriod(ranges: ProgramBadgeRange[], period: number): ProgramBadgeRange[] {
+  if (period <= 1) return mergeRanges(ranges);
+  const tol = 2.0; // seconds
+  const buckets: Array<{ phase: number; maxDur: number }> = [];
+  for (const range of ranges) {
+    const dur = range.endSeconds - range.startSeconds;
+    if (dur <= 0) continue;
+    const phase = ((range.startSeconds % period) + period) % period;
+    const bucket = buckets.find(b => {
+      const raw = Math.abs(b.phase - phase);
+      return Math.min(raw, period - raw) <= tol;
+    });
+    if (bucket) {
+      if (dur > bucket.maxDur) bucket.maxDur = dur;
+    } else {
+      buckets.push({ phase, maxDur: dur });
+    }
+  }
+  const folded: ProgramBadgeRange[] = [];
+  for (const bucket of buckets) {
+    const start = bucket.phase;
+    const end = start + Math.min(bucket.maxDur, period);
+    if (end <= period) {
+      folded.push({ startSeconds: start, endSeconds: end });
+    } else {
+      folded.push({ startSeconds: start, endSeconds: period });
+      folded.push({ startSeconds: 0, endSeconds: end - period });
+    }
+  }
+  return mergeRanges(folded);
 }
 
 /**
